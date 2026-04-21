@@ -7,7 +7,15 @@ Sistema web de Planejamento e Controle da Produção para confecção, reconstru
 - **Objetivo**: Substituir a planilha legado por um sistema online robusto, auditável e escalável, preservando a lógica operacional conhecida pela equipe (3 modos de balanceamento, ficha de acompanhamento, cores/tamanhos) e eliminando as fragilidades técnicas (linha "0", VLOOKUP sem ID, dados desnormalizados, ausência de versionamento).
 - **Stack**: Hono + TypeScript + Cloudflare Pages (edge) + D1 (SQLite) + SPA em JS puro + TailwindCSS + Chart.js + DayJS + FontAwesome (via CDN).
 
-## URL Pública (sandbox)
+## URLs Públicas
+
+### 🚀 Produção (Cloudflare Pages)
+- **App**: https://pcp-confeccao.pages.dev
+- **Deployment atual**: https://3cb1ef13.pcp-confeccao.pages.dev
+- **Health**: https://pcp-confeccao.pages.dev/api/health
+- **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → pcp-confeccao
+
+### 🛠️ Sandbox (desenvolvimento)
 - App: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai
 - Health: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai/api/health
 
@@ -78,11 +86,29 @@ Relacionamentos:
 8. **Sistema → Auditoria**: consulta toda alteração feita no sistema (quem, quando, o quê).
 
 ## Deploy
-- **Plataforma**: Cloudflare Pages + D1
-- **Status**: ✅ Rodando em sandbox (dev) com PM2
-- **Banco local**: `.wrangler/state/v3/d1`
-- **Produção**: `npx wrangler pages deploy dist --project-name webapp` + `wrangler d1 migrations apply webapp-production`
+- **Plataforma**: Cloudflare Pages + D1 (edge global)
+- **Status Produção**: ✅ **Ativo** em https://pcp-confeccao.pages.dev
+- **Projeto Cloudflare**: `pcp-confeccao` (production branch: `main`)
+- **Banco D1 Produção**: `pcp-confeccao-prod` (UUID `cb4cd8ca-3f6e-43bd-ad3d-b90488916399`)
+- **Banco D1 Local**: `.wrangler/state/v3/d1`
+- **Status Sandbox (dev)**: ✅ Rodando com PM2 na porta 3000
 - **Última atualização**: 2026-04-21
+
+### Comandos de deploy usados
+```bash
+# 1. Criou banco D1 em produção
+npx wrangler d1 create pcp-confeccao-prod
+
+# 2. Aplicou migrations (schema + seed com 3 clientes, 7 cores, 21 tamanhos reais)
+npx wrangler d1 migrations apply pcp-confeccao-prod --remote
+
+# 3. Criou projeto Cloudflare Pages
+npx wrangler pages project create pcp-confeccao --production-branch main --compatibility-date 2026-04-13
+
+# 4. Build + Deploy
+npm run build
+npx wrangler pages deploy dist --project-name pcp-confeccao --branch main
+```
 
 ### Scripts disponíveis
 ```bash

@@ -9,8 +9,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "webapp-production",
-      "database_id": "local-webapp-production"
+      "database_name": "pcp-confeccao-prod",
+      "database_id": "cb4cd8ca-3f6e-43bd-ad3d-b90488916399"
     }
   ]
 }
