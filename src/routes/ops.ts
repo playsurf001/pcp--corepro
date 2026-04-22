@@ -1,7 +1,7 @@
 // OP (Ordem de Produção) - com cores e tamanhos normalizados
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -121,13 +121,13 @@ app.post('/ops', async (c) => {
   ).bind(
     b.num_op, b.dt_emissao, toInt(b.id_ref), toInt(b.id_cliente),
     toInt(b.qtde_pecas), b.dt_entrega, v.idSeqCab!,
-    b.status || 'Aberta', b.observacao || null, b.usuario || 'sistema'
+    b.status || 'Aberta', b.observacao || null, getUser(c)
   ).run();
   const idOP = toInt(ins.meta.last_row_id);
 
   // Grades
   await salvarGrades(c.env.DB, idOP, b);
-  await audit(c.env.DB, 'OP', 'INS', `OP=${b.num_op}`);
+  await audit(c, 'OP', 'INS', `OP=${b.num_op}`);
   return c.json(ok({ id_op: idOP, num_op: b.num_op }));
 });
 
@@ -144,7 +144,7 @@ app.put('/ops/:id', async (c) => {
   ).bind(
     b.num_op, b.dt_emissao, toInt(b.id_ref), toInt(b.id_cliente),
     toInt(b.qtde_pecas), b.dt_entrega, v.idSeqCab!,
-    b.status || 'Aberta', b.observacao || null, b.usuario || 'sistema', id
+    b.status || 'Aberta', b.observacao || null, getUser(c), id
   ).run();
 
   // Regrava grades
@@ -153,7 +153,7 @@ app.put('/ops/:id', async (c) => {
     c.env.DB.prepare(`DELETE FROM op_tamanhos WHERE id_op=?`).bind(id),
   ]);
   await salvarGrades(c.env.DB, id, b);
-  await audit(c.env.DB, 'OP', 'UPD', `OP=${b.num_op}`);
+  await audit(c, 'OP', 'UPD', `OP=${b.num_op}`);
   return c.json(ok({ id_op: id }));
 });
 
@@ -191,8 +191,8 @@ app.patch('/ops/:id/status', async (c) => {
   if (!valid.includes(b.status)) return fail('Status inválido.');
   await c.env.DB.prepare(
     `UPDATE op_cab SET status=?, alterado_por=?, dt_alteracao=datetime('now') WHERE id_op=?`
-  ).bind(b.status, b.usuario || 'sistema', id).run();
-  await audit(c.env.DB, 'OP', 'UPD', `OP_id=${id}`, 'status', '', b.status);
+  ).bind(b.status, getUser(c), id).run();
+  await audit(c, 'OP', 'UPD', `OP_id=${id}`, 'status', '', b.status);
   return c.json(ok({ id_op: id, status: b.status }));
 });
 
@@ -202,7 +202,7 @@ app.delete('/ops/:id', async (c) => {
   const ap = await c.env.DB.prepare(`SELECT COUNT(*) c FROM apontamento WHERE id_op=?`).bind(id).first<{ c: number }>();
   if (toInt(ap?.c, 0) > 0) return fail('OP tem apontamentos — não pode ser excluída. Use status=Cancelada.');
   await c.env.DB.prepare(`DELETE FROM op_cab WHERE id_op=?`).bind(id).run();
-  await audit(c.env.DB, 'OP', 'DEL', `OP_id=${id}`);
+  await audit(c, 'OP', 'DEL', `OP_id=${id}`);
   return c.json(ok({ id_op: id }));
 });
 

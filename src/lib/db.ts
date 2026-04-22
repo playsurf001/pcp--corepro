@@ -1,19 +1,41 @@
 // Camada de acesso ao D1 + helpers
+import type { Context } from 'hono';
 
 export type Bindings = {
   DB: D1Database;
 };
 
+/** Pega o login do usuário autenticado do contexto (ou 'sistema') */
+export function getUser(c: Context): string {
+  const u = c.get('user') as any;
+  return u?.login || 'sistema';
+}
+
+/**
+ * Registra auditoria.
+ * @param dbOrCtx — pode ser um D1Database (passa usuário como último arg)
+ *                  OU um Context do Hono (usuário é extraído de c.get('user'))
+ */
 export async function audit(
-  db: D1Database,
+  dbOrCtx: D1Database | Context,
   modulo: string,
   acao: string,
   chave: string,
   campo = '',
   vAnt: any = '',
   vNovo: any = '',
-  usuario = 'sistema',
+  usuario?: string,
 ) {
+  let db: D1Database;
+  let user = usuario || 'sistema';
+  if ((dbOrCtx as any).env?.DB) {
+    const c = dbOrCtx as Context;
+    db = c.env.DB as D1Database;
+    const u = c.get('user') as any;
+    if (!usuario && u?.login) user = u.login;
+  } else {
+    db = dbOrCtx as D1Database;
+  }
   try {
     await db
       .prepare(
@@ -21,7 +43,7 @@ export async function audit(
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
-        usuario,
+        user,
         modulo,
         acao,
         chave,

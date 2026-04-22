@@ -1,23 +1,22 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
-import { serveStatic } from 'hono/cloudflare-workers';
 import type { Bindings } from './lib/db';
+import { authMiddleware } from './lib/auth';
 
+import auth from './routes/auth';
 import cadastros from './routes/cadastros';
 import sequencias from './routes/sequencias';
 import ops from './routes/ops';
 import producao from './routes/producao';
+import importador from './routes/importador';
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
 
 app.use('*', logger());
 app.use('/api/*', cors());
 
-// Static assets — Cloudflare Pages serve automaticamente /static/*
-// app.use('/static/*', serveStatic({ root: './public' }));
-
-// API — healthcheck
+// API — healthcheck (público)
 app.get('/api/health', (c) =>
   c.json({
     ok: true,
@@ -26,10 +25,15 @@ app.get('/api/health', (c) =>
   })
 );
 
+// Middleware de autenticação (protege /api/* exceto rotas públicas)
+app.use('/api/*', authMiddleware);
+
+app.route('/api', auth);
 app.route('/api', cadastros);
 app.route('/api', sequencias);
 app.route('/api', ops);
 app.route('/api', producao);
+app.route('/api', importador);
 
 // SPA: uma única página, navegação por hash
 app.get('/', (c) => {

@@ -19,6 +19,22 @@ Sistema web de Planejamento e Controle da Produção para confecção, reconstru
 - App: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai
 - Health: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai/api/health
 
+## 🔐 Acesso ao Sistema
+1. Abra https://pcp-confeccao.pages.dev
+2. No primeiro uso, clique em **"aqui"** (link azul abaixo do botão Entrar) para inicializar o usuário admin.
+3. Faça login com `admin` / `admin` — o sistema vai exigir a troca imediata.
+4. Defina uma senha forte (mín. 6 caracteres).
+5. Após logado, **Administrador → Usuários** permite criar operadores, PCP, gerentes.
+
+### Perfis de acesso (RBAC)
+| Perfil | Rank | Pode |
+|---|---|---|
+| admin | 100 | Tudo (gestão de usuários) |
+| gerente | 80 | Tudo exceto gestão de usuários |
+| pcp | 60 | Sequências, OPs, Balanceamento, Ficha, Importador |
+| operador | 40 | Apontamento, consulta OPs/Ficha |
+| visualizador | 20 | Apenas leitura |
+
 ## Funcionalidades Implementadas (todas testadas)
 | Módulo | Rota SPA (hash) | API base |
 |---|---|---|
@@ -37,6 +53,9 @@ Sistema web de Planejamento e Controle da Produção para confecção, reconstru
 | Tamanhos | `#tamanhos` | `/api/tamanhos` |
 | Parâmetros globais | `#parametros` | `/api/parametros` |
 | Auditoria (append-only, todas as operações registradas) | `#auditoria` | `GET /api/auditoria` |
+| **Autenticação** (login, logout, bootstrap, troca de senha) | tela de login | `POST /api/auth/{login,logout,bootstrap,trocar-senha}`, `GET /api/auth/me` |
+| **Usuários** (admin - CRUD + RBAC) | `#usuarios` | `GET/POST/PUT/DELETE /api/usuarios` |
+| **Importador** de OPs do legado (Excel/CSV) | `#importador` | `POST /api/importar/ops`, `POST /api/importar/cadastros` |
 
 ### Regras de negócio ativas
 - **NumOP** único (validado server-side).
@@ -120,10 +139,37 @@ pm2 logs webapp --nostream       # ver logs
 npm run deploy:prod      # deploy para Cloudflare Pages
 ```
 
+## 📥 Importador de dados legados
+A tela **Sistema → Importador** aceita arquivos `.xlsx`, `.xls` e `.csv`. O parse do Excel acontece no browser (SheetJS via CDN) e o JSON normalizado é enviado à API.
+
+**Colunas aceitas na planilha** (flexível - aceita múltiplos nomes):
+- `num_op` (ou "Nº OP.", "num op", "numero_op")
+- `dt_emissao` (ou "Data Emissão", "data_emissao")
+- `dt_entrega` (ou "Previsão Entrega", "data_entrega")
+- `cod_ref` (ou "Ref.", "ref", "referencia")
+- `desc_ref` (opcional)
+- `cliente` (aceita código ou nome)
+- `qtde_pecas` (ou "Qtde Peças", "qtde")
+- `observacao` (ou "Observações", "obs")
+- **`cor_XXX`**: colunas com prefixo `cor_` viram grade de cores (ex: `cor_Branco`, `cor_Preto`)
+- **`tam_XXX`**: colunas com prefixo `tam_` viram grade de tamanhos (ex: `tam_P`, `tam_M`, `tam_G`)
+
+**Validações automáticas**:
+- `num_op` único (ignora se já existe — marca como `duplicada`)
+- Data em qualquer formato (serial Excel, dd/mm/aaaa, aaaa-mm-dd)
+- Soma de cores = soma de tamanhos = qtde_pecas
+- Referência precisa ter sequência ativa
+- Opção de **criar automaticamente** clientes/referências faltantes
+- Modo **dry-run** para validar sem gravar
+
+Um botão **"Baixar modelo CSV"** na tela gera um template com as colunas corretas.
+
 ## Roadmap / Não implementado
-- [ ] Autenticação (JWT com Cloudflare Access ou Auth0) — atualmente usuário é passado no payload.
-- [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser).
-- [ ] Gráficos interativos adicionais no dashboard (já tem Chart.js carregado).
-- [ ] Importador de planilha legado (sequências e OPs antigas) — UI para upload.
-- [ ] Mobile-first avançado para apontamento (PWA).
-- [ ] Integração com impressora térmica para ficha no chão de fábrica.
+- [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
+- [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
+- [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)
+- [ ] Gráficos interativos adicionais no dashboard (já tem Chart.js carregado)
+- [ ] Mobile-first avançado para apontamento (PWA)
+- [ ] Integração com impressora térmica para ficha no chão de fábrica
+- [ ] 2FA (TOTP) para usuários admin/gerente
+- [ ] Envio de ficha por email/WhatsApp para o cliente

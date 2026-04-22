@@ -1,7 +1,7 @@
 // Rotas de CRUD dos cadastros mestres
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -24,7 +24,7 @@ app.post('/clientes', async (c) => {
     )
       .bind(b.cod_cliente, b.nome_cliente, b.cnpj || null, b.observacao || null, b.ativo ?? 1)
       .run();
-    await audit(c.env.DB, 'CAD', 'INS', `Cliente=${b.cod_cliente}`);
+    await audit(c, 'CAD', 'INS', `Cliente=${b.cod_cliente}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código já cadastrado ou inválido: ' + e.message);
@@ -40,7 +40,7 @@ app.put('/clientes/:id', async (c) => {
   )
     .bind(b.cod_cliente, b.nome_cliente, b.cnpj || null, b.observacao || null, b.ativo ?? 1, id)
     .run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Cliente=${id}`);
+  await audit(c, 'CAD', 'UPD', `Cliente=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -48,7 +48,7 @@ app.delete('/clientes/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   // soft delete
   await c.env.DB.prepare(`UPDATE clientes SET ativo=0 WHERE id_cliente=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Cliente=${id}`);
+  await audit(c, 'CAD', 'DEL', `Cliente=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -70,7 +70,7 @@ app.post('/referencias', async (c) => {
     const r = await c.env.DB.prepare(
       `INSERT INTO referencias (cod_ref, desc_ref, familia, ativo) VALUES (?, ?, ?, ?)`
     ).bind(b.cod_ref, b.desc_ref, b.familia || null, b.ativo ?? 1).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Ref=${b.cod_ref}`);
+    await audit(c, 'CAD', 'INS', `Ref=${b.cod_ref}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -83,14 +83,14 @@ app.put('/referencias/:id', async (c) => {
   await c.env.DB.prepare(
     `UPDATE referencias SET cod_ref=?, desc_ref=?, familia=?, ativo=? WHERE id_ref=?`
   ).bind(b.cod_ref, b.desc_ref, b.familia || null, b.ativo ?? 1, id).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Ref=${id}`);
+  await audit(c, 'CAD', 'UPD', `Ref=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/referencias/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE referencias SET ativo=0 WHERE id_ref=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Ref=${id}`);
+  await audit(c, 'CAD', 'DEL', `Ref=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -111,7 +111,7 @@ app.post('/maquinas', async (c) => {
       b.cod_maquina, b.desc_maquina, b.tipo || null,
       toNum(b.eficiencia, 0.85), toNum(b.oper_por_maquina, 1), b.ativo ?? 1
     ).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Maq=${b.cod_maquina}`);
+    await audit(c, 'CAD', 'INS', `Maq=${b.cod_maquina}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -128,14 +128,14 @@ app.put('/maquinas/:id', async (c) => {
     b.cod_maquina, b.desc_maquina, b.tipo || null,
     toNum(b.eficiencia, 0.85), toNum(b.oper_por_maquina, 1), b.ativo ?? 1, id
   ).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Maq=${id}`);
+  await audit(c, 'CAD', 'UPD', `Maq=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/maquinas/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE maquinas SET ativo=0 WHERE id_maquina=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Maq=${id}`);
+  await audit(c, 'CAD', 'DEL', `Maq=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -152,7 +152,7 @@ app.post('/aparelhos', async (c) => {
     const r = await c.env.DB.prepare(
       `INSERT INTO aparelhos (cod_aparelho, desc_aparelho, ativo) VALUES (?, ?, ?)`
     ).bind(b.cod_aparelho, b.desc_aparelho, b.ativo ?? 1).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Apar=${b.cod_aparelho}`);
+    await audit(c, 'CAD', 'INS', `Apar=${b.cod_aparelho}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -165,14 +165,14 @@ app.put('/aparelhos/:id', async (c) => {
   await c.env.DB.prepare(
     `UPDATE aparelhos SET cod_aparelho=?, desc_aparelho=?, ativo=? WHERE id_aparelho=?`
   ).bind(b.cod_aparelho, b.desc_aparelho, b.ativo ?? 1, id).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Apar=${id}`);
+  await audit(c, 'CAD', 'UPD', `Apar=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/aparelhos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE aparelhos SET ativo=0 WHERE id_aparelho=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Apar=${id}`);
+  await audit(c, 'CAD', 'DEL', `Apar=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -202,7 +202,7 @@ app.post('/operacoes', async (c) => {
       b.id_maquina || null, b.id_aparelho || null,
       toNum(b.tempo_padrao, 0), b.ativo ?? 1
     ).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Op=${b.cod_op}`);
+    await audit(c, 'CAD', 'INS', `Op=${b.cod_op}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -220,14 +220,14 @@ app.put('/operacoes/:id', async (c) => {
     b.id_maquina || null, b.id_aparelho || null,
     toNum(b.tempo_padrao, 0), b.ativo ?? 1, id
   ).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Op=${id}`);
+  await audit(c, 'CAD', 'UPD', `Op=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/operacoes/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE operacoes SET ativo=0 WHERE id_op=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Op=${id}`);
+  await audit(c, 'CAD', 'DEL', `Op=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -244,7 +244,7 @@ app.post('/cores', async (c) => {
     const r = await c.env.DB.prepare(
       `INSERT INTO cores (cod_cor, nome_cor, ativo) VALUES (?, ?, ?)`
     ).bind(b.cod_cor, b.nome_cor, b.ativo ?? 1).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Cor=${b.cod_cor}`);
+    await audit(c, 'CAD', 'INS', `Cor=${b.cod_cor}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -257,14 +257,14 @@ app.put('/cores/:id', async (c) => {
   await c.env.DB.prepare(
     `UPDATE cores SET cod_cor=?, nome_cor=?, ativo=? WHERE id_cor=?`
   ).bind(b.cod_cor, b.nome_cor, b.ativo ?? 1, id).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Cor=${id}`);
+  await audit(c, 'CAD', 'UPD', `Cor=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/cores/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE cores SET ativo=0 WHERE id_cor=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Cor=${id}`);
+  await audit(c, 'CAD', 'DEL', `Cor=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -281,7 +281,7 @@ app.post('/tamanhos', async (c) => {
     const r = await c.env.DB.prepare(
       `INSERT INTO tamanhos (cod_tam, ordem, ativo) VALUES (?, ?, ?)`
     ).bind(b.cod_tam, toInt(b.ordem, 0), b.ativo ?? 1).run();
-    await audit(c.env.DB, 'CAD', 'INS', `Tam=${b.cod_tam}`);
+    await audit(c, 'CAD', 'INS', `Tam=${b.cod_tam}`);
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
     return fail('Código duplicado: ' + e.message);
@@ -294,14 +294,14 @@ app.put('/tamanhos/:id', async (c) => {
   await c.env.DB.prepare(
     `UPDATE tamanhos SET cod_tam=?, ordem=?, ativo=? WHERE id_tam=?`
   ).bind(b.cod_tam, toInt(b.ordem, 0), b.ativo ?? 1, id).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Tam=${id}`);
+  await audit(c, 'CAD', 'UPD', `Tam=${id}`);
   return c.json(ok({ id }));
 });
 
 app.delete('/tamanhos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE tamanhos SET ativo=0 WHERE id_tam=?`).bind(id).run();
-  await audit(c.env.DB, 'CAD', 'DEL', `Tam=${id}`);
+  await audit(c, 'CAD', 'DEL', `Tam=${id}`);
   return c.json(ok({ id }));
 });
 
@@ -317,7 +317,7 @@ app.put('/parametros/:chave', async (c) => {
   await c.env.DB.prepare(
     `UPDATE parametros SET valor=? WHERE chave=?`
   ).bind(String(b.valor ?? ''), chave).run();
-  await audit(c.env.DB, 'CAD', 'UPD', `Param=${chave}`, 'valor', '', b.valor);
+  await audit(c, 'CAD', 'UPD', `Param=${chave}`, 'valor', '', b.valor);
   return c.json(ok({ chave }));
 });
 

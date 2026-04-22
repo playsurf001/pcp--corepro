@@ -1,7 +1,7 @@
 // Sequência Operacional com versionamento (regra: 1 ativa por referência)
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -78,7 +78,7 @@ app.post('/sequencias', async (c) => {
   // Cria cabeçalho
   const cab = await c.env.DB.prepare(
     `INSERT INTO seq_cab (id_ref, versao, ativa, observacao, criado_por) VALUES (?, ?, 0, ?, ?)`
-  ).bind(idRef, versao, b.observacao || null, b.usuario || 'sistema').run();
+  ).bind(idRef, versao, b.observacao || null, getUser(c)).run();
   const idSeqCab = toInt(cab.meta.last_row_id);
 
   // Insere itens
@@ -101,7 +101,7 @@ app.post('/sequencias', async (c) => {
   }
   if (stmts.length) await c.env.DB.batch(stmts);
 
-  await audit(c.env.DB, 'SEQ', 'INS', `SeqCab=${idSeqCab}`, 'versao', '', versao);
+  await audit(c, 'SEQ', 'INS', `SeqCab=${idSeqCab}`, 'versao', '', versao);
   return c.json(ok({ id_seq_cab: idSeqCab, versao }));
 });
 
@@ -152,7 +152,7 @@ app.put('/sequencias/:id', async (c) => {
   }
   if (stmts.length) await c.env.DB.batch(stmts);
 
-  await audit(c.env.DB, 'SEQ', 'UPD', `SeqCab=${id}`);
+  await audit(c, 'SEQ', 'UPD', `SeqCab=${id}`);
   return c.json(ok({ id_seq_cab: id }));
 });
 
@@ -173,7 +173,7 @@ app.post('/sequencias/:id/ativar', async (c) => {
       `UPDATE seq_cab SET ativa=1, dt_ativacao=datetime('now') WHERE id_seq_cab=?`
     ).bind(id),
   ]);
-  await audit(c.env.DB, 'SEQ', 'ATIVAR', `SeqCab=${id}`);
+  await audit(c, 'SEQ', 'ATIVAR', `SeqCab=${id}`);
   return c.json(ok({ id_seq_cab: id }));
 });
 
@@ -181,7 +181,7 @@ app.post('/sequencias/:id/ativar', async (c) => {
 app.post('/sequencias/:id/inativar', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`UPDATE seq_cab SET ativa=0 WHERE id_seq_cab=?`).bind(id).run();
-  await audit(c.env.DB, 'SEQ', 'INATIVAR', `SeqCab=${id}`);
+  await audit(c, 'SEQ', 'INATIVAR', `SeqCab=${id}`);
   return c.json(ok({ id_seq_cab: id }));
 });
 
@@ -208,7 +208,7 @@ app.post('/sequencias/:id/duplicar', async (c) => {
      FROM seq_itens WHERE id_seq_cab=?`
   ).bind(novoId, id).run();
 
-  await audit(c.env.DB, 'SEQ', 'DUP', `SeqCab=${novoId}`, 'origem', '', id);
+  await audit(c, 'SEQ', 'DUP', `SeqCab=${novoId}`, 'origem', '', id);
   return c.json(ok({ id_seq_cab: novoId, versao: novaVersao }));
 });
 
@@ -224,7 +224,7 @@ app.delete('/sequencias/:id', async (c) => {
   if (toInt(uso?.c, 0) > 0) return fail('Existem OPs vinculadas a esta versão.');
 
   await c.env.DB.prepare(`DELETE FROM seq_cab WHERE id_seq_cab=?`).bind(id).run();
-  await audit(c.env.DB, 'SEQ', 'DEL', `SeqCab=${id}`);
+  await audit(c, 'SEQ', 'DEL', `SeqCab=${id}`);
   return c.json(ok({ id_seq_cab: id }));
 });
 

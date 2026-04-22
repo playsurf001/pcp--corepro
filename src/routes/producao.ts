@@ -1,7 +1,7 @@
 // Balanceamento, Ficha de Acompanhamento, Apontamento, Dashboard
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -103,7 +103,7 @@ app.get('/ops/:id/balanceamento', async (c) => {
   const totalMaq = linhas.reduce((s, l) => s + l.qtd_maquinas, 0);
   const totalOper = linhas.reduce((s, l) => s + l.qtd_operadores, 0);
 
-  await audit(c.env.DB, 'BALANC', 'GERAR', `OP=${op.num_op}`, 'modo', '', modo);
+  await audit(c, 'BALANC', 'GERAR', `OP=${op.num_op}`, 'modo', '', modo);
   return c.json(
     ok({
       op: {
@@ -197,7 +197,7 @@ app.get('/ops/:id/ficha', async (c) => {
      JOIN tamanhos t ON t.id_tam=ot.id_tam WHERE ot.id_op=? ORDER BY t.ordem`
   ).bind(id).all();
 
-  await audit(c.env.DB, 'FICHA', 'GERAR', `OP=${op.num_op}`);
+  await audit(c, 'FICHA', 'GERAR', `OP=${op.num_op}`);
   return c.json(
     ok({
       op: {
@@ -269,17 +269,17 @@ app.post('/apontamentos', async (c) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     b.data, idOp, toInt(it.id_seq_item),
-    String(b.operador), qB, qR, hrs, efic, b.usuario || 'sistema'
+    String(b.operador), qB, qR, hrs, efic, getUser(c)
   ).run();
 
-  await audit(c.env.DB, 'APONT', 'INS', `OP=${op.num_op}/Seq=${seq}`, 'qtd_boa', '', qB);
+  await audit(c, 'APONT', 'INS', `OP=${op.num_op}/Seq=${seq}`, 'qtd_boa', '', qB);
   return c.json(ok({ id_apont: r.meta.last_row_id, efic_real: efic }));
 });
 
 app.delete('/apontamentos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   await c.env.DB.prepare(`DELETE FROM apontamento WHERE id_apont=?`).bind(id).run();
-  await audit(c.env.DB, 'APONT', 'DEL', `Apont=${id}`);
+  await audit(c, 'APONT', 'DEL', `Apont=${id}`);
   return c.json(ok({ id_apont: id }));
 });
 

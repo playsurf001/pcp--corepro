@@ -38,13 +38,38 @@ function toast(msg, type = 'info') {
   setTimeout(() => t.remove(), 4000);
 }
 
-async function api(method, path, body) {
+/* ---------- Autenticação ---------- */
+const AUTH = {
+  getToken: () => localStorage.getItem('pcp_token') || '',
+  setToken: (t) => localStorage.setItem('pcp_token', t),
+  clearToken: () => localStorage.removeItem('pcp_token'),
+  getUser: () => { try { return JSON.parse(localStorage.getItem('pcp_user') || 'null'); } catch { return null; } },
+  setUser: (u) => localStorage.setItem('pcp_user', JSON.stringify(u)),
+  clearUser: () => localStorage.removeItem('pcp_user'),
+};
+
+async function api(method, path, body, opts = {}) {
   try {
-    const r = await axios({ method, url: API + path, data: body });
+    const headers = {};
+    const token = AUTH.getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await axios({ method, url: API + path, data: body, headers });
     return r.data;
   } catch (e) {
+    const status = e.response?.status;
+    const code = e.response?.data?.code;
     const msg = e.response?.data?.error || e.message || 'Erro';
-    toast(msg, 'error');
+    // Token expirado ou inválido
+    if (status === 401 && code === 'AUTH_REQUIRED' && !opts.silent) {
+      AUTH.clearToken(); AUTH.clearUser();
+      renderLogin('Sessão expirada. Faça login novamente.');
+      throw e;
+    }
+    if (status === 403 && code === 'PASSWORD_CHANGE_REQUIRED' && !opts.silent) {
+      renderTrocarSenhaObrigatoria();
+      throw e;
+    }
+    if (!opts.silent) toast(msg, 'error');
     throw e;
   }
 }
@@ -53,6 +78,7 @@ async function api(method, path, body) {
 const state = {
   route: 'dashboard',
   cache: {},
+  user: null,
 };
 
 /* ---------- Layout / Navegação ---------- */
@@ -70,13 +96,23 @@ const NAV = [
   { id: 'aparelhos', label: 'Aparelhos', icon: 'fa-tools', group: 'Cadastros' },
   { id: 'cores', label: 'Cores', icon: 'fa-palette', group: 'Cadastros' },
   { id: 'tamanhos', label: 'Tamanhos', icon: 'fa-ruler', group: 'Cadastros' },
+  { id: 'importador', label: 'Importador', icon: 'fa-file-import', group: 'Sistema', perfilMin: 'pcp' },
+  { id: 'usuarios', label: 'Usuários', icon: 'fa-user-shield', group: 'Sistema', perfilMin: 'admin' },
   { id: 'parametros', label: 'Parâmetros', icon: 'fa-sliders-h', group: 'Sistema' },
   { id: 'auditoria', label: 'Auditoria', icon: 'fa-history', group: 'Sistema' },
 ];
 
+const RANK = { admin: 100, gerente: 80, pcp: 60, operador: 40, visualizador: 20 };
+function podeAcessar(item) {
+  if (!item.perfilMin) return true;
+  const u = state.user;
+  return u && (RANK[u.perfil] || 0) >= (RANK[item.perfilMin] || 0);
+}
+
 function renderLayout() {
   const groups = {};
-  NAV.forEach((n) => { (groups[n.group] ||= []).push(n); });
+  NAV.filter(podeAcessar).forEach((n) => { (groups[n.group] ||= []).push(n); });
+  const u = state.user || { login: '?', nome: '?', perfil: '?' };
 
   $('#app').innerHTML = `
   <div class="flex h-screen">
@@ -101,10 +137,20 @@ function renderLayout() {
     <div class="flex-1 flex flex-col overflow-hidden">
       <header id="topbar" class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
         <h2 id="page-title" class="text-lg font-semibold text-slate-800">Dashboard</h2>
-        <div class="text-sm text-slate-500">
+        <div class="text-sm text-slate-500 flex items-center gap-3">
           <span id="today">${dayjs().format('DD/MM/YYYY')}</span>
-          <span class="mx-2">|</span>
-          <span><i class="fas fa-user-circle"></i> Operador</span>
+          <span class="text-slate-300">|</span>
+          <div class="relative">
+            <button id="user-btn" class="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-slate-100">
+              <i class="fas fa-user-circle text-brand text-lg"></i>
+              <span class="text-slate-700"><b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span></span>
+              <i class="fas fa-caret-down text-xs"></i>
+            </button>
+            <div id="user-menu" class="hidden absolute right-0 mt-1 w-52 bg-white border rounded shadow-lg z-50">
+              <button id="btn-trocar-senha" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50"><i class="fas fa-key mr-2"></i>Trocar senha</button>
+              <button id="btn-logout" class="w-full text-left px-4 py-2 text-sm hover:bg-red-50 text-red-600"><i class="fas fa-sign-out-alt mr-2"></i>Sair</button>
+            </div>
+          </div>
         </div>
       </header>
       <main id="main-content" class="flex-1 overflow-auto p-6 bg-slate-50"></main>
@@ -115,6 +161,19 @@ function renderLayout() {
     ev.preventDefault();
     navigate(a.dataset.route);
   }));
+
+  const btn = $('#user-btn'), menu = $('#user-menu');
+  btn.onclick = () => menu.classList.toggle('hidden');
+  document.addEventListener('click', (e) => {
+    if (!btn.contains(e.target) && !menu.contains(e.target)) menu.classList.add('hidden');
+  });
+  $('#btn-logout').onclick = async () => {
+    try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
+    AUTH.clearToken(); AUTH.clearUser();
+    location.hash = '';
+    renderLogin('Sessão encerrada.');
+  };
+  $('#btn-trocar-senha').onclick = () => openTrocarSenha(false);
 }
 
 function navigate(route) {
@@ -1273,14 +1332,414 @@ ROUTES.auditoria = async (main) => {
 };
 
 /* ============================================================
+ * IMPORTADOR (Excel → JSON → API)
+ * ============================================================ */
+ROUTES.importador = async (main) => {
+  main.innerHTML = `
+  <div class="space-y-5">
+    <div class="card p-5">
+      <h3 class="text-lg font-semibold text-slate-800 mb-2"><i class="fas fa-file-import mr-2 text-brand"></i>Importador de OPs do legado</h3>
+      <p class="text-sm text-slate-600 mb-4">
+        Envie uma planilha Excel (.xlsx/.xls) com as OPs antigas. Cabeçalho mínimo: 
+        <code class="bg-slate-100 px-1">num_op, dt_emissao, dt_entrega, cod_ref, cliente, qtde_pecas</code>. 
+        Colunas com prefixo <code>cor_</code> (ex.: <code>cor_Azul</code>) viram grade de cores;
+        colunas com prefixo <code>tam_</code> viram grade de tamanhos. Observação opcional.
+      </p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label>Arquivo Excel</label>
+          <input id="imp-file" type="file" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div>
+          <label>Aba (opcional)</label>
+          <input id="imp-sheet" type="text" placeholder="Deixe vazio p/ usar a 1ª" />
+        </div>
+        <div class="flex flex-col">
+          <label>Opções</label>
+          <label class="text-sm"><input id="imp-dry" type="checkbox" checked /> Apenas validar (dry-run)</label>
+          <label class="text-sm"><input id="imp-create" type="checkbox" /> Criar clientes/referências faltantes</label>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 mt-4">
+        <button id="btn-preview" class="btn btn-secondary"><i class="fas fa-eye mr-1"></i> Pré-visualizar linhas</button>
+        <button id="btn-importar" class="btn btn-primary"><i class="fas fa-upload mr-1"></i> Importar</button>
+        <button id="btn-baixar-modelo" class="btn btn-secondary ml-auto"><i class="fas fa-download mr-1"></i> Baixar modelo CSV</button>
+      </div>
+    </div>
+
+    <div id="imp-preview" class="card p-4 hidden">
+      <h4 class="font-semibold mb-2">Pré-visualização (primeiras 20 linhas)</h4>
+      <div id="imp-preview-body" class="overflow-auto text-xs"></div>
+    </div>
+
+    <div id="imp-resultado" class="card p-4 hidden">
+      <h4 class="font-semibold mb-2">Resultado da importação</h4>
+      <div id="imp-resultado-body"></div>
+    </div>
+  </div>`;
+
+  // Lazy-load SheetJS (CDN)
+  async function loadSheetJS() {
+    if (window.XLSX) return window.XLSX;
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+    return window.XLSX;
+  }
+
+  async function parseArquivo() {
+    const f = $('#imp-file').files[0];
+    if (!f) { toast('Selecione um arquivo.', 'warning'); return null; }
+    const XLSX = await loadSheetJS();
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    const sheetName = ($('#imp-sheet').value.trim()) || wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    if (!ws) { toast(`Aba '${sheetName}' não encontrada.`, 'error'); return null; }
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+    // Converte cada linha em { num_op, dt_emissao, ..., cores:{...}, tamanhos:{...} }
+    const saida = rows.map((r) => {
+      const linha = {
+        num_op: r.num_op ?? r['Nº OP.'] ?? r['num op'] ?? r['numero_op'],
+        dt_emissao: r.dt_emissao ?? r['Data Emissão'] ?? r['data_emissao'] ?? r['Data\nEmissão'],
+        dt_entrega: r.dt_entrega ?? r['Previsão Entrega'] ?? r['data_entrega'] ?? r['Previsão\nEntrega'],
+        cod_ref: r.cod_ref ?? r['Ref.'] ?? r['ref'] ?? r['referencia'],
+        desc_ref: r.desc_ref ?? r['Descrição da Ref.'] ?? r['Descrição\nda Ref.'],
+        cliente: r.cliente ?? r['Cliente'],
+        qtde_pecas: r.qtde_pecas ?? r['Qtde Peças'] ?? r['Qtde\nPeças'] ?? r['qtde'],
+        observacao: r.observacao ?? r['Observações'] ?? r['obs'],
+        cores: {},
+        tamanhos: {},
+      };
+      // Colunas cor_* e tam_*
+      for (const [k, v] of Object.entries(r)) {
+        if (v === '' || v == null) continue;
+        const km = k.toLowerCase().trim();
+        if (km.startsWith('cor_') || km.startsWith('cor ')) {
+          const nome = k.substring(4).trim();
+          if (nome) linha.cores[nome] = Number(v) || 0;
+        } else if (km.startsWith('tam_') || km.startsWith('tam ')) {
+          const nome = k.substring(4).trim();
+          if (nome) linha.tamanhos[nome] = Number(v) || 0;
+        }
+      }
+      return linha;
+    }).filter((l) => l.num_op);
+    return saida;
+  }
+
+  $('#btn-preview').onclick = async () => {
+    const linhas = await parseArquivo();
+    if (!linhas) return;
+    if (!linhas.length) { toast('Nenhuma linha válida encontrada.', 'warning'); return; }
+    $('#imp-preview').classList.remove('hidden');
+    $('#imp-preview-body').innerHTML = `
+      <p class="mb-2 text-slate-600">${linhas.length} linhas lidas.</p>
+      <table class="w-full border"><thead class="bg-slate-100"><tr>
+        <th class="p-1 border">#</th><th class="p-1 border">num_op</th><th class="p-1 border">dt_emissao</th>
+        <th class="p-1 border">dt_entrega</th><th class="p-1 border">cod_ref</th><th class="p-1 border">cliente</th>
+        <th class="p-1 border">qtde</th><th class="p-1 border">cores</th><th class="p-1 border">tamanhos</th>
+      </tr></thead><tbody>
+      ${linhas.slice(0, 20).map((l, i) => `
+        <tr><td class="p-1 border">${i+1}</td>
+          <td class="p-1 border">${l.num_op || ''}</td>
+          <td class="p-1 border">${l.dt_emissao || ''}</td>
+          <td class="p-1 border">${l.dt_entrega || ''}</td>
+          <td class="p-1 border">${l.cod_ref || ''}</td>
+          <td class="p-1 border">${l.cliente || ''}</td>
+          <td class="p-1 border text-right">${l.qtde_pecas || ''}</td>
+          <td class="p-1 border">${Object.entries(l.cores).map(([k,v])=>k+':'+v).join(', ')}</td>
+          <td class="p-1 border">${Object.entries(l.tamanhos).map(([k,v])=>k+':'+v).join(', ')}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+  };
+
+  $('#btn-importar').onclick = async () => {
+    const linhas = await parseArquivo();
+    if (!linhas || !linhas.length) return;
+    const dry = $('#imp-dry').checked;
+    const criar = $('#imp-create').checked;
+    if (!dry && !confirm(`Confirmar importação de ${linhas.length} OPs?`)) return;
+    const r = await api('post', '/importar/ops', { linhas, dry_run: dry, criar_faltantes: criar });
+    const d = r.data;
+    $('#imp-resultado').classList.remove('hidden');
+    $('#imp-resultado-body').innerHTML = `
+      <div class="grid grid-cols-4 gap-3 mb-3">
+        <div class="bg-slate-100 rounded p-3"><div class="text-xs text-slate-500">Total</div><div class="text-xl font-bold">${d.total}</div></div>
+        <div class="bg-emerald-50 rounded p-3"><div class="text-xs text-emerald-600">Importadas${d.dry_run?' (válidas)':''}</div><div class="text-xl font-bold text-emerald-700">${d.importadas}</div></div>
+        <div class="bg-amber-50 rounded p-3"><div class="text-xs text-amber-600">Ignoradas (duplicadas)</div><div class="text-xl font-bold text-amber-700">${d.ignoradas}</div></div>
+        <div class="bg-red-50 rounded p-3"><div class="text-xs text-red-600">Erros</div><div class="text-xl font-bold text-red-700">${d.erros}</div></div>
+      </div>
+      <div class="overflow-auto max-h-96">
+        <table class="w-full text-xs border">
+          <thead class="bg-slate-100"><tr><th class="p-1 border">#</th><th class="p-1 border">num_op</th><th class="p-1 border">Status</th><th class="p-1 border">Detalhe</th></tr></thead>
+          <tbody>${d.relatorio.map(r => `<tr>
+            <td class="p-1 border">${r.linha}</td>
+            <td class="p-1 border font-mono">${r.num_op}</td>
+            <td class="p-1 border ${r.status==='ok'?'text-emerald-600':r.status==='duplicada'?'text-amber-600':'text-red-600'}">${r.status}</td>
+            <td class="p-1 border">${r.detalhe||''}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+      ${d.dry_run ? '<p class="mt-3 text-sm text-amber-700"><i class="fas fa-info-circle"></i> Esse foi apenas um teste. Desmarque "dry-run" para efetivar.</p>' : '<p class="mt-3 text-sm text-emerald-700"><i class="fas fa-check-circle"></i> Importação concluída.</p>'}`;
+    toast(`${d.dry_run?'Validação':'Importação'}: ${d.importadas} ok, ${d.ignoradas} duplicadas, ${d.erros} erros`, d.erros?'warning':'success');
+  };
+
+  $('#btn-baixar-modelo').onclick = () => {
+    const csv = [
+      'num_op;dt_emissao;dt_entrega;cod_ref;desc_ref;cliente;qtde_pecas;observacao;cor_Branco;cor_Preto;tam_P;tam_M;tam_G',
+      '1001;2024-01-15;2024-02-10;REF001;Camiseta Básica;Maria & Maria;100;Observação livre;50;50;30;40;30',
+      '1002;2024-01-20;2024-02-15;REF002;Blusa Manga Longa;Pepe;80;;40;40;20;30;30',
+    ].join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'modelo_importacao_ops.csv';
+    a.click();
+  };
+};
+
+/* ============================================================
+ * USUÁRIOS (admin)
+ * ============================================================ */
+ROUTES.usuarios = async (main) => {
+  const d = (await api('get', '/usuarios')).data;
+  main.innerHTML = `
+  <div class="space-y-4">
+    <div class="flex justify-between items-center">
+      <h3 class="text-lg font-semibold text-slate-800">Usuários do Sistema</h3>
+      <button id="btn-novo-user" class="btn btn-primary"><i class="fas fa-plus mr-1"></i> Novo usuário</button>
+    </div>
+    <div class="card overflow-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="p-2 text-left">Login</th><th class="p-2 text-left">Nome</th>
+          <th class="p-2 text-left">Perfil</th><th class="p-2 text-left">Último login</th>
+          <th class="p-2 text-center">Ativo</th><th class="p-2 text-center">Trocar senha</th>
+          <th class="p-2 text-right">Ações</th>
+        </tr></thead>
+        <tbody>${d.map(u => `
+          <tr class="border-t">
+            <td class="p-2 font-mono">${u.login}</td>
+            <td class="p-2">${u.nome}</td>
+            <td class="p-2"><span class="badge bg-slate-200 text-slate-700">${u.perfil}</span></td>
+            <td class="p-2 text-xs">${u.ultimo_login ? fmt.datetime(u.ultimo_login) : '—'}</td>
+            <td class="p-2 text-center">${u.ativo ? '<i class="fas fa-check text-emerald-600"></i>' : '<i class="fas fa-times text-red-600"></i>'}</td>
+            <td class="p-2 text-center">${u.trocar_senha ? '<i class="fas fa-exclamation-triangle text-amber-600"></i>' : ''}</td>
+            <td class="p-2 text-right">
+              <button class="text-brand" data-edit="${u.id_usuario}" data-row='${JSON.stringify(u)}'><i class="fas fa-edit"></i></button>
+              <button class="text-red-600 ml-2" data-del="${u.id_usuario}"><i class="fas fa-user-slash"></i></button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+  $('#btn-novo-user').onclick = () => openUsuarioForm(null);
+  $$('[data-edit]').forEach(b => b.onclick = () => openUsuarioForm(JSON.parse(b.dataset.row)));
+  $$('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm('Desativar usuário?')) return;
+    await api('delete', '/usuarios/' + b.dataset.del);
+    toast('Usuário desativado.', 'success');
+    ROUTES.usuarios(main);
+  });
+};
+
+function openUsuarioForm(row) {
+  const isEdit = !!row;
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-md' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3">${isEdit ? 'Editar' : 'Novo'} usuário</h3>
+    <div class="space-y-3">
+      <div><label>Login *</label><input id="u-login" type="text" value="${row?.login || ''}" ${isEdit ? 'disabled' : ''} /></div>
+      <div><label>Nome *</label><input id="u-nome" type="text" value="${row?.nome || ''}" /></div>
+      <div><label>Perfil</label>
+        <select id="u-perfil">
+          ${['admin','gerente','pcp','operador','visualizador'].map(p => `<option value="${p}" ${row?.perfil===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div><label>${isEdit ? 'Nova senha (deixe em branco p/ manter)' : 'Senha *'}</label><input id="u-senha" type="password" placeholder="mín. 6 caracteres" /></div>
+      <label class="flex items-center gap-2 text-sm"><input id="u-ativo" type="checkbox" ${row?.ativo !== 0 ? 'checked' : ''}/> Ativo</label>
+      <label class="flex items-center gap-2 text-sm"><input id="u-trocar" type="checkbox" ${row?.trocar_senha ? 'checked' : ''}/> Forçar troca de senha no próximo login</label>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="u-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="u-save" class="btn btn-primary">Salvar</button>
+    </div>`;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#u-cancel').onclick = () => m.remove();
+  $('#u-save').onclick = async () => {
+    const body = {
+      login: $('#u-login').value.trim(),
+      nome: $('#u-nome').value.trim(),
+      perfil: $('#u-perfil').value,
+      senha: $('#u-senha').value,
+      ativo: $('#u-ativo').checked ? 1 : 0,
+      trocar_senha: $('#u-trocar').checked ? 1 : 0,
+    };
+    try {
+      if (isEdit) await api('put', '/usuarios/' + row.id_usuario, body);
+      else await api('post', '/usuarios', body);
+      toast('Usuário salvo.', 'success');
+      m.remove();
+      ROUTES.usuarios($('#main-content'));
+    } catch {}
+  };
+}
+
+/* ============================================================
+ * TELA DE LOGIN
+ * ============================================================ */
+function renderLogin(msg) {
+  $('#app').innerHTML = `
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-teal-700 to-teal-900 p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-8">
+      <div class="text-center mb-6">
+        <div class="inline-block bg-brand rounded-full p-4 text-white mb-3">
+          <i class="fas fa-industry text-3xl"></i>
+        </div>
+        <h1 class="text-2xl font-bold text-slate-800">PCP Confecção v2.0</h1>
+        <p class="text-slate-500 text-sm mt-1">Sistema de Balanceamento de Produção</p>
+      </div>
+      ${msg ? `<div class="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded text-sm"><i class="fas fa-info-circle"></i> ${msg}</div>` : ''}
+      <form id="login-form" class="space-y-4">
+        <div>
+          <label>Login</label>
+          <input id="login-login" type="text" autocomplete="username" required autofocus />
+        </div>
+        <div>
+          <label>Senha</label>
+          <input id="login-senha" type="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" id="login-btn" class="btn btn-primary w-full">
+          <i class="fas fa-sign-in-alt mr-1"></i> Entrar
+        </button>
+      </form>
+      <div id="login-msg" class="text-center text-sm text-red-600 mt-3"></div>
+      <div class="mt-6 pt-4 border-t text-xs text-slate-400 text-center">
+        <p>Primeiro acesso? Clique <a id="login-boot" href="#" class="text-brand hover:underline">aqui</a> para inicializar o usuário admin.</p>
+      </div>
+    </div>
+  </div>`;
+  $('#login-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('#login-btn');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Entrando...';
+    try {
+      const r = await axios.post(API + '/auth/login', {
+        login: $('#login-login').value.trim(),
+        senha: $('#login-senha').value,
+      });
+      AUTH.setToken(r.data.data.token);
+      AUTH.setUser(r.data.data.usuario);
+      state.user = r.data.data.usuario;
+      if (state.user.trocar_senha) {
+        renderTrocarSenhaObrigatoria();
+      } else {
+        bootApp();
+      }
+    } catch (e) {
+      const m = e.response?.data?.error || 'Erro ao fazer login';
+      $('#login-msg').textContent = m;
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt mr-1"></i> Entrar';
+    }
+  };
+  $('#login-boot').onclick = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await axios.post(API + '/auth/bootstrap');
+      $('#login-msg').innerHTML = '<span class="text-emerald-600">' + r.data.data.message + '</span>';
+      $('#login-login').value = 'admin';
+      $('#login-senha').value = 'admin';
+      $('#login-senha').focus();
+    } catch (err) {
+      $('#login-msg').textContent = err.response?.data?.error || 'Erro no bootstrap';
+    }
+  };
+}
+
+/* ============================================================
+ * TROCA DE SENHA
+ * ============================================================ */
+function openTrocarSenha(obrigatorio) {
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-md' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3">
+      <i class="fas fa-key mr-2 text-brand"></i>${obrigatorio ? 'Troca de senha obrigatória' : 'Trocar senha'}
+    </h3>
+    ${obrigatorio ? '<p class="mb-3 text-sm text-amber-700 bg-amber-50 p-2 rounded">Você precisa definir uma nova senha antes de continuar.</p>' : ''}
+    <div class="space-y-3">
+      <div><label>Senha atual</label><input id="pw-atual" type="password" autofocus /></div>
+      <div><label>Nova senha (mín. 6 caracteres)</label><input id="pw-nova" type="password" /></div>
+      <div><label>Confirmar nova senha</label><input id="pw-conf" type="password" /></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      ${obrigatorio ? '' : '<button id="pw-cancel" class="btn btn-secondary">Cancelar</button>'}
+      <button id="pw-save" class="btn btn-primary">Salvar</button>
+    </div>`;
+  m.appendChild(card); document.body.appendChild(m);
+  if (!obrigatorio) $('#pw-cancel').onclick = () => m.remove();
+  $('#pw-save').onclick = async () => {
+    const sa = $('#pw-atual').value, sn = $('#pw-nova').value, sc = $('#pw-conf').value;
+    if (!sa || !sn || !sc) { toast('Preencha todos os campos', 'warning'); return; }
+    if (sn !== sc) { toast('Confirmação não confere', 'error'); return; }
+    if (sn.length < 6) { toast('Senha deve ter pelo menos 6 caracteres', 'error'); return; }
+    try {
+      await api('post', '/auth/trocar-senha', { senha_atual: sa, senha_nova: sn });
+      toast('Senha alterada com sucesso!', 'success');
+      m.remove();
+      // Atualiza user (trocar_senha = false)
+      const u = AUTH.getUser(); if (u) { u.trocar_senha = false; AUTH.setUser(u); state.user = u; }
+      if (obrigatorio) bootApp();
+    } catch {}
+  };
+}
+
+function renderTrocarSenhaObrigatoria() {
+  $('#app').innerHTML = `
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-teal-700 to-teal-900 p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-8 text-center">
+      <i class="fas fa-shield-alt text-5xl text-brand mb-3"></i>
+      <h2 class="text-xl font-bold mb-2">Primeiro acesso</h2>
+      <p class="text-slate-600 mb-4">Por segurança, defina uma nova senha antes de usar o sistema.</p>
+    </div>
+  </div>`;
+  setTimeout(() => openTrocarSenha(true), 300);
+}
+
+/* ============================================================
  * BOOTSTRAP
  * ============================================================ */
-(function init() {
+function bootApp() {
   renderLayout();
   const initial = (location.hash || '#dashboard').slice(1);
   navigate(initial || 'dashboard');
+}
+
+(async function init() {
   window.addEventListener('hashchange', () => {
+    if (!state.user) return;
     const r = location.hash.slice(1) || 'dashboard';
     if (r !== state.route) navigate(r);
   });
+
+  // Tem token? Valida com /auth/me
+  const token = AUTH.getToken();
+  if (!token) { renderLogin(); return; }
+  try {
+    const r = await axios.get(API + '/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+    const u = r.data?.data;
+    if (!u) { AUTH.clearToken(); AUTH.clearUser(); renderLogin(); return; }
+    state.user = u; AUTH.setUser(u);
+    if (u.trocar_senha) { renderTrocarSenhaObrigatoria(); return; }
+    bootApp();
+  } catch {
+    AUTH.clearToken(); AUTH.clearUser();
+    renderLogin('Não foi possível validar a sessão. Faça login.');
+  }
 })();
