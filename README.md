@@ -11,9 +11,13 @@ Sistema web de Planejamento e Controle da Produção para confecção, reconstru
 
 ### 🚀 Produção (Cloudflare Pages)
 - **App**: https://pcp-confeccao.pages.dev
-- **Deployment atual**: https://3cb1ef13.pcp-confeccao.pages.dev
+- **Deployment atual**: https://88205839.pcp-confeccao.pages.dev
 - **Health**: https://pcp-confeccao.pages.dev/api/health
 - **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → pcp-confeccao
+
+### 📦 Código fonte (GitHub)
+- **Repositório**: https://github.com/playsurf001/pcp--corepro
+- **Branch principal**: `main`
 
 ### 🛠️ Sandbox (desenvolvimento)
 - App: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai
@@ -111,7 +115,8 @@ Relacionamentos:
 - **Banco D1 Produção**: `pcp-confeccao-prod` (UUID `cb4cd8ca-3f6e-43bd-ad3d-b90488916399`)
 - **Banco D1 Local**: `.wrangler/state/v3/d1`
 - **Status Sandbox (dev)**: ✅ Rodando com PM2 na porta 3000
-- **Última atualização**: 2026-04-21
+- **GitHub**: https://github.com/playsurf001/pcp--corepro (sincronizado)
+- **Última atualização**: 2026-04-22
 
 ### Comandos de deploy usados
 ```bash
