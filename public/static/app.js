@@ -97,6 +97,13 @@ const NAV = [
   { id: 'aparelhos', label: 'Aparelhos', icon: 'fa-tools', group: 'Cadastros' },
   { id: 'cores', label: 'Cores', icon: 'fa-palette', group: 'Cadastros' },
   { id: 'tamanhos', label: 'Tamanhos', icon: 'fa-ruler', group: 'Cadastros' },
+  { id: 'terc_dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', group: 'Terceirização' },
+  { id: 'terc_resumo', label: 'Resumo', icon: 'fa-list-check', group: 'Terceirização' },
+  { id: 'terc_remessas', label: 'Remessas', icon: 'fa-truck-fast', group: 'Terceirização' },
+  { id: 'terc_retornos', label: 'Retornos', icon: 'fa-truck-arrow-right', group: 'Terceirização' },
+  { id: 'terc_terceirizados', label: 'Terceirizados', icon: 'fa-handshake', group: 'Terceirização' },
+  { id: 'terc_precos', label: 'Preços / Coleção', icon: 'fa-money-bill-wave', group: 'Terceirização' },
+  { id: 'terc_importador', label: 'Importador Planilha', icon: 'fa-file-excel', group: 'Terceirização', perfilMin: 'pcp' },
   { id: 'importador', label: 'Importador', icon: 'fa-file-import', group: 'Sistema', perfilMin: 'pcp' },
   { id: 'usuarios', label: 'Usuários', icon: 'fa-user-shield', group: 'Sistema', perfilMin: 'admin' },
   { id: 'parametros', label: 'Parâmetros', icon: 'fa-sliders-h', group: 'Sistema' },
@@ -2343,6 +2350,1032 @@ function openUsuarioForm(row) {
     } catch {}
   };
 }
+
+/* ============================================================
+ * MÓDULO TERCEIRIZAÇÃO (Controle completo)
+ * ============================================================ */
+
+/* ---------- Cache de cadastros auxiliares ---------- */
+const TERC = {
+  setores: [], servicos: [], colecoes: [], terceirizados: [],
+  async load(force = false) {
+    if (!force && this.terceirizados.length) return;
+    const [rs1, rs2, rs3, rs4] = await Promise.all([
+      api('get', '/terc/setores'),
+      api('get', '/terc/servicos'),
+      api('get', '/terc/colecoes'),
+      api('get', '/terc/terceirizados'),
+    ]);
+    this.setores = rs1.data || [];
+    this.servicos = rs2.data || [];
+    this.colecoes = rs3.data || [];
+    this.terceirizados = rs4.data || [];
+  },
+  optSetores(sel) { return ['<option value="">—</option>'].concat(this.setores.map(s => `<option value="${s.id_setor}" ${sel == s.id_setor ? 'selected' : ''}>${s.nome_setor}</option>`)).join(''); },
+  optServicos(sel) { return ['<option value="">—</option>'].concat(this.servicos.map(s => `<option value="${s.id_servico}" ${sel == s.id_servico ? 'selected' : ''}>${s.desc_servico}</option>`)).join(''); },
+  optColecoes(sel) { return ['<option value="">Todas</option>'].concat(this.colecoes.map(s => `<option value="${s.id_colecao}" ${sel == s.id_colecao ? 'selected' : ''}>${s.nome_colecao}</option>`)).join(''); },
+  optTerc(sel, onlyAtivos = false) {
+    const list = onlyAtivos ? this.terceirizados.filter(t => t.ativo) : this.terceirizados;
+    return ['<option value="">—</option>'].concat(list.map(t => `<option value="${t.id_terc}" ${sel == t.id_terc ? 'selected' : ''}>${t.nome_terc}${t.nome_setor ? ' · ' + t.nome_setor : ''}</option>`)).join('');
+  },
+  fmtBRL(v) { return 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+  statusBadge(s, atrasada = 0) {
+    if (atrasada && !['Concluida', 'Cancelada'].includes(s)) return '<span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700"><i class="fas fa-triangle-exclamation mr-1"></i>Atrasada</span>';
+    const map = {
+      'Aberta': 'bg-blue-100 text-blue-700',
+      'EmProducao': 'bg-indigo-100 text-indigo-700',
+      'Parcial': 'bg-amber-100 text-amber-700',
+      'Concluida': 'bg-emerald-100 text-emerald-700',
+      'Atrasada': 'bg-red-100 text-red-700',
+      'Cancelada': 'bg-slate-200 text-slate-600',
+    };
+    return `<span class="px-2 py-0.5 rounded text-xs ${map[s] || 'bg-slate-100 text-slate-700'}">${s}</span>`;
+  },
+};
+
+/* ---------- DASHBOARD de Terceirização ---------- */
+ROUTES.terc_dashboard = async (main) => {
+  await TERC.load();
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Atualizar</button>
+        <div class="flex-1"></div>
+        <a href="#terc_remessas" class="btn btn-secondary"><i class="fas fa-truck-fast mr-1"></i>Ver remessas</a>
+      </div>
+    </div>
+    <div id="kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4"></div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div class="card p-4"><h3 class="font-semibold mb-2"><i class="fas fa-chart-line mr-1 text-brand"></i>Produção diária (retornos)</h3><canvas id="cht-prod" height="140"></canvas></div>
+      <div class="card p-4"><h3 class="font-semibold mb-2"><i class="fas fa-chart-pie mr-1 text-brand"></i>Remessas por serviço</h3><canvas id="cht-serv" height="140"></canvas></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div class="card p-4">
+        <h3 class="font-semibold mb-2"><i class="fas fa-trophy mr-1 text-brand"></i>Top 10 Terceirizados (por peças)</h3>
+        <div id="top-terc" class="overflow-x-auto"></div>
+      </div>
+      <div class="card p-4">
+        <h3 class="font-semibold mb-2"><i class="fas fa-triangle-exclamation mr-1 text-red-600"></i>Remessas em atraso</h3>
+        <div id="atrasadas" class="overflow-x-auto"></div>
+      </div>
+    </div>
+  `;
+
+  async function load() {
+    const de = $('#f-de').value, ate = $('#f-ate').value;
+    const r = await api('get', `/terc/dashboard?de=${de}&ate=${ate}`);
+    const d = r.data || {};
+    const k = d.kpis || { remessas: {}, retornos: {} };
+    const kr = k.remessas || {}, kt = k.retornos || {};
+
+    const kpi = (label, val, icon, color) => `
+      <div class="card p-3">
+        <div class="text-xs text-slate-500 uppercase">${label}</div>
+        <div class="flex items-center gap-2 mt-1">
+          <i class="fas ${icon} ${color}"></i>
+          <div class="text-2xl font-bold text-slate-800">${val}</div>
+        </div>
+      </div>`;
+    $('#kpis').innerHTML = [
+      kpi('Remessas', fmt.int(kr.total), 'fa-truck-fast', 'text-brand'),
+      kpi('Peças enviadas', fmt.int(kr.pecas_enviadas), 'fa-boxes', 'text-indigo-600'),
+      kpi('Valor enviado', TERC.fmtBRL(kr.valor_total), 'fa-dollar-sign', 'text-emerald-600'),
+      kpi('Em aberto', fmt.int(kr.em_aberto), 'fa-clock', 'text-amber-600'),
+      kpi('Concluídas', fmt.int(kr.concluidas), 'fa-check-circle', 'text-emerald-600'),
+      kpi('Atrasadas', fmt.int(kr.atrasadas), 'fa-triangle-exclamation', 'text-red-600'),
+    ].join('');
+
+    // Gráfico produção diária
+    const prod = d.producao_diaria || [];
+    const labels = prod.map(p => dayjs(p.dia).format('DD/MM'));
+    const ctxP = document.getElementById('cht-prod').getContext('2d');
+    if (window._chtProd) window._chtProd.destroy();
+    window._chtProd = new Chart(ctxP, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Boas', data: prod.map(p => p.boa), backgroundColor: '#10b981' },
+          { label: 'Refugo', data: prod.map(p => p.refugo), backgroundColor: '#ef4444' },
+          { label: 'Conserto', data: prod.map(p => p.conserto), backgroundColor: '#f59e0b' },
+        ],
+      },
+      options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } },
+    });
+
+    // Gráfico por serviço
+    const serv = d.por_servico || [];
+    const ctxS = document.getElementById('cht-serv').getContext('2d');
+    if (window._chtServ) window._chtServ.destroy();
+    window._chtServ = new Chart(ctxS, {
+      type: 'doughnut',
+      data: {
+        labels: serv.map(s => s.desc_servico || '(sem serviço)'),
+        datasets: [{ data: serv.map(s => s.pecas), backgroundColor: ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#06b6d4'] }],
+      },
+    });
+
+    // Top terceirizados
+    const top = d.top_terceirizados || [];
+    $('#top-terc').innerHTML = top.length ? `
+      <table class="w-full text-sm">
+        <thead><tr class="bg-slate-100"><th class="text-left p-2">#</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Setor</th><th class="text-right p-2">Remessas</th><th class="text-right p-2">Peças</th><th class="text-right p-2">Valor</th></tr></thead>
+        <tbody>${top.map((t, i) => `
+          <tr class="border-b">
+            <td class="p-2">${i + 1}</td>
+            <td class="p-2 font-medium">${t.nome_terc}</td>
+            <td class="p-2 text-slate-500">${t.nome_setor || '—'}</td>
+            <td class="p-2 text-right">${fmt.int(t.remessas)}</td>
+            <td class="p-2 text-right">${fmt.int(t.pecas)}</td>
+            <td class="p-2 text-right">${TERC.fmtBRL(t.valor)}</td>
+          </tr>`).join('')}</tbody>
+      </table>` : '<p class="text-slate-500 text-sm py-4 text-center">Sem dados no período</p>';
+
+    // Atrasadas
+    const atr = d.atrasadas || [];
+    $('#atrasadas').innerHTML = atr.length ? `
+      <table class="w-full text-sm">
+        <thead><tr class="bg-red-50"><th class="text-left p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Ref.</th><th class="text-right p-2">Qtd</th><th class="text-right p-2">Previsão</th><th class="text-right p-2">Atraso</th></tr></thead>
+        <tbody>${atr.map(a => `
+          <tr class="border-b">
+            <td class="p-2">${a.num_controle}</td>
+            <td class="p-2">${a.nome_terc}</td>
+            <td class="p-2"><span class="font-mono text-xs">${a.cod_ref}</span> ${a.cor ? '· ' + a.cor : ''}</td>
+            <td class="p-2 text-right">${fmt.int(a.qtd_total)}</td>
+            <td class="p-2 text-right">${fmt.date(a.dt_previsao)}</td>
+            <td class="p-2 text-right text-red-600 font-semibold">${Math.floor(a.dias_atraso)} dia(s)</td>
+          </tr>`).join('')}</tbody>
+      </table>` : '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-check-circle text-emerald-500"></i> Nenhuma remessa em atraso</p>';
+  }
+  $('#btn-filtrar').onclick = load;
+  await load();
+};
+
+/* ---------- RESUMO de Terceirizações ---------- */
+ROUTES.terc_resumo = async (main) => {
+  await TERC.load();
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+        <div class="flex-1"></div>
+        <button id="btn-print" class="btn btn-secondary"><i class="fas fa-print mr-1"></i>Imprimir / PDF</button>
+        <button id="btn-csv" class="btn btn-secondary"><i class="fas fa-file-csv mr-1"></i>Exportar CSV</button>
+      </div>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl-wrap"><div class="p-6 text-center text-slate-500"><i class="fas fa-spinner fa-spin"></i> Carregando...</div></div>
+  `;
+
+  async function load() {
+    const col = $('#f-col').value;
+    const r = await api('get', `/terc/resumo${col ? '?id_colecao=' + col : ''}`);
+    const rs = r.data || [];
+    window._resumo = rs;
+    $('#tbl-wrap').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 sticky top-0"><tr>
+          <th class="text-left p-2">Terceirizado</th>
+          <th class="text-left p-2">Setor</th>
+          <th class="text-center p-2">Situação</th>
+          <th class="text-right p-2">A coletar</th>
+          <th class="text-right p-2">Em produção</th>
+          <th class="text-right p-2">Produzidas</th>
+          <th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Consertadas</th>
+          <th class="text-right p-2">Remessas</th>
+          <th class="text-right p-2">Valor</th>
+          <th class="text-right p-2">% Consertos</th>
+          <th class="text-center p-2">Término prev.</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(t => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-medium">${t.nome_terc}</td>
+              <td class="p-2 text-slate-500">${t.nome_setor || '—'}</td>
+              <td class="p-2 text-center">${t.situacao === 'Ativa'
+                ? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">Ativa</span>'
+                : '<span class="px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-600">Inativa</span>'}</td>
+              <td class="p-2 text-right">${fmt.int(t.pecas_coletar)}</td>
+              <td class="p-2 text-right">${fmt.int(t.pecas_producao)}</td>
+              <td class="p-2 text-right text-emerald-700 font-semibold">${fmt.int(t.pecas_produzidas)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(t.pecas_conserto)}</td>
+              <td class="p-2 text-right">${fmt.int(t.pecas_consertadas)}</td>
+              <td class="p-2 text-right">${fmt.int(t.total_remessas)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(t.valor_movimentado)}</td>
+              <td class="p-2 text-right ${Number(t.indice_consertos) > 0.05 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmt.pct(t.indice_consertos)}</td>
+              <td class="p-2 text-center">${t.dt_termino ? fmt.date(t.dt_termino) : '—'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+  $('#btn-filtrar').onclick = load;
+  $('#btn-print').onclick = () => window.print();
+  $('#btn-csv').onclick = () => {
+    const rs = window._resumo || [];
+    const h = ['Terceirizado', 'Setor', 'Situacao', 'A coletar', 'Em producao', 'Produzidas', 'Conserto', 'Consertadas', 'Remessas', 'Valor', 'Indice consertos', 'Termino previsto'];
+    const rows = rs.map(t => [t.nome_terc, t.nome_setor || '', t.situacao, t.pecas_coletar, t.pecas_producao, t.pecas_produzidas, t.pecas_conserto, t.pecas_consertadas, t.total_remessas, Number(t.valor_movimentado).toFixed(2), (Number(t.indice_consertos) * 100).toFixed(1) + '%', t.dt_termino || '']);
+    const csv = [h, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `resumo-terceirizacao-${dayjs().format('YYYYMMDD')}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+  await load();
+};
+
+/* ---------- TERCEIRIZADOS (cadastro) ---------- */
+ROUTES.terc_terceirizados = async (main) => {
+  await TERC.load();
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>Busca</label><input id="f-search" placeholder="Nome ou CPF/CNPJ..." /></div>
+        <div><label>Setor</label><select id="f-setor">${TERC.optSetores()}</select></div>
+        <div><label>Situação</label><select id="f-sit"><option value="">Todos</option><option value="Ativa">Ativa</option><option value="Inativa">Inativa</option></select></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+        <div class="flex-1"></div>
+        <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Terceirizado</button>
+      </div>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+
+  async function load() {
+    const p = new URLSearchParams();
+    if ($('#f-search').value) p.set('search', $('#f-search').value);
+    if ($('#f-setor').value) p.set('id_setor', $('#f-setor').value);
+    if ($('#f-sit').value) p.set('situacao', $('#f-sit').value);
+    const r = await api('get', '/terc/terceirizados?' + p.toString());
+    const rs = r.data || [];
+    $('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Nome</th><th class="text-left p-2">Setor</th>
+          <th class="text-left p-2">Contato</th>
+          <th class="text-right p-2">Pessoas</th><th class="text-right p-2">Efic.</th>
+          <th class="text-right p-2">Prazo</th>
+          <th class="text-center p-2">Situação</th><th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(t => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-medium">${t.nome_terc}${t.cpf_cnpj ? '<br><span class="text-xs text-slate-400">' + t.cpf_cnpj + '</span>' : ''}</td>
+              <td class="p-2">${t.nome_setor || '—'}</td>
+              <td class="p-2 text-xs text-slate-600">${t.telefone || ''}${t.email ? '<br>' + t.email : ''}</td>
+              <td class="p-2 text-right">${t.qtd_pessoas}</td>
+              <td class="p-2 text-right">${(Number(t.efic_padrao) * 100).toFixed(0)}%</td>
+              <td class="p-2 text-right">${t.prazo_padrao} dias</td>
+              <td class="p-2 text-center">${t.situacao === 'Ativa' ? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">Ativa</span>' : '<span class="px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-600">Inativa</span>'}</td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-secondary" onclick="TERC_editTerc(${t.id_terc})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm ${t.situacao === 'Ativa' ? 'btn-warning' : 'btn-success'}" onclick="TERC_toggleSitTerc(${t.id_terc}, '${t.situacao === 'Ativa' ? 'Inativa' : 'Ativa'}')"><i class="fas fa-${t.situacao === 'Ativa' ? 'pause' : 'play'}"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="TERC_delTerc(${t.id_terc}, '${t.nome_terc.replace(/'/g, '')}')"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum terceirizado encontrado.</div>' : ''}
+    `;
+  }
+  window.TERC_editTerc = (id) => TERC_openTercModal(id, load);
+  window.TERC_toggleSitTerc = async (id, sit) => {
+    await api('patch', '/terc/terceirizados/' + id + '/situacao', { situacao: sit });
+    toast('Situação atualizada', 'success');
+    await TERC.load(true); load();
+  };
+  window.TERC_delTerc = async (id, nome) => {
+    if (!confirm('Excluir terceirizado "' + nome + '"?\n(só é permitido se não tiver remessas)')) return;
+    try { await api('delete', '/terc/terceirizados/' + id); toast('Excluído', 'success'); await TERC.load(true); load(); } catch {}
+  };
+  $('#btn-filtrar').onclick = load;
+  $('#btn-novo').onclick = () => TERC_openTercModal(null, load);
+  await load();
+};
+
+function TERC_openTercModal(id, onSave) {
+  const edit = !!id;
+  (async () => {
+    let t = { qtd_pessoas: 1, min_trab_dia: 480, efic_padrao: 0.8, prazo_padrao: 3, situacao: 'Ativa', ativo: 1 };
+    if (edit) { const r = await api('get', '/terc/terceirizados/' + id); t = r.data; }
+    const m = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-3"><i class="fas fa-handshake mr-2 text-brand"></i>${edit ? 'Editar' : 'Novo'} Terceirizado</h3>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2"><label>Nome *</label><input id="m-nome" value="${t.nome_terc || ''}" /></div>
+        <div><label>Setor</label><select id="m-setor">${TERC.optSetores(t.id_setor)}</select></div>
+        <div><label>CPF/CNPJ</label><input id="m-cpf" value="${t.cpf_cnpj || ''}" /></div>
+        <div><label>Telefone</label><input id="m-tel" value="${t.telefone || ''}" /></div>
+        <div><label>E-mail</label><input id="m-email" type="email" value="${t.email || ''}" /></div>
+        <div class="col-span-2"><label>Endereço</label><input id="m-end" value="${t.endereco || ''}" /></div>
+        <div><label>Qtd pessoas</label><input id="m-pess" type="number" min="1" value="${t.qtd_pessoas || 1}" /></div>
+        <div><label>Min. trabalhados/dia</label><input id="m-min" type="number" min="60" value="${t.min_trab_dia || 480}" /></div>
+        <div><label>Eficiência padrão (0-1)</label><input id="m-ef" type="number" step="0.01" min="0.1" max="1" value="${t.efic_padrao || 0.8}" /></div>
+        <div><label>Prazo padrão (dias)</label><input id="m-pz" type="number" min="0" value="${t.prazo_padrao || 3}" /></div>
+        <div><label>Situação</label><select id="m-sit"><option value="Ativa" ${t.situacao === 'Ativa' ? 'selected' : ''}>Ativa</option><option value="Inativa" ${t.situacao === 'Inativa' ? 'selected' : ''}>Inativa</option></select></div>
+        <div class="col-span-2"><label>Observação</label><textarea id="m-obs" rows="2">${t.observacao || ''}</textarea></div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
+      </div>
+    `;
+    m.appendChild(card); document.body.appendChild(m);
+    $('#m-cancel').onclick = () => m.remove();
+    $('#m-save').onclick = async () => {
+      const body = {
+        nome_terc: $('#m-nome').value.trim(), id_setor: $('#m-setor').value, cpf_cnpj: $('#m-cpf').value.trim(),
+        telefone: $('#m-tel').value.trim(), email: $('#m-email').value.trim(), endereco: $('#m-end').value.trim(),
+        qtd_pessoas: $('#m-pess').value, min_trab_dia: $('#m-min').value, efic_padrao: $('#m-ef').value,
+        prazo_padrao: $('#m-pz').value, situacao: $('#m-sit').value, observacao: $('#m-obs').value.trim(), ativo: 1,
+      };
+      if (!body.nome_terc) { toast('Nome é obrigatório', 'warning'); return; }
+      try {
+        if (edit) await api('put', '/terc/terceirizados/' + id, body);
+        else await api('post', '/terc/terceirizados', body);
+        toast('Salvo com sucesso', 'success');
+        m.remove();
+        await TERC.load(true);
+        if (onSave) onSave();
+      } catch {}
+    };
+  })();
+}
+
+/* ---------- REMESSAS ---------- */
+ROUTES.terc_remessas = async (main) => {
+  await TERC.load();
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(60, 'day').format('YYYY-MM-DD');
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>Busca</label><input id="f-search" placeholder="OP, Ref, Cor..." /></div>
+        <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
+        <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
+        <div><label>Status</label><select id="f-status"><option value="">Todos</option><option>Aberta</option><option>EmProducao</option><option>Parcial</option><option>Concluida</option><option>Cancelada</option></select></div>
+        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+        <div class="flex-1"></div>
+        <button id="btn-nova" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Nova Remessa</button>
+      </div>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+
+  async function load() {
+    const p = new URLSearchParams();
+    if ($('#f-search').value) p.set('search', $('#f-search').value);
+    if ($('#f-terc').value) p.set('id_terc', $('#f-terc').value);
+    if ($('#f-serv').value) p.set('id_servico', $('#f-serv').value);
+    if ($('#f-status').value) p.set('status', $('#f-status').value);
+    if ($('#f-de').value) p.set('de', $('#f-de').value);
+    if ($('#f-ate').value) p.set('ate', $('#f-ate').value);
+    const r = await api('get', '/terc/remessas?' + p.toString());
+    const rs = r.data || [];
+    $('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-right p-2">Ctrl</th>
+          <th class="text-left p-2">OP</th>
+          <th class="text-left p-2">Terceirizado</th>
+          <th class="text-left p-2">Serviço</th>
+          <th class="text-left p-2">Referência</th>
+          <th class="text-left p-2">Cor</th>
+          <th class="text-right p-2">Qtd</th>
+          <th class="text-right p-2">Retornada</th>
+          <th class="text-right p-2">Valor</th>
+          <th class="text-center p-2">Saída</th>
+          <th class="text-center p-2">Prev.</th>
+          <th class="text-center p-2">Status</th>
+          <th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(r => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 text-right font-mono">${r.num_controle}</td>
+              <td class="p-2">${r.num_op || '—'}</td>
+              <td class="p-2">${r.nome_terc}</td>
+              <td class="p-2 text-xs text-slate-600">${r.desc_servico || '—'}</td>
+              <td class="p-2"><span class="font-mono text-xs">${r.cod_ref}</span><br><span class="text-xs text-slate-500">${r.desc_ref || ''}</span></td>
+              <td class="p-2">${r.cor || '—'}</td>
+              <td class="p-2 text-right">${fmt.int(r.qtd_total)}</td>
+              <td class="p-2 text-right ${r.qtd_retornada_calc >= r.qtd_total ? 'text-emerald-700' : 'text-amber-700'}">${fmt.int(r.qtd_retornada_calc)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(r.valor_total)}</td>
+              <td class="p-2 text-center">${fmt.date(r.dt_saida)}</td>
+              <td class="p-2 text-center">${fmt.date(r.dt_previsao)}</td>
+              <td class="p-2 text-center">${TERC.statusBadge(r.status, r.atrasada)}</td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
+                <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
+                <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhuma remessa encontrada.</div>' : ''}
+    `;
+  }
+  window.TERC_viewRem = (id) => TERC_openRemDetalhe(id);
+  window.TERC_editRem = (id) => TERC_openRemModal(id, load);
+  window.TERC_retRem = (id) => TERC_openRetModal(id, load);
+  window.TERC_delRem = async (id, n) => {
+    if (!confirm('Excluir remessa nº ' + n + '?')) return;
+    try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); } catch {}
+  };
+  $('#btn-filtrar').onclick = load;
+  $('#btn-nova').onclick = () => TERC_openRemModal(null, load);
+  await load();
+};
+
+async function TERC_openRemModal(id, onSave) {
+  const edit = !!id;
+  let r = { dt_saida: dayjs().format('YYYY-MM-DD'), status: 'Aberta', tempo_peca: 1, efic_pct: 0.8, qtd_pessoas: 1, min_trab_dia: 480, prazo_dias: 3, preco_unit: 0, grade: [] };
+  // Tamanhos padrão
+  const TAMANHOS = ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'];
+  if (edit) {
+    const res = await api('get', '/terc/remessas/' + id); r = res.data;
+    r.grade = r.grade || [];
+  }
+  // Próximo num controle
+  let num_controle = r.num_controle || 0;
+  if (!edit) {
+    const n = await api('get', '/terc/remessas/next-num'); num_controle = n.data?.num_controle;
+  }
+
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
+  const gradeMap = Object.fromEntries(r.grade.map(g => [g.tamanho, g.qtd]));
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-truck-fast mr-2 text-brand"></i>${edit ? 'Editar' : 'Nova'} Remessa · Nº Controle <span class="font-mono text-brand">${num_controle}</span></h3>
+    <div class="grid grid-cols-6 gap-3">
+      <div class="col-span-2"><label>Terceirizado *</label><select id="m-terc">${TERC.optTerc(r.id_terc, true)}</select></div>
+      <div class="col-span-2"><label>Serviço *</label><select id="m-serv">${TERC.optServicos(r.id_servico)}</select></div>
+      <div class="col-span-2"><label>Coleção</label><select id="m-col">${TERC.optColecoes(r.id_colecao)}</select></div>
+
+      <div class="col-span-2"><label>Nº OP</label><input id="m-op" value="${r.num_op || ''}" placeholder="ex: 510-24" /></div>
+      <div class="col-span-2"><label>Referência *</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="código" /></div>
+      <div class="col-span-2"><label>Descrição</label><input id="m-descref" value="${r.desc_ref || ''}" /></div>
+
+      <div class="col-span-2"><label>Cor</label><input id="m-cor" value="${r.cor || ''}" /></div>
+      <div><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
+      <div><label>Data início</label><input type="date" id="m-dti" value="${r.dt_inicio || r.dt_saida || ''}" /></div>
+      <div><label>Tempo/peça (min)</label><input type="number" step="0.01" id="m-tempo" value="${r.tempo_peca || 1}" /></div>
+      <div><label>Preço unit. (R$)</label><input type="number" step="0.01" id="m-preco" value="${r.preco_unit || 0}" /></div>
+
+      <div><label>Qtd pessoas</label><input type="number" min="1" id="m-pess" value="${r.qtd_pessoas || 1}" /></div>
+      <div><label>Min trab/dia</label><input type="number" min="60" id="m-min" value="${r.min_trab_dia || 480}" /></div>
+      <div><label>Eficiência (0-1)</label><input type="number" step="0.01" min="0.1" max="1" id="m-ef" value="${r.efic_pct || 0.8}" /></div>
+      <div><label>Prazo fixo (dias, 0=calc.)</label><input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
+      <div><label>Status</label><select id="m-status"><option ${r.status === 'Aberta' ? 'selected' : ''}>Aberta</option><option ${r.status === 'EmProducao' ? 'selected' : ''}>EmProducao</option><option ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option><option ${r.status === 'Concluida' ? 'selected' : ''}>Concluida</option><option ${r.status === 'Cancelada' ? 'selected' : ''}>Cancelada</option></select></div>
+      <div><label>&nbsp;</label><button id="m-lookup" class="btn btn-secondary w-full" type="button"><i class="fas fa-search-dollar mr-1"></i>Buscar preço</button></div>
+
+      <div class="col-span-6">
+        <label class="font-semibold">Grade de tamanhos <span class="text-xs text-slate-500">(informe as quantidades)</span></label>
+        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="m-grade">
+          ${TAMANHOS.map(t => `
+            <div class="text-center">
+              <div class="text-xs font-mono text-slate-500">${t}</div>
+              <input data-tam="${t}" type="number" min="0" value="${gradeMap[t] || 0}" class="text-center grade-in" />
+            </div>`).join('')}
+        </div>
+        <div class="mt-2 flex items-center gap-4">
+          <div class="text-sm">Total: <b id="m-total">0</b> peças</div>
+          <div class="text-sm">Valor total: <b id="m-valor">${TERC.fmtBRL(0)}</b></div>
+          <div class="text-sm text-slate-500">Previsão: <b id="m-prev">—</b></div>
+        </div>
+      </div>
+
+      <div class="col-span-6"><label>Observação</label><textarea id="m-obs" rows="2">${r.observacao || ''}</textarea></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar remessa</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+
+  function recalc() {
+    const grade = Array.from(card.querySelectorAll('.grade-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) }));
+    const total = grade.reduce((a, g) => a + g.qtd, 0);
+    const preco = Number($('#m-preco').value || 0);
+    $('#m-total').textContent = fmt.int(total);
+    $('#m-valor').textContent = TERC.fmtBRL(total * preco);
+    // previsão local
+    const tempo = Number($('#m-tempo').value || 0);
+    const pess = Number($('#m-pess').value || 1);
+    const min = Number($('#m-min').value || 480);
+    const ef = Number($('#m-ef').value || 0.8);
+    const pz = Number($('#m-pz').value || 0);
+    const dts = $('#m-dts').value;
+    if (total > 0 && tempo > 0 && dts) {
+      let dias = pz > 0 ? pz : Math.max(1, Math.ceil((total * tempo) / (Math.max(1, pess) * Math.max(1, min) * Math.max(0.1, ef))));
+      const d = dayjs(dts).add(dias, 'day').format('DD/MM/YYYY');
+      $('#m-prev').textContent = d + ' (' + dias + ' dia' + (dias > 1 ? 's' : '') + ')';
+    } else $('#m-prev').textContent = '—';
+  }
+  card.querySelectorAll('.grade-in, #m-preco, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
+  // Auto-preencher parâmetros ao trocar terceirizado
+  $('#m-terc').addEventListener('change', async () => {
+    const t = TERC.terceirizados.find(x => x.id_terc == $('#m-terc').value);
+    if (t) {
+      $('#m-pess').value = t.qtd_pessoas || 1;
+      $('#m-min').value = t.min_trab_dia || 480;
+      $('#m-ef').value = t.efic_padrao || 0.8;
+      $('#m-pz').value = t.prazo_padrao || 0;
+      recalc();
+    }
+  });
+  $('#m-lookup').onclick = async () => {
+    const cod = $('#m-ref').value.trim(); const sv = $('#m-serv').value; const col = $('#m-col').value;
+    if (!cod || !sv) { toast('Informe referência e serviço', 'warning'); return; }
+    try {
+      const res = await api('get', `/terc/precos/lookup?cod_ref=${encodeURIComponent(cod)}&id_servico=${sv}&id_colecao=${col || ''}`);
+      if (res.data && res.data.preco != null) {
+        $('#m-preco').value = res.data.preco;
+        if (res.data.tempo_min) $('#m-tempo').value = res.data.tempo_min;
+        if (res.data.desc_ref && !$('#m-descref').value) $('#m-descref').value = res.data.desc_ref;
+        toast('Preço encontrado: ' + TERC.fmtBRL(res.data.preco), 'success');
+        recalc();
+      } else toast('Preço não tabelado', 'warning');
+    } catch {}
+  };
+  recalc();
+
+  $('#m-cancel').onclick = () => m.remove();
+  $('#m-save').onclick = async () => {
+    const grade = Array.from(card.querySelectorAll('.grade-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) })).filter(g => g.qtd > 0);
+    const body = {
+      num_controle, num_op: $('#m-op').value.trim(),
+      id_terc: $('#m-terc').value, id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
+      cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-descref').value.trim(),
+      cor: $('#m-cor').value.trim(),
+      dt_saida: $('#m-dts').value, dt_inicio: $('#m-dti').value,
+      tempo_peca: $('#m-tempo').value, preco_unit: $('#m-preco').value,
+      qtd_pessoas: $('#m-pess').value, min_trab_dia: $('#m-min').value,
+      efic_pct: $('#m-ef').value, prazo_dias: $('#m-pz').value,
+      status: $('#m-status').value, observacao: $('#m-obs').value.trim(),
+      grade,
+    };
+    if (!body.id_terc || !body.id_servico || !body.cod_ref || !body.dt_saida) { toast('Preencha os campos obrigatórios (*)', 'warning'); return; }
+    if (grade.length === 0) { toast('Informe ao menos uma quantidade na grade', 'warning'); return; }
+    try {
+      if (edit) await api('put', '/terc/remessas/' + id, body);
+      else await api('post', '/terc/remessas', body);
+      toast('Remessa salva', 'success');
+      m.remove();
+      if (onSave) onSave();
+    } catch {}
+  };
+}
+
+async function TERC_openRetModal(idRemessa, onSave) {
+  const res = await api('get', '/terc/remessas/' + idRemessa);
+  const r = res.data;
+  const saldo = r.saldo || (r.qtd_total - (r.totais_retorno?.total || 0));
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
+  // Grade máxima disponível
+  const gradeMax = Object.fromEntries((r.grade || []).map(g => [g.tamanho, g.qtd]));
+  // Subtrair o que já retornou
+  (r.retornos || []).forEach(ret => (ret.grade || []).forEach(g => { gradeMax[g.tamanho] = (gradeMax[g.tamanho] || 0) - g.qtd; }));
+
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-2"><i class="fas fa-truck-arrow-right mr-2 text-brand"></i>Registrar Retorno · Remessa ${r.num_controle}</h3>
+    <div class="bg-slate-50 p-3 rounded mb-3 text-sm grid grid-cols-3 gap-2">
+      <div><b>Terceirizado:</b> ${r.nome_terc}</div>
+      <div><b>Ref:</b> <span class="font-mono">${r.cod_ref}</span> ${r.cor || ''}</div>
+      <div><b>Serviço:</b> ${r.desc_servico || '—'}</div>
+      <div><b>Enviadas:</b> ${fmt.int(r.qtd_total)}</div>
+      <div><b>Já retornadas:</b> ${fmt.int(r.totais_retorno?.total || 0)}</div>
+      <div class="${saldo > 0 ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}"><b>Saldo:</b> ${fmt.int(saldo)}</div>
+    </div>
+    <div class="grid grid-cols-5 gap-3">
+      <div><label>Data retorno *</label><input type="date" id="m-dtr" value="${dayjs().format('YYYY-MM-DD')}" /></div>
+      <div><label>Boas</label><input type="number" min="0" id="m-boa" value="0" /></div>
+      <div><label>Refugo</label><input type="number" min="0" id="m-ref" value="0" /></div>
+      <div><label>Conserto</label><input type="number" min="0" id="m-cons" value="0" /></div>
+      <div><label>Valor pago (R$)</label><input type="number" step="0.01" id="m-val" value="" placeholder="auto = boas × preço" /></div>
+      <div class="col-span-5">
+        <label>Grade retornada <span class="text-xs text-slate-500">(máx. = enviado − já retornado)</span></label>
+        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="g-wrap">
+          ${(r.grade || []).map(g => `
+            <div class="text-center">
+              <div class="text-xs font-mono text-slate-500">${g.tamanho} <span class="text-slate-400">(máx ${gradeMax[g.tamanho] || 0})</span></div>
+              <input data-tam="${g.tamanho}" data-max="${gradeMax[g.tamanho] || 0}" type="number" min="0" max="${gradeMax[g.tamanho] || 0}" value="0" class="text-center ret-in" />
+            </div>`).join('')}
+        </div>
+        <div class="mt-2 text-sm">Grade total: <b id="g-total">0</b></div>
+      </div>
+      <div><label>Data pagamento</label><input type="date" id="m-dtp" value="" /></div>
+      <div class="col-span-4"><label>Observação</label><input id="m-obs" /></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Registrar retorno</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  function recalc() {
+    const tot = Array.from(card.querySelectorAll('.ret-in')).reduce((a, i) => a + Number(i.value || 0), 0);
+    $('#g-total').textContent = fmt.int(tot);
+    if (!$('#m-boa').dataset.manual) $('#m-boa').value = tot;
+  }
+  card.querySelectorAll('.ret-in').forEach(i => i.addEventListener('input', recalc));
+  $('#m-boa').addEventListener('input', () => { $('#m-boa').dataset.manual = '1'; });
+  $('#m-cancel').onclick = () => m.remove();
+  $('#m-save').onclick = async () => {
+    const grade = Array.from(card.querySelectorAll('.ret-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) })).filter(g => g.qtd > 0);
+    const body = {
+      id_remessa: idRemessa, dt_retorno: $('#m-dtr').value,
+      qtd_boa: $('#m-boa').value, qtd_refugo: $('#m-ref').value, qtd_conserto: $('#m-cons').value,
+      valor_pago: $('#m-val').value || null, dt_pagamento: $('#m-dtp').value || null,
+      observacao: $('#m-obs').value.trim(), grade,
+    };
+    try { await api('post', '/terc/retornos', body); toast('Retorno registrado', 'success'); m.remove(); if (onSave) onSave(); } catch {}
+  };
+}
+
+async function TERC_openRemDetalhe(id) {
+  const res = await api('get', '/terc/remessas/' + id);
+  const r = res.data;
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
+  card.innerHTML = `
+    <div class="flex items-start justify-between mb-3">
+      <h3 class="text-lg font-semibold"><i class="fas fa-file-invoice mr-2 text-brand"></i>Remessa Nº ${r.num_controle} <span class="text-sm font-normal text-slate-500">(${r.num_op || 'sem OP'})</span></h3>
+      <div class="flex gap-2"><button id="m-print" class="btn btn-sm btn-secondary"><i class="fas fa-print"></i></button><button id="m-close" class="btn btn-sm btn-secondary"><i class="fas fa-times"></i></button></div>
+    </div>
+    <div id="print-area">
+      <div class="grid grid-cols-3 gap-3 text-sm mb-4">
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Terceirizado</div><div class="font-semibold">${r.nome_terc}</div><div class="text-xs text-slate-500 mt-1">${r.nome_setor || ''}</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Referência</div><div class="font-mono font-semibold">${r.cod_ref}</div><div class="text-xs">${r.desc_ref || ''} ${r.cor ? '· ' + r.cor : ''}</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Serviço</div><div class="font-semibold">${r.desc_servico || '—'}</div>${r.nome_colecao ? '<div class="text-xs">' + r.nome_colecao + '</div>' : ''}</div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Saída / Previsão</div><div>${fmt.date(r.dt_saida)} → <b>${fmt.date(r.dt_previsao)}</b></div><div class="text-xs text-slate-500">${r.prazo_dias} dia(s)</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Qtd / Preço / Valor</div><div><b>${fmt.int(r.qtd_total)}</b> pçs × ${TERC.fmtBRL(r.preco_unit)} = <b>${TERC.fmtBRL(r.valor_total)}</b></div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Status</div><div>${TERC.statusBadge(r.status)}</div><div class="text-xs text-slate-500 mt-1">${r.tempo_peca} min/peça · ${r.qtd_pessoas} pessoa(s) · ${(Number(r.efic_pct) * 100).toFixed(0)}% efic.</div></div>
+      </div>
+
+      <div class="mb-4">
+        <h4 class="font-semibold mb-2"><i class="fas fa-ruler mr-1"></i>Grade enviada</h4>
+        <div class="flex flex-wrap gap-2">
+          ${(r.grade || []).map(g => `<div class="px-3 py-2 bg-blue-50 rounded text-sm"><span class="font-mono text-xs text-slate-500">${g.tamanho}</span> <b>${fmt.int(g.qtd)}</b></div>`).join('') || '<span class="text-slate-500">—</span>'}
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <h4 class="font-semibold mb-2"><i class="fas fa-truck-arrow-right mr-1"></i>Retornos</h4>
+        ${(r.retornos && r.retornos.length) ? `
+          <table class="w-full text-sm">
+            <thead class="bg-slate-100"><tr>
+              <th class="text-left p-2">Data</th><th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+              <th class="text-right p-2">Total</th><th class="text-right p-2">Valor pago</th><th class="text-left p-2">Obs</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${r.retornos.map(x => `
+                <tr class="border-b">
+                  <td class="p-2">${fmt.date(x.dt_retorno)}</td>
+                  <td class="p-2 text-right text-emerald-700">${fmt.int(x.qtd_boa)}</td>
+                  <td class="p-2 text-right text-red-600">${fmt.int(x.qtd_refugo)}</td>
+                  <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
+                  <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
+                  <td class="p-2 text-right">${TERC.fmtBRL(x.valor_pago)}</td>
+                  <td class="p-2 text-xs text-slate-500">${x.observacao || ''}</td>
+                  <td class="p-2"><button class="btn btn-sm btn-danger no-print" onclick="TERC_delRet(${x.id_retorno}, ${id})"><i class="fas fa-trash"></i></button></td>
+                </tr>`).join('')}
+              <tr class="bg-slate-50 font-semibold">
+                <td class="p-2">Totais</td>
+                <td class="p-2 text-right">${fmt.int(r.totais_retorno.boa)}</td>
+                <td class="p-2 text-right">${fmt.int(r.totais_retorno.refugo)}</td>
+                <td class="p-2 text-right">${fmt.int(r.totais_retorno.conserto)}</td>
+                <td class="p-2 text-right">${fmt.int(r.totais_retorno.total)}</td>
+                <td class="p-2 text-right">${TERC.fmtBRL(r.totais_retorno.valor)}</td>
+                <td colspan="2"></td>
+              </tr>
+              <tr class="bg-amber-50 font-semibold">
+                <td class="p-2" colspan="4">Saldo a retornar</td>
+                <td class="p-2 text-right text-amber-700">${fmt.int(r.saldo)}</td>
+                <td colspan="3"></td>
+              </tr>
+            </tbody>
+          </table>` : '<p class="text-slate-500 text-sm">Nenhum retorno registrado.</p>'}
+      </div>
+
+      ${r.observacao ? `<div class="text-sm p-3 bg-amber-50 rounded"><b>Observação:</b> ${r.observacao}</div>` : ''}
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#m-close').onclick = () => m.remove();
+  $('#m-print').onclick = () => {
+    const w = window.open('', '_blank');
+    w.document.write(`<html><head><title>Remessa ${r.num_controle}</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <style>@media print{.no-print{display:none}}body{font-family:Inter,system-ui,sans-serif;padding:20px}</style></head>
+      <body><h1 class="text-2xl font-bold mb-2">CorePro — Remessa Nº ${r.num_controle}</h1><div class="text-sm text-slate-500 mb-4">Emitido em ${dayjs().format('DD/MM/YYYY HH:mm')}</div>
+      ${card.querySelector('#print-area').innerHTML}</body></html>`);
+    w.document.close();
+    setTimeout(() => { w.print(); }, 500);
+  };
+  window.TERC_delRet = async (idRet, idRem) => {
+    if (!confirm('Excluir retorno?')) return;
+    try { await api('delete', '/terc/retornos/' + idRet); toast('Retorno excluído', 'success'); m.remove(); TERC_openRemDetalhe(idRem); } catch {}
+  };
+}
+
+/* ---------- RETORNOS (lista consolidada) ---------- */
+ROUTES.terc_retornos = async (main) => {
+  await TERC.load();
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
+        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+        <div class="flex-1"></div>
+        <button id="btn-print" class="btn btn-secondary"><i class="fas fa-print mr-1"></i>Imprimir</button>
+      </div>
+    </div>
+    <div id="kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const de = $('#f-de').value, ate = $('#f-ate').value, idt = $('#f-terc').value;
+    // Usa /terc/remessas como lista-base e busca retornos na view de cada
+    const p = new URLSearchParams({ de, ate });
+    if (idt) p.set('id_terc', idt);
+    const r = await api('get', '/terc/remessas?' + p.toString());
+    const rems = (r.data || []).filter(x => Number(x.qtd_retornada_calc) > 0);
+
+    // Agregar detalhes (consulta individual para trazer retornos exatos)
+    const rows = [];
+    let tot = { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
+    for (const rem of rems.slice(0, 100)) { // limitar a 100 para performance
+      try {
+        const d = await api('get', '/terc/remessas/' + rem.id_remessa, null, { silent: true });
+        (d.data.retornos || []).forEach(ret => {
+          if (ret.dt_retorno >= de && ret.dt_retorno <= ate && (!idt || rem.id_terc == idt)) {
+            rows.push({ ...ret, nome_terc: rem.nome_terc, cod_ref: rem.cod_ref, cor: rem.cor, num_controle: rem.num_controle, desc_servico: rem.desc_servico });
+            tot.boa += Number(ret.qtd_boa) || 0;
+            tot.refugo += Number(ret.qtd_refugo) || 0;
+            tot.conserto += Number(ret.qtd_conserto) || 0;
+            tot.total += Number(ret.qtd_total) || 0;
+            tot.valor += Number(ret.valor_pago) || 0;
+          }
+        });
+      } catch {}
+    }
+    rows.sort((a, b) => (a.dt_retorno < b.dt_retorno ? 1 : -1));
+
+    const kpi = (l, v, c) => `<div class="card p-3"><div class="text-xs text-slate-500 uppercase">${l}</div><div class="text-2xl font-bold ${c}">${v}</div></div>`;
+    $('#kpis').innerHTML = [
+      kpi('Retornos', fmt.int(rows.length), 'text-brand'),
+      kpi('Peças boas', fmt.int(tot.boa), 'text-emerald-600'),
+      kpi('Peças refugo', fmt.int(tot.refugo), 'text-red-600'),
+      kpi('Valor pago', TERC.fmtBRL(tot.valor), 'text-indigo-600'),
+    ].join('');
+
+    $('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Data</th><th class="text-right p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th>
+          <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
+          <th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th><th class="text-center p-2">Pagto</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(x => `
+            <tr class="border-b">
+              <td class="p-2">${fmt.date(x.dt_retorno)}</td>
+              <td class="p-2 text-right font-mono">${x.num_controle}</td>
+              <td class="p-2">${x.nome_terc}</td>
+              <td class="p-2"><span class="font-mono text-xs">${x.cod_ref}</span> ${x.cor || ''}</td>
+              <td class="p-2 text-xs">${x.desc_servico || ''}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(x.qtd_boa)}</td>
+              <td class="p-2 text-right text-red-600">${fmt.int(x.qtd_refugo)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
+              <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(x.valor_pago)}</td>
+              <td class="p-2 text-center text-xs">${x.dt_pagamento ? fmt.date(x.dt_pagamento) : '<span class="text-amber-600">Pendente</span>'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rows.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum retorno no período.</div>' : ''}
+    `;
+  }
+  $('#btn-filtrar').onclick = load;
+  $('#btn-print').onclick = () => window.print();
+  await load();
+};
+
+/* ---------- PREÇOS por REF/SERVIÇO/COLEÇÃO ---------- */
+ROUTES.terc_precos = async (main) => {
+  await TERC.load();
+  main.innerHTML = `
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div><label>Busca</label><input id="f-search" placeholder="Ref ou descrição..." /></div>
+        <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
+        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+        <div class="flex-1"></div>
+        <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
+      </div>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const p = new URLSearchParams();
+    if ($('#f-search').value) p.set('search', $('#f-search').value);
+    if ($('#f-serv').value) p.set('id_servico', $('#f-serv').value);
+    const r = await api('get', '/terc/precos?' + p.toString());
+    const rs = r.data || [];
+    $('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Ref.</th><th class="text-left p-2">Descrição</th><th class="text-left p-2">Serviço</th>
+          <th class="text-left p-2">Coleção</th><th class="text-right p-2">Preço</th><th class="text-right p-2">Tempo (min)</th>
+          <th class="text-center p-2">Vigência</th><th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(p => `
+            <tr class="border-b">
+              <td class="p-2 font-mono">${p.cod_ref}</td>
+              <td class="p-2">${p.desc_ref || '—'}</td>
+              <td class="p-2">${p.desc_servico || '—'}</td>
+              <td class="p-2">${p.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
+              <td class="p-2 text-right font-semibold">${TERC.fmtBRL(p.preco)}</td>
+              <td class="p-2 text-right">${fmt.num(p.tempo_min, 2)}</td>
+              <td class="p-2 text-center">${p.dt_vigencia ? fmt.date(p.dt_vigencia) : '—'}</td>
+              <td class="p-2 text-center">
+                <button class="btn btn-sm btn-primary" onclick="TERC_editPreco(${p.id_preco})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="TERC_delPreco(${p.id_preco})"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum preço cadastrado.</div>' : ''}
+    `;
+  }
+  window.TERC_editPreco = (id) => TERC_openPrecoModal(id, rs => load());
+  window.TERC_delPreco = async (id) => {
+    if (!confirm('Excluir este preço?')) return;
+    try { await api('delete', '/terc/precos/' + id); toast('Excluído', 'success'); load(); } catch {}
+  };
+  $('#btn-filtrar').onclick = load;
+  $('#btn-novo').onclick = () => TERC_openPrecoModal(null, load);
+  await load();
+};
+
+async function TERC_openPrecoModal(id, onSave) {
+  let p = { grade: 1, preco: 0, tempo_min: 0, ativo: 1 };
+  if (id) {
+    // Não há endpoint singular — busca via lista
+    const r = await api('get', '/terc/precos');
+    p = (r.data || []).find(x => x.id_preco == id) || p;
+  }
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-money-bill-wave mr-2 text-brand"></i>${id ? 'Editar' : 'Novo'} Preço</h3>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label>Referência *</label><input id="m-ref" value="${p.cod_ref || ''}" placeholder="01-24-58" /></div>
+      <div><label>Descrição</label><input id="m-desc" value="${p.desc_ref || ''}" /></div>
+      <div><label>Serviço *</label><select id="m-serv">${TERC.optServicos(p.id_servico)}</select></div>
+      <div><label>Coleção</label><select id="m-col">${TERC.optColecoes(p.id_colecao)}</select></div>
+      <div><label>Grade (1=única)</label><input id="m-grade" type="number" min="1" value="${p.grade || 1}" /></div>
+      <div><label>Preço (R$) *</label><input id="m-preco" type="number" step="0.01" value="${p.preco || 0}" /></div>
+      <div><label>Tempo (min/peça)</label><input id="m-tempo" type="number" step="0.01" value="${p.tempo_min || 0}" /></div>
+      <div><label>Vigência</label><input id="m-vig" type="date" value="${p.dt_vigencia || ''}" /></div>
+      <div class="col-span-2"><label>Observação</label><input id="m-obs" value="${p.observacao || ''}" /></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#m-cancel').onclick = () => m.remove();
+  $('#m-save').onclick = async () => {
+    const body = {
+      cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-desc').value.trim(),
+      id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
+      grade: $('#m-grade').value, preco: $('#m-preco').value, tempo_min: $('#m-tempo').value,
+      dt_vigencia: $('#m-vig').value || null, observacao: $('#m-obs').value.trim(), ativo: 1,
+    };
+    if (!body.cod_ref || !body.id_servico) { toast('Referência e serviço são obrigatórios', 'warning'); return; }
+    try {
+      if (id) await api('put', '/terc/precos/' + id, body);
+      else await api('post', '/terc/precos', body);
+      toast('Salvo', 'success'); m.remove(); if (onSave) onSave();
+    } catch {}
+  };
+}
+
+/* ---------- IMPORTADOR de Planilha de Terceirização ---------- */
+ROUTES.terc_importador = async (main) => {
+  await TERC.load();
+  main.innerHTML = `
+    <div class="card p-5">
+      <h3 class="text-lg font-semibold mb-2"><i class="fas fa-file-excel mr-2 text-emerald-600"></i>Importar Planilha de Terceirização</h3>
+      <p class="text-sm text-slate-600 mb-4">Cole dados copiados da planilha <b>Remessa</b> (incluindo o cabeçalho) ou faça upload do arquivo Excel. Colunas esperadas:</p>
+      <div class="bg-slate-50 p-3 rounded text-xs font-mono mb-4">
+        Nº OP · Nome Terceirização · Setor · Ref. · Descrição da Referência · Descrição do Serviço · Cor · Qtde Total · Preço · Data de Saída · Coleção · Tempo da Peça (min.) · % Eficiência · Qtde pessoas · Min. Trabalhados · Observações
+      </div>
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <label>Arquivo Excel (.xlsx) da aba "Remessa"</label>
+          <input type="file" id="f-file" accept=".xlsx,.xls" />
+          <div class="text-xs text-slate-500 mt-1">Ou cole os dados abaixo ↓</div>
+        </div>
+        <div class="flex items-end gap-3">
+          <label class="flex items-center gap-2"><input type="checkbox" id="f-criar" checked /> Criar cadastros faltantes automaticamente</label>
+          <label class="flex items-center gap-2"><input type="checkbox" id="f-dry" checked /> Simulação (não grava)</label>
+        </div>
+      </div>
+      <textarea id="f-data" rows="10" placeholder="Cole aqui as linhas copiadas da planilha (TAB separado) — incluindo o cabeçalho na 1ª linha"></textarea>
+      <div class="flex justify-end gap-2 mt-3">
+        <button id="btn-limpar" class="btn btn-secondary">Limpar</button>
+        <button id="btn-import" class="btn btn-primary"><i class="fas fa-upload mr-1"></i>Importar</button>
+      </div>
+      <div id="result" class="mt-4"></div>
+    </div>
+  `;
+
+  function parseTSV(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
+    if (lines.length < 2) return { headers: [], rows: [] };
+    const headers = lines[0].split('\t').map(h => h.trim());
+    const rows = lines.slice(1).map(l => {
+      const cells = l.split('\t');
+      const o = {}; headers.forEach((h, i) => o[h] = (cells[i] || '').trim());
+      return o;
+    });
+    return { headers, rows };
+  }
+
+  $('#btn-limpar').onclick = () => { $('#f-data').value = ''; $('#result').innerHTML = ''; $('#f-file').value = ''; };
+
+  // Upload Excel via SheetJS (lazy load)
+  $('#f-file').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!window.XLSX) {
+      await new Promise(res => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'; s.onload = res; document.head.appendChild(s); });
+    }
+    const ab = await f.arrayBuffer();
+    const wb = window.XLSX.read(ab, { type: 'array' });
+    const sheet = wb.Sheets['Remessa'] || wb.Sheets[wb.SheetNames[0]];
+    // Na planilha original o cabeçalho está na linha 2 (index 1)
+    const data = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+    let headerRow = 0;
+    for (let i = 0; i < Math.min(5, data.length); i++) {
+      if (data[i].some(c => String(c).toLowerCase().includes('op'))) { headerRow = i; break; }
+    }
+    const headers = data[headerRow].map(h => String(h).trim());
+    const rows = data.slice(headerRow + 1).filter(r => r.some(c => String(c).trim())).map(r => {
+      const o = {}; headers.forEach((h, i) => o[h] = String(r[i] == null ? '' : r[i]).trim()); return o;
+    });
+    $('#f-data').value = [headers.join('\t'), ...rows.map(r => headers.map(h => r[h]).join('\t'))].join('\n');
+    toast('Planilha carregada: ' + rows.length + ' linhas', 'success');
+  };
+
+  $('#btn-import').onclick = async () => {
+    const { rows } = parseTSV($('#f-data').value);
+    if (rows.length === 0) { toast('Cole ou carregue os dados primeiro', 'warning'); return; }
+    $('#result').innerHTML = '<div class="text-slate-500"><i class="fas fa-spinner fa-spin"></i> Importando ' + rows.length + ' linha(s)...</div>';
+    try {
+      const r = await api('post', '/terc/importar/remessas', {
+        rows, dry_run: $('#f-dry').checked, criar_cadastros: $('#f-criar').checked,
+      });
+      const d = r.data || {};
+      $('#result').innerHTML = `
+        <div class="card p-4 ${$('#f-dry').checked ? 'bg-amber-50' : 'bg-emerald-50'}">
+          <h4 class="font-semibold mb-2">${$('#f-dry').checked ? '🧪 Simulação concluída' : '✅ Importação concluída'}</h4>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div><div class="text-xs text-slate-500">Linhas lidas</div><div class="text-2xl font-bold">${fmt.int(d.total || rows.length)}</div></div>
+            <div><div class="text-xs text-slate-500">Remessas criadas</div><div class="text-2xl font-bold text-emerald-700">${fmt.int(d.inseridas || 0)}</div></div>
+            <div><div class="text-xs text-slate-500">Cadastros criados</div><div class="text-2xl font-bold">${fmt.int(d.cadastros_criados || 0)}</div></div>
+            <div><div class="text-xs text-slate-500">Erros/pulados</div><div class="text-2xl font-bold text-red-700">${fmt.int((d.erros || []).length)}</div></div>
+          </div>
+          ${(d.erros && d.erros.length) ? '<div class="mt-3 max-h-64 overflow-y-auto"><h5 class="font-semibold mb-1">Erros:</h5><ul class="text-xs list-disc pl-5">' + d.erros.slice(0, 50).map(e => '<li>Linha ' + e.linha + ': ' + e.erro + '</li>').join('') + '</ul></div>' : ''}
+          ${$('#f-dry').checked ? '<div class="mt-3 p-2 bg-amber-100 rounded text-sm">⚠️ Nada foi gravado. Desmarque "Simulação" para importar de verdade.</div>' : ''}
+        </div>
+      `;
+      if (!$('#f-dry').checked) await TERC.load(true);
+    } catch (e) {
+      $('#result').innerHTML = '<div class="p-3 bg-red-50 text-red-700 rounded">Erro: ' + (e.message || e) + '</div>';
+    }
+  };
+};
 
 /* ============================================================
  * TELA DE LOGIN
