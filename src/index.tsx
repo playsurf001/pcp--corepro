@@ -46,36 +46,47 @@ function renderSPA(): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PCP Confecção v2.0</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%91%95%3C/text%3E%3C/svg%3E" />
+  <title>CorePro — Onde sistemas se tornam negócio</title>
+  <meta name="description" content="CorePro — Plataforma SaaS de PCP, balanceamento e gestão de produção." />
+  <meta name="theme-color" content="#020617" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/logo-icon.png" />
+  <link rel="apple-touch-icon" href="/static/logo-icon.png" />
+  <link rel="shortcut icon" href="/static/favicon.ico" />
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
-  <link href="/static/styles.css" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="/static/styles.css?v=3" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
         extend: {
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui'] },
           colors: {
-            brand: { DEFAULT: '#0f766e', dark: '#115e59', light: '#14b8a6' }
+            brand: { DEFAULT: '#2563EB', dark: '#1D4ED8', light: '#60A5FA', neon: '#7C3AED' }
           }
         }
       }
     }
   </script>
+  <style>html,body{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;}</style>
 </head>
-<body class="bg-slate-50 min-h-screen">
+<body class="min-h-screen">
   <div id="app">
-    <div class="flex items-center justify-center h-screen">
+    <div class="login-screen">
       <div class="text-center">
-        <i class="fas fa-spinner fa-spin text-4xl text-brand"></i>
-        <p class="mt-3 text-slate-600">Carregando sistema...</p>
+        <img src="/static/logo-icon.png" alt="CorePro" style="width:96px;height:96px;filter:drop-shadow(0 4px 20px rgba(37,99,235,.5));animation:pulse 2s ease-in-out infinite;" />
+        <p style="margin-top:20px;color:#9CA3AF;letter-spacing:.12em;font-size:.85rem;text-transform:uppercase;">
+          <i class="fas fa-spinner fa-spin" style="color:#2563EB;margin-right:8px;"></i> Inicializando CorePro…
+        </p>
       </div>
     </div>
   </div>
+  <style>@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.05);opacity:.85}}</style>
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>`;
 }

@@ -1,11 +1,13 @@
-# PCP Confecção v2.0 — Sistema Online
+# CorePro — Onde sistemas se tornam negócio
 
-Sistema web de Planejamento e Controle da Produção para confecção, reconstruído a partir do legado Excel **"Kamylla – Ficha Balanceamento v1.0"**.
+Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecções. Construída a partir da planilha legada **"Kamylla – Ficha Balanceamento v1.0"** e reimaginada com identidade visual de alto valor percebido.
 
 ## Visão Geral
-- **Nome**: PCP Confecção v2.0
-- **Objetivo**: Substituir a planilha legado por um sistema online robusto, auditável e escalável, preservando a lógica operacional conhecida pela equipe (3 modos de balanceamento, ficha de acompanhamento, cores/tamanhos) e eliminando as fragilidades técnicas (linha "0", VLOOKUP sem ID, dados desnormalizados, ausência de versionamento).
-- **Stack**: Hono + TypeScript + Cloudflare Pages (edge) + D1 (SQLite) + SPA em JS puro + TailwindCSS + Chart.js + DayJS + FontAwesome (via CDN).
+- **Nome comercial**: **CorePro**
+- **Tagline**: _Onde sistemas se tornam negócio._
+- **Produto base**: PCP Confecção v2.0 (3 modos de balanceamento, ficha, apontamento, auditoria, multiusuário).
+- **Tema visual**: Dark Premium SaaS — paleta `#020617 / #2563EB / #7C3AED / #00FF9C`, gradiente marca `linear-gradient(135deg, #2563EB, #7C3AED)`, glow controlado, tipografia Inter.
+- **Stack**: Hono + TypeScript + Cloudflare Pages (edge) + D1 (SQLite) + SPA vanilla JS + TailwindCSS + Chart.js + DayJS + FontAwesome (via CDN).
 
 ## URLs Públicas
 

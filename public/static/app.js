@@ -116,22 +116,23 @@ function renderLayout() {
 
   $('#app').innerHTML = `
   <div class="flex h-screen">
-    <aside id="sidebar" class="sidebar w-64 text-white flex-shrink-0 overflow-y-auto">
-      <div class="p-5 border-b border-teal-800">
-        <h1 class="text-xl font-bold flex items-center gap-2">
-          <i class="fas fa-industry"></i> PCP Confecção
-        </h1>
-        <p class="text-xs text-teal-200 mt-1">v2.0 • Sistema de balanceamento</p>
+    <aside id="sidebar" class="sidebar w-64 flex-shrink-0 overflow-y-auto">
+      <div class="sidebar-brand">
+        <a href="#dashboard" data-route="dashboard" title="CorePro — Dashboard">
+          <img src="/static/logo-full.png" alt="CorePro" />
+        </a>
       </div>
+      <div class="sidebar-tagline">Onde sistemas se tornam negócio</div>
       <nav class="py-2">
         ${Object.entries(groups).map(([g, items]) => `
-          <div class="px-4 py-1 text-xs uppercase text-teal-300 font-semibold mt-3">${g}</div>
+          <div class="nav-group-label">${g}</div>
           ${items.map(i => `
-            <a href="#${i.id}" data-route="${i.id}" class="nav-item flex items-center gap-3 px-4 py-2 text-sm cursor-pointer">
-              <i class="fas ${i.icon} w-5 text-center"></i>
+            <a href="#${i.id}" data-route="${i.id}" class="nav-item">
+              <i class="fas ${i.icon}"></i>
               <span>${i.label}</span>
             </a>`).join('')}
         `).join('')}
+        <div style="height:24px"></div>
       </nav>
     </aside>
     <div class="flex-1 flex flex-col overflow-hidden">
@@ -240,19 +241,43 @@ ROUTES.dashboard = async (main) => {
     </div>
   `;
 
+  // Tema CorePro para Chart.js (cores neon + eixos escuros)
+  const CP_THEME = {
+    primary: '#2563EB', secondary: '#7C3AED', success: '#00FF9C',
+    warning: '#F97316', danger: '#FF3B3B', grid: 'rgba(148,163,184,0.10)',
+    tick: '#9CA3AF',
+  };
+  const axisCfg = {
+    scales: {
+      x: { ticks: { color: CP_THEME.tick }, grid: { color: CP_THEME.grid } },
+      y: { ticks: { color: CP_THEME.tick }, grid: { color: CP_THEME.grid } }
+    },
+    plugins: { legend: { labels: { color: '#E5E7EB' } } }
+  };
+
   const labels = d.carga_clientes.map(x => x.nome_cliente);
   const data = d.carga_clientes.map(x => x.pecas);
-  if (labels.length) new Chart($('#ch-cli'), { type: 'bar', data: { labels, datasets: [{ label: 'Peças', data, backgroundColor: '#14b8a6' }] }, options: { indexAxis: 'y', plugins: { legend: { display: false } } } });
+  if (labels.length) new Chart($('#ch-cli'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Peças', data, backgroundColor: CP_THEME.primary, borderRadius: 6, borderSkipped: false }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: axisCfg.scales }
+  });
 
   const labelsR = d.carga_refs.map(x => x.cod_ref + ' - ' + (x.desc_ref || '').slice(0, 25));
   const dataR = d.carga_refs.map(x => x.pecas);
-  if (labelsR.length) new Chart($('#ch-ref'), { type: 'bar', data: { labels: labelsR, datasets: [{ label: 'Peças', data: dataR, backgroundColor: '#6366f1' }] }, options: { indexAxis: 'y', plugins: { legend: { display: false } } } });
+  if (labelsR.length) new Chart($('#ch-ref'), {
+    type: 'bar',
+    data: { labels: labelsR, datasets: [{ label: 'Peças', data: dataR, backgroundColor: CP_THEME.secondary, borderRadius: 6, borderSkipped: false }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: axisCfg.scales }
+  });
 
   const labelsS = d.status_breakdown.map(x => x.status);
   const dataS = d.status_breakdown.map(x => x.c);
+  const statusColors = { 'Aberta':'#6B7280', 'Planejada':CP_THEME.secondary, 'EmProducao':CP_THEME.primary, 'Concluida':CP_THEME.success, 'Cancelada':CP_THEME.danger };
   if (labelsS.length) new Chart($('#ch-st'), {
     type: 'doughnut',
-    data: { labels: labelsS, datasets: [{ data: dataS, backgroundColor: ['#3b82f6', '#a855f7', '#f59e0b', '#10b981', '#ef4444'] }] }
+    data: { labels: labelsS, datasets: [{ data: dataS, backgroundColor: labelsS.map(s => statusColors[s] || CP_THEME.primary), borderColor: '#0B1120', borderWidth: 2 }] },
+    options: { plugins: { legend: { labels: { color: '#E5E7EB' } } }, cutout: '60%' }
   });
 };
 
@@ -1596,32 +1621,30 @@ function openUsuarioForm(row) {
  * ============================================================ */
 function renderLogin(msg) {
   $('#app').innerHTML = `
-  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-teal-700 to-teal-900 p-4">
-    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-8">
-      <div class="text-center mb-6">
-        <div class="inline-block bg-brand rounded-full p-4 text-white mb-3">
-          <i class="fas fa-industry text-3xl"></i>
-        </div>
-        <h1 class="text-2xl font-bold text-slate-800">PCP Confecção v2.0</h1>
-        <p class="text-slate-500 text-sm mt-1">Sistema de Balanceamento de Produção</p>
+  <div class="login-screen">
+    <div class="login-card">
+      <div class="login-logo">
+        <img src="/static/logo-full.png" alt="CorePro" />
+        <div class="login-tagline">Onde sistemas se tornam negócio</div>
       </div>
-      ${msg ? `<div class="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded text-sm"><i class="fas fa-info-circle"></i> ${msg}</div>` : ''}
+      ${msg ? `<div class="mb-4 p-3 rounded text-sm" style="background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.35);color:#F97316"><i class="fas fa-info-circle mr-1"></i> ${msg}</div>` : ''}
       <form id="login-form" class="space-y-4">
         <div>
-          <label>Login</label>
-          <input id="login-login" type="text" autocomplete="username" required autofocus />
+          <label><i class="fas fa-user mr-1" style="color:#60A5FA"></i> Usuário</label>
+          <input id="login-login" type="text" autocomplete="username" required autofocus placeholder="seu.usuario" />
         </div>
         <div>
-          <label>Senha</label>
-          <input id="login-senha" type="password" autocomplete="current-password" required />
+          <label><i class="fas fa-lock mr-1" style="color:#60A5FA"></i> Senha</label>
+          <input id="login-senha" type="password" autocomplete="current-password" required placeholder="••••••••" />
         </div>
-        <button type="submit" id="login-btn" class="btn btn-primary w-full">
-          <i class="fas fa-sign-in-alt mr-1"></i> Entrar
+        <button type="submit" id="login-btn" class="btn btn-primary w-full" style="padding:.75rem;font-size:.95rem;">
+          <i class="fas fa-arrow-right-to-bracket mr-2"></i> Acessar plataforma
         </button>
       </form>
-      <div id="login-msg" class="text-center text-sm text-red-600 mt-3"></div>
-      <div class="mt-6 pt-4 border-t text-xs text-slate-400 text-center">
-        <p>Primeiro acesso? Clique <a id="login-boot" href="#" class="text-brand hover:underline">aqui</a> para inicializar o usuário admin.</p>
+      <div id="login-msg" class="text-center text-sm mt-3" style="color:#FF3B3B"></div>
+      <div class="mt-6 pt-4 text-xs text-center" style="border-top:1px solid rgba(148,163,184,.15);color:#6B7280">
+        <p>Primeiro acesso? Clique <a id="login-boot" href="#" style="color:#60A5FA;font-weight:600">aqui</a> para inicializar o administrador.</p>
+        <p class="mt-2" style="opacity:.7">© ${new Date().getFullYear()} CorePro · PCP & Balanceamento</p>
       </div>
     </div>
   </div>`;
