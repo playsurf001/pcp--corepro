@@ -2391,6 +2391,422 @@ const TERC = {
     };
     return `<span class="px-2 py-0.5 rounded text-xs ${map[s] || 'bg-slate-100 text-slate-700'}">${s}</span>`;
   },
+  // Cache de parâmetros da empresa para impressão
+  empresa: null,
+  async loadEmpresa(force = false) {
+    if (!force && this.empresa) return this.empresa;
+    try {
+      const r = await api('get', '/parametros', null, { silent: true });
+      const map = {};
+      (r.data || []).forEach(p => { map[p.chave] = p.valor; });
+      this.empresa = {
+        nome: map.EMPRESA_NOME || 'CorePro',
+        tel: map.EMPRESA_TEL || '',
+        email: map.EMPRESA_EMAIL || '',
+        cnpj: map.EMPRESA_CNPJ || '',
+        endereco: map.EMPRESA_ENDERECO || '',
+      };
+    } catch {
+      this.empresa = { nome: 'CorePro', tel: '', email: '', cnpj: '', endereco: '' };
+    }
+    return this.empresa;
+  },
+};
+
+/* ============================================================
+ * MÓDULO DE IMPRESSÃO DE TERCEIRIZAÇÃO
+ * Replica fielmente as telas da planilha legada:
+ *  - Romaneio de Serviço (com grade de tamanhos)
+ *  - Comprovante de Entrega Total
+ *  - Controle de Entrega Parcial (com múltiplas coletas)
+ * ============================================================ */
+const TERC_PRINT = {
+  // Tamanhos padrão (iguais à planilha original)
+  TAMS: ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'],
+
+  // Abre uma nova janela de impressão com HTML + CSS A4
+  _openWindow(title, bodyHTML) {
+    const w = window.open('', '_blank', 'width=1100,height=800');
+    if (!w) { toast('Pop-ups bloqueados. Permita pop-ups para imprimir.', 'error'); return null; }
+    w.document.write(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+      <title>${title}</title>
+      <style>${this._printCSS()}</style>
+      </head><body>${bodyHTML}
+      <script>window.addEventListener('load',()=>{setTimeout(()=>{window.print();},350);});</script>
+      </body></html>`);
+    w.document.close();
+    return w;
+  },
+
+  _printCSS() {
+    return `
+      @page { size: A4 portrait; margin: 10mm 8mm; }
+      * { box-sizing: border-box; }
+      body { font-family: Arial, 'Helvetica Neue', sans-serif; font-size: 10pt; color: #000; margin: 0; padding: 0; background: #fff; }
+      .sheet { width: 100%; max-width: 200mm; margin: 0 auto; }
+      .empresa-header { display: flex; align-items: center; gap: 12px; padding: 6px 4px; border-bottom: 2px solid #000; margin-bottom: 6px; }
+      .empresa-logo { width: 70px; height: 60px; object-fit: contain; }
+      .empresa-info { flex: 1; text-align: center; }
+      .empresa-nome { font-size: 16pt; font-weight: bold; }
+      .empresa-contato { font-size: 9pt; color: #333; }
+      .empresa-datas { text-align: right; font-size: 9pt; line-height: 1.45; }
+      .empresa-datas b { display: inline-block; min-width: 100px; text-align: right; }
+      .titulo { font-size: 14pt; font-weight: bold; text-align: left; margin: 6px 0 4px; }
+      .sub { font-size: 11pt; margin: 4px 0; }
+      .sub b { background: #ffff99; padding: 2px 6px; border: 1px solid #888; }
+      .box-right { float: right; text-align: right; font-size: 10pt; }
+      .box-right .ctrl { display: inline-block; border: 2px solid #000; padding: 3px 10px; background: #fff; font-weight: bold; margin-top: 2px; }
+      table.grid { width: 100%; border-collapse: collapse; margin-top: 4px; }
+      table.grid th, table.grid td { border: 1px solid #000; padding: 3px 4px; font-size: 9pt; text-align: center; }
+      table.grid th { background: #e5e7eb; font-weight: bold; }
+      table.grid td.left { text-align: left; }
+      table.grid td.right { text-align: right; }
+      table.grid tr.destaque td { background: #fffbe6; font-weight: bold; }
+      .desc-italic { font-style: italic; color: #333; font-size: 9pt; margin: 2px 0 6px; padding: 0 2px; }
+      .assina-area { display: flex; justify-content: space-between; gap: 20px; margin-top: 14px; padding: 0 4px; }
+      .assina-col { flex: 1; }
+      .assina-col .linha { border-top: 1px solid #000; margin-top: 28px; padding-top: 2px; text-align: center; font-size: 9pt; }
+      .coleta-title { background: #d1fae5; border: 1px solid #000; text-align: center; font-weight: bold; padding: 4px; margin-top: 8px; font-size: 11pt; }
+      .comprovante-bloco { border: 1.5px solid #000; padding: 8px; margin-bottom: 10px; background: #f0fdf4; }
+      .comprovante-bloco h3 { text-align: center; background: #fff; border: 1px solid #000; padding: 4px; font-size: 11pt; margin: 0 0 6px; }
+      .dashed { border-top: 2px dashed #666; margin: 8px 0; padding-top: 4px; font-size: 8pt; color: #666; text-align: center; }
+      .alert { color: #b91c1c; font-weight: bold; margin: 6px 0; }
+      .page-break { page-break-after: always; }
+      .no-print { display: none; }
+      @media print {
+        body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+        .no-print { display: none !important; }
+      }
+    `;
+  },
+
+  // Cabeçalho institucional da empresa (igual ao romaneio Play Surf)
+  _headerHTML(empresa, metaDireita) {
+    const logo = '/static/favicon.png'; // reaproveita favicon da empresa/produto
+    return `
+      <div class="empresa-header">
+        <img src="${logo}" class="empresa-logo" onerror="this.style.display='none'"/>
+        <div class="empresa-info">
+          <div class="empresa-nome">${empresa.nome}</div>
+          <div class="empresa-contato">${empresa.tel || ''}${empresa.tel && empresa.email ? ' &middot; ' : ''}${empresa.email || ''}</div>
+          ${empresa.endereco ? `<div class="empresa-contato">${empresa.endereco}</div>` : ''}
+          ${empresa.cnpj ? `<div class="empresa-contato">CNPJ: ${empresa.cnpj}</div>` : ''}
+        </div>
+        <div class="empresa-datas">${metaDireita || ''}</div>
+      </div>
+    `;
+  },
+
+  // Tabela grade de tamanhos (replica a estrutura da coluna Gr + Tamanhos)
+  _gradeHeaderHTML(tams) {
+    return `<th>P<br><span style="font-weight:normal">34</span></th>
+            <th>M<br><span style="font-weight:normal">36</span></th>
+            <th>G<br><span style="font-weight:normal">38</span></th>
+            <th>GG<br><span style="font-weight:normal">40</span></th>
+            <th>EG<br><span style="font-weight:normal">42</span></th>
+            <th>SG<br><span style="font-weight:normal">44</span></th>
+            <th>46</th><th>48</th><th>50</th><th>52</th>`;
+  },
+
+  _gradeCellsFromRem(rem) {
+    // Mapeia os 10 tamanhos padrão da planilha (P, M, G, GG, EG, SG + 46, 48, 50, 52)
+    const ORDEM = ['P', 'M', 'G', 'GG', 'EG', 'SG', '46', '48', '50', '52'];
+    const g = Object.fromEntries((rem.grade || []).map(x => [x.tamanho, x.qtd]));
+    // Mapeia também os tamanhos "extras" usados no CorePro (PP, XG, UN, TAM1, TAM2)
+    // Se o sistema usa PP, mostra na coluna P; XG → junto com EG/SG se houver sobra; UN → P
+    return ORDEM.map(t => `<td>${g[t] || ''}</td>`).join('');
+  },
+
+  /* ================================================================
+   * 1) ROMANEIO DE SERVIÇO (tela "Romaneio de Serviço - Aparador")
+   * Tabela: Nº Ctrl | Nº OP | Ref | Desc Ref | Desc Serviço | Cor | Grade | Qtd | Preço | Valor
+   * Pode receber array de remessas (romaneio em lote do terceirizado)
+   * ================================================================ */
+  async romaneio(remessas, opts = {}) {
+    if (!Array.isArray(remessas)) remessas = [remessas];
+    if (remessas.length === 0) { toast('Sem remessas', 'warning'); return; }
+    const empresa = await TERC.loadEmpresa();
+
+    const r0 = remessas[0];
+    const nomeTerc = r0.nome_terc || 'Terceirização';
+    const setor = r0.nome_setor || '';
+
+    // Datas: usa da primeira remessa como referência, mas imprime todas as da lista
+    const dtSaida = r0.dt_saida ? dayjs(r0.dt_saida).format('DD/MM/YYYY') : '';
+    const dtInicio = r0.dt_inicio ? dayjs(r0.dt_inicio).format('DD/MM/YYYY') : dtSaida;
+    const dtPrev = r0.dt_previsao ? dayjs(r0.dt_previsao).format('DD/MM/YYYY') : '';
+
+    const metaDir = `
+      <div><b>Data de Saída:</b> ${dtSaida}</div>
+      <div><b>Data de Início:</b> ${dtInicio}</div>
+      <div><b>Previsão retorno:</b> ${dtPrev}</div>
+    `;
+
+    // Totais
+    const tot = remessas.reduce((a, r) => ({
+      qtd: a.qtd + (Number(r.qtd_total) || 0),
+      valor: a.valor + (Number(r.valor_total) || 0),
+    }), { qtd: 0, valor: 0 });
+
+    const linhas = remessas.map(r => `
+      <tr class="destaque">
+        <td style="background:#fffbe6;font-weight:bold">${r.num_controle}</td>
+        <td>${r.num_op || '—'}</td>
+        <td class="left"><b>${r.cod_ref || ''}</b></td>
+        <td class="left">${r.desc_ref || ''}</td>
+        <td class="left">${r.desc_servico || ''}</td>
+        <td>${r.cor || '—'}</td>
+        ${this._gradeCellsFromRem(r)}
+        <td class="right"><b>${fmt.int(r.qtd_total)}</b></td>
+        <td class="right">${fmt.num(r.preco_unit, 2)}</td>
+        <td class="right"><b>${fmt.num(r.valor_total, 2)}</b></td>
+      </tr>
+    `).join('');
+
+    // Linhas em branco para completar (visual igual à planilha)
+    const vazias = Math.max(0, 15 - remessas.length);
+    const linhasVazias = Array(vazias).fill(0).map(() => `
+      <tr>
+        <td style="background:#fffbe6">&nbsp;</td>
+        <td></td><td></td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+        <td></td><td></td><td></td>
+      </tr>
+    `).join('');
+
+    const body = `
+      <div class="sheet">
+        ${this._headerHTML(empresa, metaDir)}
+        <div class="titulo">Romaneio de Serviço${setor ? ' - ' + setor : ''}</div>
+        <div class="sub"><b>Terceirização:</b> ${nomeTerc}</div>
+        <table class="grid" style="font-size:8pt">
+          <thead>
+            <tr>
+              <th rowspan="2">Nº de<br>Controle</th>
+              <th rowspan="2">Nº OP</th>
+              <th rowspan="2">Ref.</th>
+              <th rowspan="2">Descrição da<br>Referência</th>
+              <th rowspan="2">Descrição do<br>Serviço</th>
+              <th rowspan="2">Cor</th>
+              <th colspan="10" style="background:#d1fae5">T a m a n h o s</th>
+              <th rowspan="2">Qtde<br>Total</th>
+              <th rowspan="2">Preço</th>
+              <th rowspan="2">Valor<br>Total</th>
+            </tr>
+            <tr>
+              ${this._gradeHeaderHTML()}
+            </tr>
+          </thead>
+          <tbody>
+            ${linhas}
+            ${linhasVazias}
+            <tr style="background:#e5e7eb;font-weight:bold">
+              <td colspan="16" class="right">TOTAL GERAL</td>
+              <td class="right">${fmt.int(tot.qtd)}</td>
+              <td></td>
+              <td class="right">${TERC.fmtBRL(tot.valor)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="assina-area" style="margin-top:30px">
+          <div class="assina-col">
+            <div class="linha">Entregue por (Empresa)</div>
+          </div>
+          <div class="assina-col">
+            <div class="linha">Recebido por (${nomeTerc})</div>
+          </div>
+        </div>
+        <div style="margin-top:14px;font-size:8pt;color:#555;text-align:center">
+          Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} por ${state.user?.nome || state.user?.login || '—'} · CorePro PCP
+        </div>
+      </div>
+    `;
+    this._openWindow('Romaneio — ' + nomeTerc, body);
+  },
+
+  /* ================================================================
+   * 2) COMPROVANTE DE ENTREGA TOTAL (parte superior da tela 1)
+   * Bloco único com: referência, grade horizontal, datas, assinatura
+   * Imprime 2 vias (para empresa e terceirizado)
+   * ================================================================ */
+  async comprovanteTotal(remessa, opts = {}) {
+    const empresa = await TERC.loadEmpresa();
+    const duasVias = opts.duasVias !== false;
+
+    const bloco = (via) => `
+      <div class="comprovante-bloco">
+        <h3>Comprovante de entrega total da remessa para Empresa ${via ? '(' + via + ')' : ''}</h3>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div class="titulo" style="font-size:13pt">Terceirização: ${remessa.nome_terc}</div>
+          </div>
+          <div class="box-right">
+            <div><b>Nº OP:</b> ${remessa.num_op || '—'}</div>
+            <div class="ctrl">Nº Controle: ${remessa.num_controle}</div>
+          </div>
+        </div>
+        <table class="grid" style="clear:both">
+          <thead>
+            <tr>
+              <th>Referência</th><th>Cor</th>
+              ${this._gradeHeaderHTML()}
+              <th>Total</th>
+              <th>Data de<br>Envio</th>
+              <th>Previsão<br>Entrega</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="destaque">
+              <td class="left"><b>${remessa.cod_ref}</b></td>
+              <td>${remessa.cor || '—'}</td>
+              ${this._gradeCellsFromRem(remessa)}
+              <td><b>${fmt.int(remessa.qtd_total)}</b></td>
+              <td>${fmt.date(remessa.dt_saida)}</td>
+              <td>${fmt.date(remessa.dt_previsao)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="desc-italic">${remessa.desc_ref || ''}${remessa.desc_servico ? ' — <b>Serviço:</b> ' + remessa.desc_servico : ''}</div>
+
+        <div class="assina-area">
+          <div class="assina-col">
+            <div>Data última peça: ______ / ______ / 20______</div>
+            <div style="margin-top:12px;font-size:9pt">Observações: ${remessa.observacao || ''}</div>
+          </div>
+          <div class="assina-col">
+            <div class="linha">Visto de quem pegar a última peça</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const body = `
+      <div class="sheet">
+        ${this._headerHTML(empresa, `<div><b>Emitido em:</b> ${dayjs().format('DD/MM/YYYY HH:mm')}</div>`)}
+        ${bloco('1ª via — Empresa')}
+        ${duasVias ? '<div class="dashed">— — — — destaque aqui — — — —</div>' + bloco('2ª via — Terceirizado') : ''}
+      </div>
+    `;
+    this._openWindow('Comprovante de Entrega — Ctrl ' + remessa.num_controle, body);
+  },
+
+  /* ================================================================
+   * 3) CONTROLE DE ENTREGA PARCIAL (parte inferior da tela 1)
+   * Bloco com: referência, grade; depois tabela com N coletas + saldos
+   * ================================================================ */
+  async controleParcial(remessa, opts = {}) {
+    const empresa = await TERC.loadEmpresa();
+
+    // Quantas coletas já existem + 2 linhas em branco para preencher manualmente
+    const retornos = remessa.retornos || [];
+    const minColetas = Math.max(retornos.length + 2, 4);
+
+    // Calcular saldos progressivos por tamanho
+    const ORDEM = ['P', 'M', 'G', 'GG', 'EG', 'SG', '46', '48', '50', '52'];
+    const gradeEnviada = Object.fromEntries((remessa.grade || []).map(g => [g.tamanho, Number(g.qtd) || 0]));
+
+    const saldos = {};
+    ORDEM.forEach(t => { saldos[t] = gradeEnviada[t] || 0; });
+
+    const linhasColetas = [];
+    for (let i = 0; i < minColetas; i++) {
+      const ret = retornos[i];
+      const gradeRet = {};
+      if (ret && Array.isArray(ret.grade)) ret.grade.forEach(g => { gradeRet[g.tamanho] = Number(g.qtd) || 0; });
+
+      const cells = ORDEM.map(t => `<td>${gradeRet[t] || ''}</td>`).join('');
+      const totRet = ORDEM.reduce((a, t) => a + (gradeRet[t] || 0), 0);
+
+      linhasColetas.push(`
+        <tr>
+          <td class="left"><b>${i + 1}ª coleta:</b> ${ret ? fmt.date(ret.dt_retorno) : ''}</td>
+          ${cells}
+          <td><b>${ret ? fmt.int(totRet) : ''}</b></td>
+          <td style="width:110px"></td>
+        </tr>
+      `);
+
+      // Atualiza saldo se houver retorno real
+      if (ret) ORDEM.forEach(t => { saldos[t] = Math.max(0, (saldos[t] || 0) - (gradeRet[t] || 0)); });
+
+      const saldoCells = ORDEM.map(t => `<td style="color:#b45309">${saldos[t] || 0}</td>`).join('');
+      const totSaldo = ORDEM.reduce((a, t) => a + (saldos[t] || 0), 0);
+      linhasColetas.push(`
+        <tr style="background:#fffbeb">
+          <td class="left" style="color:#b45309"><b>Saldo =></b></td>
+          ${saldoCells}
+          <td style="color:#b45309"><b>${fmt.int(totSaldo)}</b></td>
+          <td></td>
+        </tr>
+      `);
+    }
+
+    const body = `
+      <div class="sheet">
+        ${this._headerHTML(empresa, `<div><b>Emitido em:</b> ${dayjs().format('DD/MM/YYYY HH:mm')}</div>`)}
+        <div class="comprovante-bloco">
+          <h3>CONTROLE ENTREGA PARCIAL DA TERCEIRIZAÇÃO PARA EMPRESA</h3>
+
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div class="titulo" style="font-size:13pt">Terceirização: ${remessa.nome_terc}</div>
+            <div class="box-right">
+              <div><b>Nº OP:</b> ${remessa.num_op || '—'}</div>
+              <div class="ctrl">Nº Controle: ${remessa.num_controle}</div>
+            </div>
+          </div>
+
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>Referência</th><th>Cor</th>
+                ${this._gradeHeaderHTML()}
+                <th>Total</th>
+                <th>Data de<br>Envio</th>
+                <th>Previsão<br>Entrega</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="destaque">
+                <td class="left"><b>${remessa.cod_ref}</b></td>
+                <td>${remessa.cor || '—'}</td>
+                ${this._gradeCellsFromRem(remessa)}
+                <td><b>${fmt.int(remessa.qtd_total)}</b></td>
+                <td>${fmt.date(remessa.dt_saida)}</td>
+                <td>${fmt.date(remessa.dt_previsao)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="desc-italic">${remessa.desc_ref || ''}${remessa.desc_servico ? ' — <b>Serviço:</b> ' + remessa.desc_servico : ''}</div>
+
+          <div class="coleta-title">Quantidade Retornada</div>
+          <table class="grid">
+            <thead>
+              <tr>
+                <th style="width:130px">Data da coleta</th>
+                ${this._gradeHeaderHTML()}
+                <th>Total</th>
+                <th>Visto de quem coletar</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${linhasColetas.join('')}
+            </tbody>
+          </table>
+
+          <div style="margin-top:10px;font-size:9pt;color:#555">
+            <b>Legenda:</b> "Saldo =>" é a quantidade ainda pendente (enviada − total retornado até a linha).
+            ${retornos.length ? `<br><b>Retornos já registrados no sistema:</b> ${retornos.length} — preenchidos automaticamente.` : '<br>Preencha manualmente os dados das coletas à medida que ocorrerem.'}
+          </div>
+        </div>
+
+        <div style="margin-top:14px;font-size:8pt;color:#555;text-align:center">
+          Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} por ${state.user?.nome || state.user?.login || '—'} · CorePro PCP
+        </div>
+      </div>
+    `;
+    this._openWindow('Controle Parcial — Ctrl ' + remessa.num_controle, body);
+  },
 };
 
 /* ---------- DASHBOARD de Terceirização ---------- */
@@ -2724,12 +3140,14 @@ ROUTES.terc_remessas = async (main) => {
         <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
         <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
         <div class="flex-1"></div>
+        <button id="btn-romaneio-lote" class="btn btn-secondary" title="Imprime um Romaneio de Serviço com todas as remessas filtradas"><i class="fas fa-print mr-1"></i>Romaneio em Lote</button>
         <button id="btn-nova" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Nova Remessa</button>
       </div>
     </div>
     <div class="card p-0 overflow-x-auto" id="tbl"></div>
   `;
 
+  let _lastRemessas = [];
   async function load() {
     const p = new URLSearchParams();
     if ($('#f-search').value) p.set('search', $('#f-search').value);
@@ -2740,6 +3158,7 @@ ROUTES.terc_remessas = async (main) => {
     if ($('#f-ate').value) p.set('ate', $('#f-ate').value);
     const r = await api('get', '/terc/remessas?' + p.toString());
     const rs = r.data || [];
+    _lastRemessas = rs;
     $('#tbl').innerHTML = `
       <table class="w-full text-sm">
         <thead class="bg-slate-100"><tr>
@@ -2776,6 +3195,14 @@ ROUTES.terc_remessas = async (main) => {
                 <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
                 <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
                 <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
+                <div class="inline-block relative group">
+                  <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir"><i class="fas fa-print"></i></button>
+                  <div class="hidden group-hover:block absolute right-0 top-full bg-white border shadow-lg rounded text-left z-20 min-w-[180px] text-xs">
+                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printRom(${r.id_remessa})"><i class="fas fa-file-lines text-blue-600 mr-1"></i>Romaneio de Serviço</button>
+                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printCompTotal(${r.id_remessa})"><i class="fas fa-check-circle text-emerald-600 mr-1"></i>Compr. Entrega Total</button>
+                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printParcial(${r.id_remessa})"><i class="fas fa-list-check text-amber-600 mr-1"></i>Controle Parcial</button>
+                  </div>
+                </div>
                 <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
               </td>
             </tr>`).join('')}
@@ -2791,8 +3218,37 @@ ROUTES.terc_remessas = async (main) => {
     if (!confirm('Excluir remessa nº ' + n + '?')) return;
     try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); } catch {}
   };
+  // Handlers de impressão individual (buscam detalhe completo antes)
+  window.TERC_printRom = async (id) => {
+    const r = await api('get', '/terc/remessas/' + id);
+    await TERC_PRINT.romaneio([r.data]);
+  };
+  window.TERC_printCompTotal = async (id) => {
+    const r = await api('get', '/terc/remessas/' + id);
+    await TERC_PRINT.comprovanteTotal(r.data);
+  };
+  window.TERC_printParcial = async (id) => {
+    const r = await api('get', '/terc/remessas/' + id);
+    await TERC_PRINT.controleParcial(r.data);
+  };
   $('#btn-filtrar').onclick = load;
   $('#btn-nova').onclick = () => TERC_openRemModal(null, load);
+  $('#btn-romaneio-lote').onclick = async () => {
+    if (!_lastRemessas.length) { toast('Filtre alguma remessa antes', 'warning'); return; }
+    // Para o romaneio em lote precisamos da grade de cada remessa — busca em paralelo (limitado a 30)
+    if (_lastRemessas.length > 30) {
+      if (!confirm('Imprimir ' + _lastRemessas.length + ' remessas? Recomendado ≤ 30 por romaneio. Continuar?')) return;
+    }
+    toast('Preparando romaneio em lote...', 'info');
+    const detalhes = [];
+    for (const r of _lastRemessas.slice(0, 60)) {
+      try {
+        const d = await api('get', '/terc/remessas/' + r.id_remessa, null, { silent: true });
+        detalhes.push(d.data);
+      } catch { detalhes.push(r); }
+    }
+    await TERC_PRINT.romaneio(detalhes);
+  };
   await load();
 };
 
@@ -3010,9 +3466,14 @@ async function TERC_openRemDetalhe(id) {
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
   card.innerHTML = `
-    <div class="flex items-start justify-between mb-3">
+    <div class="flex items-start justify-between mb-3 flex-wrap gap-2">
       <h3 class="text-lg font-semibold"><i class="fas fa-file-invoice mr-2 text-brand"></i>Remessa Nº ${r.num_controle} <span class="text-sm font-normal text-slate-500">(${r.num_op || 'sem OP'})</span></h3>
-      <div class="flex gap-2"><button id="m-print" class="btn btn-sm btn-secondary"><i class="fas fa-print"></i></button><button id="m-close" class="btn btn-sm btn-secondary"><i class="fas fa-times"></i></button></div>
+      <div class="flex gap-2 flex-wrap">
+        <button id="m-print-rom" class="btn btn-sm" style="background:#2563eb;color:white" title="Romaneio de Serviço (planilha)"><i class="fas fa-file-lines mr-1"></i>Romaneio</button>
+        <button id="m-print-comp" class="btn btn-sm" style="background:#10b981;color:white" title="Comprovante de Entrega Total (2 vias)"><i class="fas fa-check-circle mr-1"></i>Compr. Total</button>
+        <button id="m-print-parcial" class="btn btn-sm" style="background:#f59e0b;color:white" title="Controle de Entrega Parcial (com coletas)"><i class="fas fa-list-check mr-1"></i>Ctrl. Parcial</button>
+        <button id="m-close" class="btn btn-sm btn-secondary"><i class="fas fa-times"></i></button>
+      </div>
     </div>
     <div id="print-area">
       <div class="grid grid-cols-3 gap-3 text-sm mb-4">
@@ -3074,16 +3535,10 @@ async function TERC_openRemDetalhe(id) {
   `;
   m.appendChild(card); document.body.appendChild(m);
   $('#m-close').onclick = () => m.remove();
-  $('#m-print').onclick = () => {
-    const w = window.open('', '_blank');
-    w.document.write(`<html><head><title>Remessa ${r.num_controle}</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-      <style>@media print{.no-print{display:none}}body{font-family:Inter,system-ui,sans-serif;padding:20px}</style></head>
-      <body><h1 class="text-2xl font-bold mb-2">CorePro — Remessa Nº ${r.num_controle}</h1><div class="text-sm text-slate-500 mb-4">Emitido em ${dayjs().format('DD/MM/YYYY HH:mm')}</div>
-      ${card.querySelector('#print-area').innerHTML}</body></html>`);
-    w.document.close();
-    setTimeout(() => { w.print(); }, 500);
-  };
+  // Ações de impressão — usam o módulo TERC_PRINT (replica planilha)
+  $('#m-print-rom').onclick = () => TERC_PRINT.romaneio([r]);
+  $('#m-print-comp').onclick = () => TERC_PRINT.comprovanteTotal(r);
+  $('#m-print-parcial').onclick = () => TERC_PRINT.controleParcial(r);
   window.TERC_delRet = async (idRet, idRem) => {
     if (!confirm('Excluir retorno?')) return;
     try { await api('delete', '/terc/retornos/' + idRet); toast('Retorno excluído', 'success'); m.remove(); TERC_openRemDetalhe(idRem); } catch {}
