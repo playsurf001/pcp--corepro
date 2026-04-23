@@ -12,10 +12,10 @@ Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecç�
 ## URLs Públicas
 
 ### 🚀 Produção (Cloudflare Pages)
-- **App**: https://pcp-confeccao.pages.dev
-- **Deployment atual**: https://88205839.pcp-confeccao.pages.dev
-- **Health**: https://pcp-confeccao.pages.dev/api/health
-- **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → pcp-confeccao
+- **App**: https://corepro-confeccao.pages.dev ⭐ (URL oficial fixo)
+- **URL anterior (mantido como espelho)**: https://pcp-confeccao.pages.dev
+- **Health**: https://corepro-confeccao.pages.dev/api/health
+- **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → corepro-confeccao
 
 ### 📦 Código fonte (GitHub)
 - **Repositório**: https://github.com/playsurf001/pcp--corepro
@@ -26,7 +26,7 @@ Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecç�
 - Health: https://3000-i3enbye2xzp7kgjcurtzy-18e660f9.sandbox.novita.ai/api/health
 
 ## 🔐 Acesso ao Sistema
-1. Abra https://pcp-confeccao.pages.dev
+1. Abra https://corepro-confeccao.pages.dev
 2. No primeiro uso, clique em **"aqui"** (link azul abaixo do botão Entrar) para inicializar o usuário admin.
 3. Faça login com `admin` / `admin` — o sistema vai exigir a troca imediata.
 4. Defina uma senha forte (mín. 6 caracteres).
@@ -112,9 +112,9 @@ Relacionamentos:
 
 ## Deploy
 - **Plataforma**: Cloudflare Pages + D1 (edge global)
-- **Status Produção**: ✅ **Ativo** em https://pcp-confeccao.pages.dev
-- **Projeto Cloudflare**: `pcp-confeccao` (production branch: `main`)
-- **Banco D1 Produção**: `pcp-confeccao-prod` (UUID `cb4cd8ca-3f6e-43bd-ad3d-b90488916399`)
+- **Status Produção**: ✅ **Ativo** em https://corepro-confeccao.pages.dev
+- **Projeto Cloudflare**: `corepro-confeccao` (production branch: `main`)
+- **Banco D1 Produção**: `pcp-confeccao-prod` (UUID `cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — compartilhado entre os 2 projetos
 - **Banco D1 Local**: `.wrangler/state/v3/d1`
 - **Status Sandbox (dev)**: ✅ Rodando com PM2 na porta 3000
 - **GitHub**: https://github.com/playsurf001/pcp--corepro (sincronizado)
@@ -129,11 +129,11 @@ npx wrangler d1 create pcp-confeccao-prod
 npx wrangler d1 migrations apply pcp-confeccao-prod --remote
 
 # 3. Criou projeto Cloudflare Pages
-npx wrangler pages project create pcp-confeccao --production-branch main --compatibility-date 2026-04-13
+npx wrangler pages project create corepro-confeccao --production-branch main --compatibility-date 2026-04-13
 
 # 4. Build + Deploy
 npm run build
-npx wrangler pages deploy dist --project-name pcp-confeccao --branch main
+npx wrangler pages deploy dist --project-name corepro-confeccao --branch main
 ```
 
 ### Scripts disponíveis
