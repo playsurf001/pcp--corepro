@@ -319,9 +319,17 @@ function makeCrud(config) {
         tr.appendChild(el('td', { class: 'px-3 py-2', html: v ?? '' }));
       });
       const acts = el('td', { class: 'px-3 py-2 text-center' });
+      const idv = row[config.idField];
+      const isAtivo = row.ativo === 1 || row.ativo === true;
+      const toggleBtn = config.toggleAtivo
+        ? `<button title="${isAtivo ? 'Inativar' : 'Reativar'}" class="mr-2" style="color:${isAtivo ? '#F97316' : '#00FF9C'}" data-toggle="${idv}" data-ativo="${isAtivo ? 1 : 0}">
+             <i class="fas ${isAtivo ? 'fa-toggle-on' : 'fa-toggle-off'}"></i>
+           </button>`
+        : '';
       acts.innerHTML = `
-        <button class="text-blue-600 hover:text-blue-800 mr-2" data-edit="${row[config.idField]}"><i class="fas fa-edit"></i></button>
-        <button class="text-red-600 hover:text-red-800" data-del="${row[config.idField]}"><i class="fas fa-trash"></i></button>`;
+        <button title="Editar" class="mr-2" style="color:#60A5FA" data-edit="${idv}"><i class="fas fa-edit"></i></button>
+        ${toggleBtn}
+        <button title="Excluir definitivamente" style="color:#FF3B3B" data-del="${idv}"><i class="fas fa-trash"></i></button>`;
       tr.appendChild(acts);
       tbody.appendChild(tr);
     });
@@ -331,10 +339,36 @@ function makeCrud(config) {
       const id = parseInt(b.dataset.edit);
       openCrudForm(config, data.find((x) => x[config.idField] === id));
     });
+
+    // Toggle ativo/inativo (sem apagar)
+    $$('[data-toggle]').forEach((b) => b.onclick = async () => {
+      const id = b.dataset.toggle;
+      const atual = parseInt(b.dataset.ativo) === 1;
+      const novo = atual ? 0 : 1;
+      const msg = atual ? 'Inativar este cadastro?' : 'Reativar este cadastro?';
+      if (!confirm(msg)) return;
+      try {
+        await api('patch', `${config.endpoint}/${id}/ativo`, { ativo: novo });
+        toast(novo ? 'Reativado.' : 'Inativado.', 'success');
+        render();
+      } catch {}
+    });
+
+    // Hard delete (exclusão real) — mensagens ricas via API
     $$('[data-del]').forEach((b) => b.onclick = async () => {
-      if (!confirm('Confirma inativar este registro?')) return;
-      await api('delete', `${config.endpoint}/${b.dataset.del}`);
-      toast('Inativado.', 'success'); render();
+      const id = b.dataset.del;
+      const row = data.find((x) => String(x[config.idField]) === String(id));
+      const nome = row ? (row[config.labelField || 'nome_cliente'] || row.cod_cliente || `#${id}`) : `#${id}`;
+      const msg = `Excluir DEFINITIVAMENTE ${config.label.toLowerCase()} "${nome}"?\n\n` +
+                  `Esta ação não pode ser desfeita. Se houver registros vinculados (ex: OPs), a exclusão será bloqueada.`;
+      if (!confirm(msg)) return;
+      try {
+        await api('delete', `${config.endpoint}/${id}`);
+        toast(`${config.label} excluído.`, 'success');
+        render();
+      } catch {
+        /* erro já é tratado pelo interceptor (toast) */
+      }
     });
   };
 }
@@ -394,6 +428,7 @@ function renderField(f, row) {
 /* ---------- Configs de CRUD ---------- */
 ROUTES.clientes = makeCrud({
   endpoint: '/clientes', idField: 'id_cliente', label: 'Cliente',
+  labelField: 'nome_cliente', toggleAtivo: true,
   cols: [
     { field: 'cod_cliente', label: 'Código' },
     { field: 'nome_cliente', label: 'Nome' },

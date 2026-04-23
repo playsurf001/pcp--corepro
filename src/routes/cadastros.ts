@@ -44,12 +44,36 @@ app.put('/clientes/:id', async (c) => {
   return c.json(ok({ id }));
 });
 
+// DELETE real (hard delete) - falha se houver OPs vinculadas
 app.delete('/clientes/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  // soft delete
-  await c.env.DB.prepare(`UPDATE clientes SET ativo=0 WHERE id_cliente=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Cliente=${id}`);
-  return c.json(ok({ id }));
+  const cli = await c.env.DB.prepare(`SELECT cod_cliente, nome_cliente FROM clientes WHERE id_cliente=?`).bind(id).first<any>();
+  if (!cli) return fail('Cliente não encontrado.', 404);
+
+  // verifica uso em OPs (FK)
+  const uso = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM op_cab WHERE id_cliente=?`).bind(id).first<any>();
+  if (uso && uso.c > 0) {
+    return fail(
+      `Não é possível excluir: ${cli.nome_cliente} possui ${uso.c} OP(s) vinculada(s). ` +
+      `Exclua ou reatribua as OPs antes, ou use "Inativar" para apenas desativar o cadastro.`,
+      409
+    );
+  }
+
+  await c.env.DB.prepare(`DELETE FROM clientes WHERE id_cliente=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Cliente=${cli.cod_cliente} (${cli.nome_cliente}) [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+// Toggle ativo/inativo (soft) - útil para desativar sem apagar
+app.patch('/clientes/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE clientes SET ativo=? WHERE id_cliente=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Cliente não encontrado.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Cliente=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== REFERÊNCIAS ========== */
