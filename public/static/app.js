@@ -3195,14 +3195,7 @@ ROUTES.terc_remessas = async (main) => {
                 <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
                 <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
                 <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
-                <div class="inline-block relative group">
-                  <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir"><i class="fas fa-print"></i></button>
-                  <div class="hidden group-hover:block absolute right-0 top-full bg-white border shadow-lg rounded text-left z-20 min-w-[180px] text-xs">
-                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printRom(${r.id_remessa})"><i class="fas fa-file-lines text-blue-600 mr-1"></i>Romaneio de Serviço</button>
-                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printCompTotal(${r.id_remessa})"><i class="fas fa-check-circle text-emerald-600 mr-1"></i>Compr. Entrega Total</button>
-                    <button class="w-full text-left px-3 py-2 hover:bg-slate-100" onclick="TERC_printParcial(${r.id_remessa})"><i class="fas fa-list-check text-amber-600 mr-1"></i>Controle Parcial</button>
-                  </div>
-                </div>
+                <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir" onclick="TERC_showPrintMenu(event, ${r.id_remessa})"><i class="fas fa-print"></i></button>
                 <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
               </td>
             </tr>`).join('')}
@@ -3217,6 +3210,42 @@ ROUTES.terc_remessas = async (main) => {
   window.TERC_delRem = async (id, n) => {
     if (!confirm('Excluir remessa nº ' + n + '?')) return;
     try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); } catch {}
+  };
+  // Menu flutuante de impressão (popover por clique — funciona em touch/mobile)
+  window.TERC_showPrintMenu = (ev, id) => {
+    ev.stopPropagation();
+    // Remove menu anterior se existir
+    const old = document.getElementById('terc-print-menu');
+    if (old) { old.remove(); if (old.dataset.id === String(id)) return; }
+    const btn = ev.currentTarget;
+    const rect = btn.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.id = 'terc-print-menu';
+    menu.dataset.id = String(id);
+    menu.style.cssText = `position:fixed;top:${rect.bottom + 4}px;left:${Math.max(8, rect.right - 200)}px;background:white;border:1px solid #cbd5e1;box-shadow:0 10px 25px rgba(0,0,0,0.15);border-radius:6px;z-index:9999;min-width:200px;font-size:13px;overflow:hidden;`;
+    menu.innerHTML = `
+      <button class="w-full text-left px-3 py-2 hover:bg-slate-100" style="display:block;border:0;background:transparent;cursor:pointer" data-act="rom"><i class="fas fa-file-lines text-blue-600 mr-2"></i>Romaneio de Serviço</button>
+      <button class="w-full text-left px-3 py-2 hover:bg-slate-100" style="display:block;border:0;background:transparent;cursor:pointer" data-act="comp"><i class="fas fa-check-circle text-emerald-600 mr-2"></i>Compr. Entrega Total</button>
+      <button class="w-full text-left px-3 py-2 hover:bg-slate-100" style="display:block;border:0;background:transparent;cursor:pointer" data-act="parc"><i class="fas fa-list-check text-amber-600 mr-2"></i>Controle Parcial</button>
+    `;
+    document.body.appendChild(menu);
+    menu.querySelectorAll('button').forEach(b => {
+      b.onclick = async (e) => {
+        e.stopPropagation();
+        const act = b.dataset.act;
+        menu.remove();
+        if (act === 'rom') await window.TERC_printRom(id);
+        else if (act === 'comp') await window.TERC_printCompTotal(id);
+        else if (act === 'parc') await window.TERC_printParcial(id);
+      };
+    });
+    // Fecha ao clicar fora
+    setTimeout(() => {
+      const close = (e) => {
+        if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); }
+      };
+      document.addEventListener('click', close);
+    }, 10);
   };
   // Handlers de impressão individual (buscam detalhe completo antes)
   window.TERC_printRom = async (id) => {
