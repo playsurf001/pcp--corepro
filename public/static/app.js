@@ -84,6 +84,7 @@ const state = {
 /* ---------- Layout / Navegação ---------- */
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line', group: 'Gestão' },
+  { id: 'relatorios', label: 'Relatórios', icon: 'fa-file-pdf', group: 'Gestão' },
   { id: 'ops', label: 'Ordens de Produção', icon: 'fa-clipboard-list', group: 'Produção' },
   { id: 'balanceamento', label: 'Balanceamento', icon: 'fa-balance-scale', group: 'Produção' },
   { id: 'ficha', label: 'Ficha Acompanhamento', icon: 'fa-file-invoice', group: 'Produção' },
@@ -1390,6 +1391,698 @@ ROUTES.auditoria = async (main) => {
       ${!d.length ? '<div class="text-center text-slate-500 p-6">Sem registros de auditoria.</div>' : ''}
     </div>`;
 };
+
+/* ============================================================
+ * 📊 RELATÓRIOS PROFISSIONAIS (6 modelos, prontos para PDF)
+ * ============================================================ */
+const REL = {
+  current: 'executivo',
+  filtros: null,
+  periodoIni: null,
+  periodoFim: null,
+  charts: [],
+};
+
+function relDefaultPeriodo() {
+  const hoje = dayjs();
+  REL.periodoIni = hoje.startOf('month').format('YYYY-MM-DD');
+  REL.periodoFim = hoje.endOf('month').format('YYYY-MM-DD');
+}
+
+function relDestroyCharts() {
+  REL.charts.forEach(c => { try { c.destroy(); } catch {} });
+  REL.charts = [];
+}
+
+/* Helpers de formatação para relatórios */
+const relFmt = {
+  num: (v, dec = 0) => (v == null || isNaN(v)) ? '—' : Number(v).toLocaleString('pt-BR', { minimumFractionDigits: dec, maximumFractionDigits: dec }),
+  pct: (v, dec = 1) => (v == null || isNaN(v)) ? '—' : (Number(v) * 100).toLocaleString('pt-BR', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '%',
+  date: (s) => s ? dayjs(s).format('DD/MM/YYYY') : '—',
+  datetime: (s) => s ? dayjs(s).format('DD/MM/YYYY HH:mm') : '—',
+  status: (s) => {
+    const cls = { Aberta: '', Planejada: 'purple', EmProducao: 'blue', Concluida: 'ok', Cancelada: 'danger' }[s] || '';
+    return `<span class="rep-badge ${cls}">${s || '—'}</span>`;
+  },
+};
+
+/* Cabeçalho padrão do documento — com logo CorePro */
+function relDocHeader(tipo, subtitulo) {
+  const now = dayjs().format('DD/MM/YYYY HH:mm');
+  const per = REL.periodoIni && REL.periodoFim
+    ? `${dayjs(REL.periodoIni).format('DD/MM/YYYY')} — ${dayjs(REL.periodoFim).format('DD/MM/YYYY')}` : '';
+  const u = state.user || {};
+  return `
+  <div class="report-header">
+    <div class="brand">
+      <img src="/static/logo-icon.png" alt="CorePro" />
+      <div>
+        <div class="title">CorePro</div>
+        <div class="sub">Onde sistemas se tornam negócio</div>
+      </div>
+    </div>
+    <div class="meta">
+      <div class="type">${tipo}</div>
+      <div style="font-size:13px;font-weight:600;color:#0B1120;margin-top:2px">${subtitulo || ''}</div>
+      ${per ? `<div style="margin-top:3px">Período: <b>${per}</b></div>` : ''}
+      <div>Emitido em: <b>${now}</b></div>
+      <div>Por: <b>${u.nome || '—'}</b> <span style="color:#9CA3AF">(${u.perfil || '—'})</span></div>
+    </div>
+  </div>`;
+}
+
+function relDocFooter() {
+  return `
+  <div class="rep-footer">
+    <div>CorePro · PCP Confecção · Relatório gerado automaticamente</div>
+    <div>Página <span class="page-num"></span></div>
+  </div>`;
+}
+
+/* Barra de ações (imprimir, nova aba, voltar) */
+function relActionsBar() {
+  return `
+  <div class="rep-actions no-print">
+    <button id="rel-print" class="btn btn-primary"><i class="fas fa-print mr-2"></i>Imprimir / Salvar como PDF</button>
+    <button id="rel-export-html" class="btn btn-secondary"><i class="fas fa-file-code mr-2"></i>Abrir em nova aba</button>
+  </div>`;
+}
+
+/* Bind das ações do relatório (depois de renderizar) */
+function relBindActions(html) {
+  const btnPrint = $('#rel-print');
+  if (btnPrint) btnPrint.onclick = () => window.print();
+  const btnExport = $('#rel-export-html');
+  if (btnExport) btnExport.onclick = () => relAbrirEmNovaAba(html);
+}
+
+/* Abre o relatório em uma aba separada (útil para salvar como PDF sem UI do app) */
+function relAbrirEmNovaAba(htmlDocumento) {
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style'))
+    .map((n) => n.outerHTML).join('\n');
+  const title = `CorePro — ${REL.current}`;
+  const win = window.open('', '_blank');
+  win.document.open();
+  win.document.write(`<!DOCTYPE html><html lang="pt-BR"><head>
+    <meta charset="UTF-8" />
+    <title>${title}</title>
+    ${styles}
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>body{background:#020617;padding:18px;}</style>
+  </head><body>
+    <div class="report-doc">${htmlDocumento}</div>
+    <script>setTimeout(()=>window.print(), 800);</script>
+  </body></html>`);
+  win.document.close();
+}
+
+/* ---------- Shell da tela de relatórios ---------- */
+ROUTES.relatorios = async (main) => {
+  relDestroyCharts();
+  if (!REL.periodoIni) relDefaultPeriodo();
+  if (!REL.filtros) {
+    try { REL.filtros = (await api('get', '/relatorios/filtros')).data; } catch { REL.filtros = { clientes: [], refs: [], ops: [], operadores: [], modulos_auditoria: [], usuarios_auditoria: [] }; }
+  }
+
+  const tabs = [
+    { id: 'executivo',  label: 'Executivo',     icon: 'fa-chart-pie' },
+    { id: 'op',         label: 'OP Detalhada',  icon: 'fa-clipboard-list' },
+    { id: 'producao',   label: 'Produção',      icon: 'fa-hard-hat' },
+    { id: 'cliente',    label: 'Cliente',       icon: 'fa-user-tie' },
+    { id: 'referencia', label: 'Referência',    icon: 'fa-tshirt' },
+    { id: 'auditoria',  label: 'Auditoria',     icon: 'fa-history' },
+  ];
+
+  main.innerHTML = `
+  <div class="rel-shell">
+    <div class="rel-tabs no-print">
+      ${tabs.map(t => `<div class="rel-tab ${t.id === REL.current ? 'active' : ''}" data-tab="${t.id}"><i class="fas ${t.icon}"></i>${t.label}</div>`).join('')}
+    </div>
+    <div id="rel-filters" class="no-print"></div>
+    <div id="rel-content"></div>
+  </div>`;
+
+  $$('.rel-tab').forEach((t) => t.onclick = () => {
+    REL.current = t.dataset.tab;
+    $$('.rel-tab').forEach((x) => x.classList.toggle('active', x === t));
+    renderRelatorio();
+  });
+
+  renderRelatorio();
+};
+
+async function renderRelatorio() {
+  relDestroyCharts();
+  const fil = $('#rel-filters');
+  const ct = $('#rel-content');
+  ct.innerHTML = '<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-2xl"></i></div>';
+
+  // monta filtros por tipo
+  const per = `
+    <div class="field"><label>Data inicial</label><input type="date" id="f-ini" value="${REL.periodoIni}" /></div>
+    <div class="field"><label>Data final</label><input type="date" id="f-fim" value="${REL.periodoFim}" /></div>`;
+
+  let extra = '';
+  if (REL.current === 'op') {
+    const ops = REL.filtros.ops || [];
+    extra = `<div class="field" style="min-width:220px"><label>OP</label>
+      <select id="f-op"><option value="">— selecione —</option>${ops.map(o => `<option value="${o.id_op}">${o.num_op}</option>`).join('')}</select></div>`;
+  } else if (REL.current === 'cliente') {
+    const cls = REL.filtros.clientes || [];
+    extra = `<div class="field" style="min-width:220px"><label>Cliente</label>
+      <select id="f-cli"><option value="">— selecione —</option>${cls.map(c => `<option value="${c.id_cliente}">${c.cod_cliente} — ${c.nome_cliente}</option>`).join('')}</select></div>`;
+  } else if (REL.current === 'referencia') {
+    const rfs = REL.filtros.refs || [];
+    extra = `<div class="field" style="min-width:220px"><label>Referência</label>
+      <select id="f-ref"><option value="">— selecione —</option>${rfs.map(r => `<option value="${r.id_ref}">${r.cod_ref} — ${r.desc_ref}</option>`).join('')}</select></div>`;
+  } else if (REL.current === 'producao') {
+    const ops = REL.filtros.ops || [];
+    const opers = REL.filtros.operadores || [];
+    extra = `
+      <div class="field" style="min-width:220px"><label>OP (opcional)</label>
+        <select id="f-op"><option value="">Todas</option>${ops.map(o => `<option value="${o.id_op}">${o.num_op}</option>`).join('')}</select></div>
+      <div class="field" style="min-width:180px"><label>Operador (opcional)</label>
+        <select id="f-oper"><option value="">Todos</option>${opers.map(o => `<option value="${o}">${o}</option>`).join('')}</select></div>`;
+  } else if (REL.current === 'auditoria') {
+    const mods = REL.filtros.modulos_auditoria || [];
+    const usrs = REL.filtros.usuarios_auditoria || [];
+    extra = `
+      <div class="field"><label>Módulo</label>
+        <select id="f-mod"><option value="">Todos</option>${mods.map(m => `<option value="${m}">${m}</option>`).join('')}</select></div>
+      <div class="field"><label>Usuário</label>
+        <select id="f-usr"><option value="">Todos</option>${usrs.map(u => `<option value="${u}">${u}</option>`).join('')}</select></div>
+      <div class="field" style="min-width:200px"><label>Busca</label><input type="text" id="f-busca" placeholder="texto na chave" /></div>`;
+  }
+
+  fil.innerHTML = `<div class="rel-toolbar">${per}${extra}
+    <div class="field" style="min-width:auto"><label>&nbsp;</label>
+      <button id="rel-go" class="btn btn-primary"><i class="fas fa-play mr-1"></i>Gerar relatório</button></div>
+  </div>`;
+
+  $('#rel-go').onclick = async () => {
+    REL.periodoIni = $('#f-ini').value || REL.periodoIni;
+    REL.periodoFim = $('#f-fim').value || REL.periodoFim;
+    await gerarRelatorioAtual();
+  };
+
+  // gera automaticamente na 1ª carga (para o executivo e auditoria)
+  if (REL.current === 'executivo' || REL.current === 'auditoria') await gerarRelatorioAtual();
+  else ct.innerHTML = `
+    <div class="card p-10 text-center" style="border:2px dashed rgba(148,163,184,.25)">
+      <i class="fas fa-hand-pointer text-5xl" style="color:#60A5FA"></i>
+      <p class="mt-4" style="color:#9CA3AF">Selecione os filtros acima e clique em <b>Gerar relatório</b>.</p>
+    </div>`;
+}
+
+async function gerarRelatorioAtual() {
+  const ct = $('#rel-content');
+  ct.innerHTML = '<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-2xl"></i></div>';
+  relDestroyCharts();
+  try {
+    if (REL.current === 'executivo') await relExecutivo(ct);
+    else if (REL.current === 'op') await relOp(ct);
+    else if (REL.current === 'producao') await relProducao(ct);
+    else if (REL.current === 'cliente') await relCliente(ct);
+    else if (REL.current === 'referencia') await relReferencia(ct);
+    else if (REL.current === 'auditoria') await relAuditoria(ct);
+  } catch (e) {
+    console.error(e);
+    ct.innerHTML = `<div class="card p-6" style="color:#FF3B3B"><i class="fas fa-exclamation-triangle"></i> Erro ao gerar relatório: ${e.message || e}</div>`;
+  }
+}
+
+/* ---------- 1) EXECUTIVO ---------- */
+async function relExecutivo(ct) {
+  const r = (await api('get', `/relatorios/executivo?dt_ini=${REL.periodoIni}&dt_fim=${REL.periodoFim}`)).data;
+  const k = r.kpis;
+  const ops = k.ops || {};
+  const prd = k.producao || {};
+  const htmlDoc = `
+    ${relDocHeader('Relatório Executivo', 'Visão consolidada de Produção')}
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="label">OPs no período</div><div class="value">${relFmt.num(ops.total)}</div><div class="hint">${relFmt.num(ops.concluidas)} concluídas · ${relFmt.num(ops.abertas)} abertas</div></div>
+      <div class="rep-kpi warn"><div class="label">OPs atrasadas</div><div class="value">${relFmt.num(ops.atrasadas)}</div><div class="hint">em aberto fora do prazo</div></div>
+      <div class="rep-kpi purple"><div class="label">Peças totais</div><div class="value">${relFmt.num(ops.pecas_total)}</div><div class="hint">${relFmt.num(ops.pecas_aberto)} em aberto</div></div>
+      <div class="rep-kpi"><div class="label">Prazo médio</div><div class="value">${relFmt.num(ops.prazo_medio, 1)}</div><div class="hint">dias emissão → entrega</div></div>
+      <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(prd.producao_boa)}</div><div class="hint">peças aprovadas</div></div>
+      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(prd.refugo)}</div><div class="hint">${relFmt.pct(k.refugo_pct)} do produzido</div></div>
+      <div class="rep-kpi"><div class="label">Horas trabalhadas</div><div class="value">${relFmt.num(prd.horas_total, 1)}</div><div class="hint">${relFmt.num(prd.total_apont)} apontamentos</div></div>
+      <div class="rep-kpi ok"><div class="label">Eficiência real</div><div class="value">${relFmt.pct(prd.efic_media)}</div><div class="hint">média do período</div></div>
+    </div>
+
+    <div class="rep-grid-2 avoid-break">
+      <div class="rep-chart"><h3>Produção diária (peças boas x refugo)</h3><canvas id="rc-prod"></canvas></div>
+      <div class="rep-chart"><h3>OPs por Status</h3><canvas id="rc-status"></canvas></div>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-user-tie"></i>Top clientes do período</h2>
+      <table class="rep-table">
+        <thead><tr><th>#</th><th>Código</th><th>Nome</th><th class="num">OPs</th><th class="num">Concluídas</th><th class="num">Peças</th></tr></thead>
+        <tbody>${r.top_clientes.map((c, i) => `
+          <tr><td>${i+1}</td><td>${c.cod_cliente}</td><td>${c.nome_cliente}</td>
+            <td class="num">${relFmt.num(c.qtd_ops)}</td>
+            <td class="num">${relFmt.num(c.ops_concluidas)}</td>
+            <td class="num">${relFmt.num(c.pecas)}</td></tr>`).join('') || '<tr><td colspan="6" class="center" style="color:#9CA3AF">Sem dados no período</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-tshirt"></i>Top referências do período</h2>
+      <table class="rep-table">
+        <thead><tr><th>#</th><th>Código</th><th>Descrição</th><th>Família</th><th class="num">OPs</th><th class="num">Peças</th></tr></thead>
+        <tbody>${r.top_refs.map((x, i) => `
+          <tr><td>${i+1}</td><td>${x.cod_ref}</td><td>${x.desc_ref}</td><td>${x.familia || '—'}</td>
+            <td class="num">${relFmt.num(x.qtd_ops)}</td><td class="num">${relFmt.num(x.pecas)}</td></tr>`).join('') || '<tr><td colspan="6" class="center" style="color:#9CA3AF">Sem dados no período</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-hard-hat"></i>Top operadores</h2>
+      <table class="rep-table">
+        <thead><tr><th>Operador</th><th class="num">Apontamentos</th><th class="num">Boas</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
+        <tbody>${r.top_operadores.map(o => `
+          <tr><td>${o.operador}</td>
+            <td class="num">${relFmt.num(o.apontamentos)}</td>
+            <td class="num">${relFmt.num(o.total_boa)}</td>
+            <td class="num">${relFmt.num(o.total_refugo)}</td>
+            <td class="num">${relFmt.num(o.horas, 1)}</td>
+            <td class="num">${relFmt.pct(o.efic_media)}</td></tr>`).join('') || '<tr><td colspan="6" class="center" style="color:#9CA3AF">Sem apontamentos</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+
+  // Gráficos
+  setTimeout(() => {
+    const cProd = $('#rc-prod');
+    if (cProd) {
+      const labels = r.producao_diaria.map(x => dayjs(x.dia).format('DD/MM'));
+      const boa = r.producao_diaria.map(x => Number(x.boa) || 0);
+      const ref = r.producao_diaria.map(x => Number(x.refugo) || 0);
+      REL.charts.push(new Chart(cProd, {
+        type: 'bar',
+        data: { labels, datasets: [
+          { label: 'Boa', data: boa, backgroundColor: '#2563EB', borderRadius: 4 },
+          { label: 'Refugo', data: ref, backgroundColor: '#FF3B3B', borderRadius: 4 },
+        ]},
+        options: { plugins: { legend: { labels: { color: '#111827' } } }, scales: { x: { ticks: { color: '#374151' } }, y: { ticks: { color: '#374151' } } } }
+      }));
+    }
+    const cSt = $('#rc-status');
+    if (cSt) {
+      const labels = r.status_breakdown.map(x => x.status);
+      const data = r.status_breakdown.map(x => Number(x.c) || 0);
+      const colors = labels.map(s => ({ 'Aberta':'#6B7280','Planejada':'#7C3AED','EmProducao':'#2563EB','Concluida':'#00FF9C','Cancelada':'#FF3B3B' })[s] || '#6B7280');
+      REL.charts.push(new Chart(cSt, {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: '#fff', borderWidth: 2 }] },
+        options: { plugins: { legend: { position: 'bottom', labels: { color: '#111827' } } }, cutout: '55%' }
+      }));
+    }
+  }, 100);
+}
+
+/* ---------- 2) OP DETALHADA ---------- */
+async function relOp(ct) {
+  const idOp = $('#f-op')?.value;
+  if (!idOp) { ct.innerHTML = '<div class="card p-8 text-center" style="color:#9CA3AF">Selecione uma OP e clique em Gerar relatório.</div>'; return; }
+  const r = (await api('get', `/relatorios/op/${idOp}`)).data;
+  const o = r.op, t = r.totais;
+  const htmlDoc = `
+    ${relDocHeader('Relatório Detalhado de OP', `OP ${o.num_op} · ${o.cod_ref} — ${o.desc_ref}`)}
+
+    <div class="rep-info">
+      <div class="cell"><div class="k">Número OP</div><div class="v">${o.num_op}</div></div>
+      <div class="cell"><div class="k">Status</div><div class="v">${relFmt.status(o.status)}</div></div>
+      <div class="cell"><div class="k">Cliente</div><div class="v">${o.cod_cliente} — ${o.nome_cliente}</div></div>
+      <div class="cell"><div class="k">CNPJ</div><div class="v">${o.cnpj || '—'}</div></div>
+      <div class="cell"><div class="k">Referência</div><div class="v">${o.cod_ref} — ${o.desc_ref}</div></div>
+      <div class="cell"><div class="k">Família</div><div class="v">${o.familia || '—'}</div></div>
+      <div class="cell"><div class="k">Versão Seq</div><div class="v">v${o.versao_seq || '—'}</div></div>
+      <div class="cell"><div class="k">Qtd Peças</div><div class="v">${relFmt.num(o.qtde_pecas)}</div></div>
+      <div class="cell"><div class="k">Emissão</div><div class="v">${relFmt.date(o.dt_emissao)}</div></div>
+      <div class="cell"><div class="k">Entrega</div><div class="v">${relFmt.date(o.dt_entrega)}</div></div>
+      <div class="cell"><div class="k">Criada por</div><div class="v">${o.criado_por || '—'}</div></div>
+      <div class="cell"><div class="k">Criada em</div><div class="v">${relFmt.datetime(o.dt_criacao)}</div></div>
+    </div>
+
+    <div class="rep-kpis">
+      <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(t.producao_boa)}</div><div class="hint">peças aprovadas</div></div>
+      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(t.refugo)}</div></div>
+      <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(t.horas_total, 1)}</div></div>
+      <div class="rep-kpi ${t.pct_concluido >= 1 ? 'ok' : 'purple'}"><div class="label">Concluído</div><div class="value">${relFmt.pct(t.pct_concluido)}</div><div class="hint">${relFmt.num(t.pecas_restantes)} peças restantes</div></div>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-palette"></i>Grade de Cores</h2>
+      <table class="rep-table">
+        <thead><tr><th>Código</th><th>Cor</th><th class="num">Qtde</th></tr></thead>
+        <tbody>${r.cores.map(c => `<tr><td>${c.cod_cor}</td><td>${c.nome_cor}</td><td class="num">${relFmt.num(c.qtde_pecas)}</td></tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td colspan="2">Total</td><td class="num">${relFmt.num(r.cores.reduce((a,c)=>a+(Number(c.qtde_pecas)||0),0))}</td></tr></tfoot>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-ruler"></i>Grade de Tamanhos</h2>
+      <table class="rep-table">
+        <thead><tr><th>Tamanho</th><th class="num">Qtde</th></tr></thead>
+        <tbody>${r.tamanhos.map(tt => `<tr><td>${tt.cod_tam}</td><td class="num">${relFmt.num(tt.qtde_pecas)}</td></tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td>Total</td><td class="num">${relFmt.num(r.tamanhos.reduce((a,x)=>a+(Number(x.qtde_pecas)||0),0))}</td></tr></tfoot>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break page-break">
+      <h2><i class="fas fa-list-ol"></i>Sequência Operacional</h2>
+      <table class="rep-table">
+        <thead><tr><th class="center">Seq</th><th>Operação</th><th>Máquina</th><th>Aparelho</th><th class="num">TP (min)</th><th class="num">Pç/h 100%</th></tr></thead>
+        <tbody>${r.sequencia.map(s => `<tr>
+          <td class="center">${s.sequencia}</td>
+          <td><b>${s.cod_op}</b> — ${s.desc_op}</td>
+          <td>${s.cod_maquina || '—'} ${s.desc_maquina ? '· ' + s.desc_maquina : ''}</td>
+          <td>${s.cod_aparelho || '—'}</td>
+          <td class="num">${relFmt.num(s.tempo_padrao, 2)}</td>
+          <td class="num">${s.tempo_padrao > 0 ? relFmt.num(60/s.tempo_padrao, 1) : '—'}</td>
+        </tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td colspan="4">Tempo total por peça</td><td class="num">${relFmt.num(t.tempo_total_ref, 2)} min</td><td></td></tr></tfoot>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-hard-hat"></i>Apontamentos registrados</h2>
+      <table class="rep-table">
+        <thead><tr><th>Data</th><th class="center">Seq</th><th>Operação</th><th>Operador</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
+        <tbody>${r.apontamentos.map(a => `<tr>
+          <td>${relFmt.date(a.data)}</td>
+          <td class="center">${a.sequencia || '—'}</td>
+          <td>${a.cod_op || '—'} ${a.desc_op || ''}</td>
+          <td>${a.operador}</td>
+          <td class="num">${relFmt.num(a.qtd_boa)}</td>
+          <td class="num">${relFmt.num(a.qtd_refugo)}</td>
+          <td class="num">${relFmt.num(a.horas_trab, 1)}</td>
+          <td class="num">${relFmt.pct(a.efic_real)}</td>
+        </tr>`).join('') || '<tr><td colspan="8" class="center" style="color:#9CA3AF">Nenhum apontamento registrado</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    ${o.observacao ? `<div class="rep-section avoid-break"><h2><i class="fas fa-sticky-note"></i>Observações</h2><div style="background:#FFFBEB;border:1px solid #FDE68A;padding:10px;border-radius:6px;white-space:pre-wrap">${o.observacao}</div></div>` : ''}
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+}
+
+/* ---------- 3) PRODUÇÃO POR PERÍODO ---------- */
+async function relProducao(ct) {
+  const idOp = $('#f-op')?.value;
+  const oper = $('#f-oper')?.value;
+  let url = `/relatorios/producao?dt_ini=${REL.periodoIni}&dt_fim=${REL.periodoFim}`;
+  if (idOp) url += `&id_op=${idOp}`;
+  if (oper) url += `&operador=${encodeURIComponent(oper)}`;
+  const r = (await api('get', url)).data;
+  const t = r.totais || {};
+  const htmlDoc = `
+    ${relDocHeader('Relatório de Produção', 'Apontamentos agregados e detalhados')}
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="label">Apontamentos</div><div class="value">${relFmt.num(t.apontamentos)}</div></div>
+      <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(t.boa)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(t.refugo)}</div></div>
+      <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(t.horas, 1)}</div></div>
+    </div>
+    <div class="rep-kpis">
+      <div class="rep-kpi ok"><div class="label">Eficiência média</div><div class="value">${relFmt.pct(t.efic)}</div></div>
+      <div class="rep-kpi warn"><div class="label">% Refugo</div><div class="value">${(t.boa||t.refugo) ? relFmt.pct((Number(t.refugo)||0)/((Number(t.boa)||0)+(Number(t.refugo)||0))) : '—'}</div></div>
+      <div class="rep-kpi purple"><div class="label">Pçs/hora</div><div class="value">${t.horas>0 ? relFmt.num((Number(t.boa)||0)/(Number(t.horas)||1), 1) : '—'}</div></div>
+      <div class="rep-kpi"><div class="label">Período</div><div class="value" style="font-size:13px;line-height:1.4">${relFmt.date(r.periodo.ini)} — ${relFmt.date(r.periodo.fim)}</div></div>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-clipboard-list"></i>Resumo por OP</h2>
+      <table class="rep-table">
+        <thead><tr><th>OP</th><th>Referência</th><th>Cliente</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
+        <tbody>${r.por_op.map(x => `<tr>
+          <td><b>${x.num_op}</b></td><td>${x.cod_ref}</td><td>${x.nome_cliente}</td>
+          <td class="num">${relFmt.num(x.boa)}</td><td class="num">${relFmt.num(x.refugo)}</td>
+          <td class="num">${relFmt.num(x.horas,1)}</td><td class="num">${relFmt.pct(x.efic)}</td>
+        </tr>`).join('') || '<tr><td colspan="7" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-hard-hat"></i>Resumo por Operador</h2>
+      <table class="rep-table">
+        <thead><tr><th>Operador</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
+        <tbody>${r.por_operador.map(x => `<tr>
+          <td>${x.operador}</td>
+          <td class="num">${relFmt.num(x.apontamentos)}</td>
+          <td class="num">${relFmt.num(x.boa)}</td>
+          <td class="num">${relFmt.num(x.refugo)}</td>
+          <td class="num">${relFmt.num(x.horas,1)}</td>
+          <td class="num">${relFmt.pct(x.efic)}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-industry"></i>Resumo por Máquina</h2>
+      <table class="rep-table">
+        <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Efic</th></tr></thead>
+        <tbody>${r.por_maquina.map(x => `<tr>
+          <td>${x.cod_maquina}</td><td>${x.desc_maquina}</td><td>${x.tipo || '—'}</td>
+          <td class="num">${relFmt.num(x.apontamentos)}</td>
+          <td class="num">${relFmt.num(x.boa)}</td>
+          <td class="num">${relFmt.num(x.refugo)}</td>
+          <td class="num">${relFmt.pct(x.efic)}</td>
+        </tr>`).join('') || '<tr><td colspan="7" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section page-break">
+      <h2><i class="fas fa-list"></i>Detalhe dos Apontamentos</h2>
+      <table class="rep-table">
+        <thead><tr><th>Data</th><th>OP</th><th>Ref</th><th>Cliente</th><th>Seq</th><th>Operação</th><th>Operador</th><th class="num">Boa</th><th class="num">Ref</th><th class="num">H</th><th class="num">Efic</th></tr></thead>
+        <tbody>${r.detalhe.map(x => `<tr>
+          <td>${relFmt.date(x.data)}</td>
+          <td><b>${x.num_op}</b></td>
+          <td>${x.cod_ref}</td>
+          <td>${x.nome_cliente}</td>
+          <td class="center">${x.sequencia || '—'}</td>
+          <td>${x.cod_op || '—'} ${x.desc_op ? '· '+x.desc_op : ''}</td>
+          <td>${x.operador}</td>
+          <td class="num">${relFmt.num(x.qtd_boa)}</td>
+          <td class="num">${relFmt.num(x.qtd_refugo)}</td>
+          <td class="num">${relFmt.num(x.horas_trab,1)}</td>
+          <td class="num">${relFmt.pct(x.efic_real)}</td>
+        </tr>`).join('') || '<tr><td colspan="11" class="center" style="color:#9CA3AF">Nenhum apontamento no período/filtros</td></tr>'}</tbody>
+      </table>
+    </div>
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+}
+
+/* ---------- 4) CLIENTE ---------- */
+async function relCliente(ct) {
+  const id = $('#f-cli')?.value;
+  if (!id) { ct.innerHTML = '<div class="card p-8 text-center" style="color:#9CA3AF">Selecione um cliente e clique em Gerar relatório.</div>'; return; }
+  const r = (await api('get', `/relatorios/cliente/${id}?dt_ini=${REL.periodoIni}&dt_fim=${REL.periodoFim}`)).data;
+  const c = r.cliente, ro = r.resumo_ops, p = r.producao || {};
+  const htmlDoc = `
+    ${relDocHeader('Relatório por Cliente', `${c.cod_cliente} — ${c.nome_cliente}`)}
+
+    <div class="rep-info">
+      <div class="cell"><div class="k">Código</div><div class="v">${c.cod_cliente}</div></div>
+      <div class="cell"><div class="k">Nome</div><div class="v">${c.nome_cliente}</div></div>
+      <div class="cell"><div class="k">CNPJ</div><div class="v">${c.cnpj || '—'}</div></div>
+      <div class="cell"><div class="k">Status</div><div class="v">${c.ativo ? '<span class="rep-badge ok">Ativo</span>' : '<span class="rep-badge danger">Inativo</span>'}</div></div>
+    </div>
+    ${c.observacao ? `<div style="background:#FFFBEB;border:1px solid #FDE68A;padding:8px;border-radius:6px;margin-bottom:10px;white-space:pre-wrap;font-size:11px">${c.observacao}</div>` : ''}
+
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="label">OPs no período</div><div class="value">${relFmt.num(ro.total)}</div><div class="hint">${relFmt.num(ro.concluidas)} concluídas</div></div>
+      <div class="rep-kpi warn"><div class="label">Atrasadas</div><div class="value">${relFmt.num(ro.atrasadas)}</div></div>
+      <div class="rep-kpi purple"><div class="label">Peças encomendadas</div><div class="value">${relFmt.num(ro.pecas)}</div></div>
+      <div class="rep-kpi"><div class="label">Prazo médio</div><div class="value">${relFmt.num(ro.prazo_medio,1)}</div><div class="hint">dias</div></div>
+      <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(p.boa)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(p.refugo)}</div></div>
+      <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(p.horas,1)}</div></div>
+      <div class="rep-kpi ok"><div class="label">Eficiência média</div><div class="value">${relFmt.pct(p.efic)}</div></div>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-tshirt"></i>Consumo por Referência</h2>
+      <table class="rep-table">
+        <thead><tr><th>Código</th><th>Descrição</th><th class="num">OPs</th><th class="num">Peças</th></tr></thead>
+        <tbody>${r.por_referencia.map(x => `<tr><td>${x.cod_ref}</td><td>${x.desc_ref}</td>
+          <td class="num">${relFmt.num(x.ops)}</td><td class="num">${relFmt.num(x.pecas)}</td></tr>`).join('') || '<tr><td colspan="4" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section page-break">
+      <h2><i class="fas fa-clipboard-list"></i>Ordens de Produção</h2>
+      <table class="rep-table">
+        <thead><tr><th>OP</th><th>Referência</th><th>Emissão</th><th>Entrega</th><th class="num">Peças</th><th>Status</th></tr></thead>
+        <tbody>${r.ops.map(o => `<tr>
+          <td><b>${o.num_op}</b></td>
+          <td>${o.cod_ref} — ${o.desc_ref}</td>
+          <td>${relFmt.date(o.dt_emissao)}</td>
+          <td>${o.atrasada ? '<span class="rep-badge danger">'+relFmt.date(o.dt_entrega)+'</span>' : relFmt.date(o.dt_entrega)}</td>
+          <td class="num">${relFmt.num(o.qtde_pecas)}</td>
+          <td>${relFmt.status(o.status)}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="center" style="color:#9CA3AF">Sem OPs no período</td></tr>'}</tbody>
+      </table>
+    </div>
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+}
+
+/* ---------- 5) REFERÊNCIA ---------- */
+async function relReferencia(ct) {
+  const id = $('#f-ref')?.value;
+  if (!id) { ct.innerHTML = '<div class="card p-8 text-center" style="color:#9CA3AF">Selecione uma referência e clique em Gerar relatório.</div>'; return; }
+  const r = (await api('get', `/relatorios/referencia/${id}?dt_ini=${REL.periodoIni}&dt_fim=${REL.periodoFim}`)).data;
+  const ref = r.referencia, sa = r.sequencia_ativa, ro = r.resumo_ops, p = r.producao || {};
+  const htmlDoc = `
+    ${relDocHeader('Relatório por Referência', `${ref.cod_ref} — ${ref.desc_ref}`)}
+
+    <div class="rep-info">
+      <div class="cell"><div class="k">Código</div><div class="v">${ref.cod_ref}</div></div>
+      <div class="cell"><div class="k">Descrição</div><div class="v">${ref.desc_ref}</div></div>
+      <div class="cell"><div class="k">Família</div><div class="v">${ref.familia || '—'}</div></div>
+      <div class="cell"><div class="k">Status</div><div class="v">${ref.ativo ? '<span class="rep-badge ok">Ativa</span>' : '<span class="rep-badge danger">Inativa</span>'}</div></div>
+      <div class="cell"><div class="k">Versão ativa</div><div class="v">${sa ? 'v'+sa.versao : '—'}</div></div>
+      <div class="cell"><div class="k">Itens da sequência</div><div class="v">${sa ? relFmt.num(sa.qtd_itens) : '—'}</div></div>
+      <div class="cell"><div class="k">Tempo total/peça</div><div class="v">${sa ? relFmt.num(sa.tempo_total, 2) + ' min' : '—'}</div></div>
+      <div class="cell"><div class="k">Pçs/hora @100%</div><div class="v">${sa && sa.tempo_total > 0 ? relFmt.num(60/sa.tempo_total, 1) : '—'}</div></div>
+    </div>
+
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="label">OPs no período</div><div class="value">${relFmt.num(ro.total)}</div></div>
+      <div class="rep-kpi purple"><div class="label">Peças encomendadas</div><div class="value">${relFmt.num(ro.pecas)}</div></div>
+      <div class="rep-kpi ok"><div class="label">Peças concluídas</div><div class="value">${relFmt.num(ro.pecas_concluidas)}</div></div>
+      <div class="rep-kpi warn"><div class="label">Em aberto</div><div class="value">${relFmt.num(ro.pecas_aberto)}</div><div class="hint">${relFmt.num(ro.atrasadas)} atrasadas</div></div>
+      <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(p.boa)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(p.refugo)}</div></div>
+      <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(p.horas, 1)}</div></div>
+      <div class="rep-kpi ok"><div class="label">Eficiência</div><div class="value">${relFmt.pct(p.efic)}</div></div>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-user-tie"></i>Clientes que compram esta referência</h2>
+      <table class="rep-table">
+        <thead><tr><th>Código</th><th>Nome</th><th class="num">OPs</th><th class="num">Peças</th></tr></thead>
+        <tbody>${r.por_cliente.map(x => `<tr><td>${x.cod_cliente}</td><td>${x.nome_cliente}</td>
+          <td class="num">${relFmt.num(x.ops)}</td><td class="num">${relFmt.num(x.pecas)}</td></tr>`).join('') || '<tr><td colspan="4" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-balance-scale"></i>Eficiência por Operação (versão ativa)</h2>
+      <table class="rep-table">
+        <thead><tr><th>Cód Op</th><th>Operação</th><th class="num">TP (min)</th><th class="num">Apont</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Efic</th></tr></thead>
+        <tbody>${r.efic_por_operacao.map(x => `<tr>
+          <td>${x.cod_op}</td><td>${x.desc_op}</td>
+          <td class="num">${relFmt.num(x.tempo_padrao, 2)}</td>
+          <td class="num">${relFmt.num(x.apontamentos)}</td>
+          <td class="num">${relFmt.num(x.boa)}</td>
+          <td class="num">${relFmt.num(x.refugo)}</td>
+          <td class="num">${relFmt.pct(x.efic)}</td>
+        </tr>`).join('') || '<tr><td colspan="7" class="center" style="color:#9CA3AF">Sem dados</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="rep-section avoid-break">
+      <h2><i class="fas fa-code-branch"></i>Histórico de Versões de Sequência</h2>
+      <table class="rep-table">
+        <thead><tr><th class="center">Versão</th><th>Status</th><th>Criação</th><th>Ativação</th></tr></thead>
+        <tbody>${r.versoes.map(v => `<tr>
+          <td class="center"><b>v${v.versao}</b></td>
+          <td>${v.ativa ? '<span class="rep-badge ok">ATIVA</span>' : '<span class="rep-badge">inativa</span>'}</td>
+          <td>${relFmt.datetime(v.dt_criacao)}</td>
+          <td>${relFmt.datetime(v.dt_ativacao)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+}
+
+/* ---------- 6) AUDITORIA ---------- */
+async function relAuditoria(ct) {
+  const modulo = $('#f-mod')?.value || '';
+  const usuario = $('#f-usr')?.value || '';
+  const busca = $('#f-busca')?.value || '';
+  let url = `/relatorios/auditoria?dt_ini=${REL.periodoIni}&dt_fim=${REL.periodoFim}`;
+  if (modulo) url += `&modulo=${encodeURIComponent(modulo)}`;
+  if (usuario) url += `&usuario=${encodeURIComponent(usuario)}`;
+  if (busca) url += `&busca=${encodeURIComponent(busca)}`;
+  const r = (await api('get', url)).data;
+  const htmlDoc = `
+    ${relDocHeader('Relatório de Auditoria', 'Rastro completo de alterações')}
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="label">Total de eventos</div><div class="value">${relFmt.num(r.total)}</div></div>
+      <div class="rep-kpi purple"><div class="label">Módulos envolvidos</div><div class="value">${relFmt.num(r.por_modulo.length)}</div></div>
+      <div class="rep-kpi"><div class="label">Usuários distintos</div><div class="value">${relFmt.num(r.por_usuario.length)}</div></div>
+      <div class="rep-kpi warn"><div class="label">Tipos de ação</div><div class="value">${relFmt.num(r.por_acao.length)}</div></div>
+    </div>
+
+    <div class="rep-grid-3">
+      <div class="avoid-break"><h3>Por Módulo</h3>
+        <table class="rep-table">
+          <thead><tr><th>Módulo</th><th class="num">Qtde</th></tr></thead>
+          <tbody>${r.por_modulo.map(x => `<tr><td><b>${x.modulo}</b></td><td class="num">${relFmt.num(x.total)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+      <div class="avoid-break"><h3>Por Ação</h3>
+        <table class="rep-table">
+          <thead><tr><th>Ação</th><th class="num">Qtde</th></tr></thead>
+          <tbody>${r.por_acao.map(x => `<tr><td><b>${x.acao}</b></td><td class="num">${relFmt.num(x.total)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+      <div class="avoid-break"><h3>Por Usuário</h3>
+        <table class="rep-table">
+          <thead><tr><th>Usuário</th><th class="num">Qtde</th></tr></thead>
+          <tbody>${r.por_usuario.map(x => `<tr><td><b>${x.usuario}</b></td><td class="num">${relFmt.num(x.total)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="rep-section page-break">
+      <h2><i class="fas fa-list"></i>Detalhe (últimos ${r.total} eventos)</h2>
+      <table class="rep-table">
+        <thead><tr><th>Data/Hora</th><th>Usuário</th><th>Módulo</th><th>Ação</th><th>Chave</th><th>Campo</th><th>Valor anterior</th><th>Valor novo</th></tr></thead>
+        <tbody>${r.registros.map(x => `<tr>
+          <td style="white-space:nowrap">${relFmt.datetime(x.dt_hora)}</td>
+          <td>${x.usuario}</td>
+          <td><span class="rep-badge blue">${x.modulo}</span></td>
+          <td>${x.acao}</td>
+          <td style="font-family:monospace;font-size:10px">${x.chave_registro || ''}</td>
+          <td>${x.campo || ''}</td>
+          <td style="font-size:10px;color:#6B7280">${x.valor_anterior || ''}</td>
+          <td style="font-size:10px">${x.valor_novo || ''}</td>
+        </tr>`).join('') || '<tr><td colspan="8" class="center" style="color:#9CA3AF">Sem eventos no período</td></tr>'}</tbody>
+      </table>
+    </div>
+    ${relDocFooter()}`;
+
+  ct.innerHTML = `${relActionsBar()}<div class="report-doc">${htmlDoc}</div>`;
+  relBindActions(htmlDoc);
+}
 
 /* ============================================================
  * IMPORTADOR (Excel → JSON → API)

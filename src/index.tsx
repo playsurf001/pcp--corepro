@@ -10,6 +10,7 @@ import sequencias from './routes/sequencias';
 import ops from './routes/ops';
 import producao from './routes/producao';
 import importador from './routes/importador';
+import relatorios from './routes/relatorios';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
 
@@ -34,6 +35,7 @@ app.route('/api', sequencias);
 app.route('/api', ops);
 app.route('/api', producao);
 app.route('/api', importador);
+app.route('/api', relatorios);
 
 // SPA: uma única página, navegação por hash
 app.get('/', (c) => {

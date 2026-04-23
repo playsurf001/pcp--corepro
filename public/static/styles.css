@@ -406,15 +406,168 @@ canvas { filter: drop-shadow(0 0 6px rgba(37,99,235,0.15)); }
 
 /* ---------- Charts color hints (mantido no JS) ---------- */
 
-/* ---------- Impressão ---------- */
+/* ============================================================
+ * RELATÓRIOS — estilos de tela + impressão A4
+ * ============================================================ */
+
+/* ---------- Tela (dark premium) ---------- */
+.rel-shell {
+  display: flex; flex-direction: column; gap: 14px;
+}
+.rel-toolbar {
+  background: var(--surface-1);
+  border: 1px solid var(--border-1);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: end;
+}
+.rel-toolbar .field {
+  display: flex; flex-direction: column; min-width: 150px;
+}
+.rel-toolbar label { margin-bottom: 4px; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; }
+
+.rel-tabs {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding: 8px; background: var(--surface-1);
+  border: 1px solid var(--border-1); border-radius: 12px;
+}
+.rel-tab {
+  padding: 10px 16px; border-radius: 8px; border: 1px solid transparent;
+  color: var(--text-2); font-size: .82rem; font-weight: 600; letter-spacing: .02em;
+  cursor: pointer; transition: all .2s ease-in-out;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.rel-tab:hover { background: rgba(37,99,235,.08); color: var(--text-1); border-color: rgba(37,99,235,.25); }
+.rel-tab.active { background: var(--brand-gradient); color: #fff; box-shadow: var(--glow-primary); }
+
+/* Documento A4 — visualização em tela */
+.report-doc {
+  background: #FFFFFF;
+  color: #111827;
+  border-radius: 12px;
+  padding: 24mm 20mm;
+  min-height: 297mm;
+  width: 210mm;
+  max-width: 100%;
+  margin: 0 auto;
+  box-shadow: 0 30px 80px rgba(0,0,0,.5);
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.4;
+  font-size: 11.5px;
+}
+.report-doc h1, .report-doc h2, .report-doc h3, .report-doc h4 { color: #0B1120; margin: 0 0 8px; }
+.report-doc h1 { font-size: 22px; letter-spacing: -.01em; }
+.report-doc h2 { font-size: 16px; letter-spacing: .02em; text-transform: uppercase; color: #2563EB; margin-top: 18px; border-bottom: 1px solid #E5E7EB; padding-bottom: 4px; }
+.report-doc h3 { font-size: 13px; color: #374151; margin-top: 14px; }
+.report-doc p, .report-doc li, .report-doc td, .report-doc th { color: #111827; }
+
+/* Cabeçalho do relatório */
+.report-header {
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 3px solid #2563EB; padding-bottom: 10px; margin-bottom: 14px;
+}
+.report-header .brand { display: flex; align-items: center; gap: 14px; }
+.report-header .brand img { height: 44px; }
+.report-header .brand .title { font-size: 18px; font-weight: 800; color: #0B1120; letter-spacing: -.01em; }
+.report-header .brand .sub { font-size: 10px; color: #6B7280; text-transform: uppercase; letter-spacing: .15em; }
+.report-header .meta { text-align: right; font-size: 10.5px; color: #6B7280; }
+.report-header .meta .type { font-weight: 700; color: #2563EB; text-transform: uppercase; letter-spacing: .1em; font-size: 11px; }
+
+/* KPI compacto para relatório */
+.rep-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 18px; }
+.rep-kpi {
+  background: linear-gradient(135deg, #EFF6FF, #FFFFFF);
+  border: 1px solid #DBEAFE; border-left: 4px solid #2563EB;
+  padding: 10px 12px; border-radius: 8px;
+}
+.rep-kpi .label { font-size: 9.5px; color: #6B7280; text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+.rep-kpi .value { font-size: 20px; font-weight: 800; color: #0B1120; letter-spacing: -.02em; line-height: 1.1; }
+.rep-kpi .hint { font-size: 10px; color: #6B7280; margin-top: 2px; }
+.rep-kpi.ok      { border-left-color: #059669; background: linear-gradient(135deg, #ECFDF5, #FFFFFF); }
+.rep-kpi.warn    { border-left-color: #F97316; background: linear-gradient(135deg, #FFF7ED, #FFFFFF); }
+.rep-kpi.danger  { border-left-color: #DC2626; background: linear-gradient(135deg, #FEF2F2, #FFFFFF); }
+.rep-kpi.purple  { border-left-color: #7C3AED; background: linear-gradient(135deg, #FAF5FF, #FFFFFF); }
+
+/* Tabelas de relatório */
+.rep-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.rep-table thead th {
+  background: #1F2937; color: #F9FAFB; text-align: left; padding: 7px 9px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600;
+}
+.rep-table tbody td { padding: 6px 9px; border-bottom: 1px solid #E5E7EB; color: #111827; }
+.rep-table tbody tr:nth-child(even) td { background: #F9FAFB; }
+.rep-table tfoot td { padding: 7px 9px; font-weight: 700; background: #F3F4F6; border-top: 2px solid #1F2937; }
+.rep-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.rep-table .center { text-align: center; }
+
+/* Info blocks */
+.rep-info { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+.rep-info .cell { background: #F9FAFB; padding: 8px 10px; border-radius: 6px; border: 1px solid #E5E7EB; }
+.rep-info .cell .k { font-size: 9.5px; color: #6B7280; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+.rep-info .cell .v { font-size: 12px; font-weight: 700; color: #0B1120; }
+
+/* Badges do relatório (status) */
+.rep-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 9.5px; font-weight: 700; letter-spacing: .04em; border: 1px solid #D1D5DB; background: #F3F4F6; color: #374151; }
+.rep-badge.ok     { background: #D1FAE5; color: #065F46; border-color: #A7F3D0; }
+.rep-badge.warn   { background: #FEF3C7; color: #92400E; border-color: #FDE68A; }
+.rep-badge.danger { background: #FEE2E2; color: #991B1B; border-color: #FECACA; }
+.rep-badge.blue   { background: #DBEAFE; color: #1E40AF; border-color: #BFDBFE; }
+.rep-badge.purple { background: #E9D5FF; color: #6B21A8; border-color: #D8B4FE; }
+
+/* Legenda / rodapé no documento */
+.rep-footer {
+  margin-top: 16px; padding-top: 10px; border-top: 1px solid #E5E7EB;
+  display: flex; justify-content: space-between; font-size: 9.5px; color: #6B7280;
+}
+
+/* Gráfico wrapper (fundo branco no relatório) */
+.rep-chart { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 8px; margin: 8px 0; }
+.rep-chart canvas { max-height: 200px; }
+
+/* Grid de 2 colunas dentro do relatório */
+.rep-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }
+.rep-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+/* Seção com título + ícone */
+.rep-section { margin-top: 16px; }
+.rep-section > h2 i { margin-right: 6px; font-size: 14px; }
+
+/* Barra de ações do relatório */
+.rep-actions {
+  display: flex; gap: 10px; margin: 12px 0;
+  justify-content: flex-end; flex-wrap: wrap;
+}
+
+/* ---------- Impressão (A4) ---------- */
+@page {
+  size: A4;
+  margin: 12mm 10mm;
+}
 @media print {
-  body { background: white !important; color: #000 !important; }
-  html { background: white !important; }
-  #sidebar, #topbar, .no-print { display: none !important; }
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  html, body { background: white !important; color: #000 !important; }
+  #sidebar, #topbar, .no-print, .rel-toolbar, .rel-tabs, .rep-actions { display: none !important; }
   #main-content { padding: 0 !important; background: white !important; }
+  #app > .flex > div.flex-1 { overflow: visible !important; }
   .card { background: white !important; box-shadow: none !important; border: 1px solid #ccc !important; color: #000 !important; }
   .card * { color: #000 !important; }
-  .badge { background: #eee !important; color: #000 !important; border: 1px solid #ccc !important; }
+
+  /* Documento solto — sem sombra e sem padding extra */
+  .report-doc {
+    box-shadow: none !important;
+    padding: 0 !important;
+    width: auto !important;
+    min-height: auto !important;
+    border-radius: 0 !important;
+  }
+  .report-doc h2 { page-break-after: avoid; }
+  .report-doc table, .rep-table { page-break-inside: auto; }
+  .rep-table tr { page-break-inside: avoid; page-break-after: auto; }
+  .rep-table thead { display: table-header-group; }
+  .rep-table tfoot { display: table-footer-group; }
+
   .page-break { page-break-after: always; }
-  table thead th { background: #f1f5f9 !important; color: #000 !important; }
+  .avoid-break { page-break-inside: avoid; }
+
+  .rep-kpi { break-inside: avoid; }
 }
