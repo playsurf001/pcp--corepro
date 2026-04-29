@@ -216,7 +216,8 @@ label {
 .border, .border-t, .border-b, .border-slate-200, .border-slate-300 { border-color: var(--border-1) !important; }
 
 /* ============================================================
- * SIDEBAR — 260px • flex column • estrutura idêntica light/dark
+ * SIDEBAR — FIXA EM DARK (independente do tema global)
+ * Cores hardcoded — não usa tokens light/dark
  * ============================================================ */
 .sidebar {
   width: 260px;
@@ -225,33 +226,43 @@ label {
   flex-direction: column;
   padding: 12px 0;
   gap: 8px;
-  background: var(--sidebar-bg);
-  border-right: 1px solid var(--border);
+  background: #0A0F1C;
+  color: #CBD5F5;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
   overflow-y: auto;
   scroll-behavior: smooth;
-  transition: background-color 0.3s ease, border-color 0.3s ease;
+  /* Transição suave (não afeta cores fixas, apenas micro-ajustes) */
+  transition: all 0.3s ease;
+  /* Garante color-scheme dark interno (scrollbar etc.) */
+  color-scheme: dark;
 }
 
-/* Header da sidebar (logo + tagline) */
+/* Scrollbar interna da sidebar — sempre escura */
+.sidebar::-webkit-scrollbar { width: 8px; }
+.sidebar::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+.sidebar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.15); }
+
+/* Header da sidebar (logo + tagline) — sempre dark */
 .sidebar-brand {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  text-align: center;
   padding: 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   text-decoration: none;
+  color: #CBD5F5;
 }
 .sidebar-brand img {
   max-width: 140px;
   height: auto;
   display: block;
-}
-[data-theme="dark"] .sidebar-brand img {
   filter: drop-shadow(0 2px 10px rgba(59, 130, 246, 0.35));
-}
-[data-theme="light"] .sidebar-brand img {
-  filter: drop-shadow(0 2px 6px rgba(37, 99, 235, 0.18));
 }
 .sidebar-tagline {
   text-align: center;
@@ -260,7 +271,7 @@ label {
   text-transform: uppercase;
   margin-top: 6px;
   line-height: 1.4;
-  color: var(--sidebar-text);
+  color: #CBD5F5;
   opacity: 0.7;
 }
 
@@ -276,7 +287,7 @@ label {
 .nav-section { margin-top: 8px; }
 .nav-section:first-of-type { margin-top: 0; }
 
-/* Título da seção */
+/* Título da seção — sempre dark */
 .nav-group-label {
   padding: 8px 16px 4px;
   font-size: 11px;
@@ -285,10 +296,10 @@ label {
   font-weight: 600;
   opacity: 0.6;
   margin-bottom: 4px;
-  color: var(--sidebar-text);
+  color: #CBD5F5;
 }
 
-/* Item do menu */
+/* Item do menu — cor fixa CBD5F5 */
 .nav-item {
   display: flex;
   align-items: center;
@@ -296,7 +307,7 @@ label {
   padding: 10px 14px;
   margin: 2px 10px;
   border-radius: 10px;
-  color: var(--sidebar-text) !important;
+  color: #CBD5F5 !important;
   font-size: 0.875rem;
   font-weight: 500;
   text-decoration: none;
@@ -310,21 +321,23 @@ label {
   text-align: center;
   font-size: 14px;
   opacity: 0.8;
+  color: #CBD5F5;
   transition: opacity 0.2s ease;
 }
 
-/* Hover: leve translação + background suave */
+/* Hover: micro-interação premium (translateX 4px + brilho suave) */
 .nav-item:hover {
-  background: var(--sidebar-hover);
+  background: rgba(255, 255, 255, 0.05);
+  color: #FFFFFF !important;
   transform: translateX(4px);
 }
-.nav-item:hover i { opacity: 1; }
+.nav-item:hover i { opacity: 1; color: #FFFFFF; }
 
-/* Item ativo: gradiente da marca + texto branco + glow */
+/* Item ativo: gradiente fixo + texto branco + sombra forte */
 .nav-item.active {
-  background: var(--sidebar-active);
+  background: linear-gradient(135deg, #3B82F6, #8B5CF6);
   color: #FFFFFF !important;
-  box-shadow: var(--sidebar-active-shadow);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
   transform: translateX(0);
 }
 .nav-item.active i {
@@ -332,8 +345,64 @@ label {
   opacity: 1;
 }
 .nav-item:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid #3B82F6;
   outline-offset: 2px;
+}
+
+/* ⛔ Bloqueia overrides via [data-theme="light"] ou [data-theme="dark"] — sidebar é fixa */
+[data-theme="light"] .sidebar,
+[data-theme="dark"]  .sidebar,
+[data-theme="light"] .sidebar-brand,
+[data-theme="light"] .sidebar-tagline,
+[data-theme="light"] .nav-group-label,
+[data-theme="light"] .nav-item,
+[data-theme="dark"]  .sidebar-brand,
+[data-theme="dark"]  .sidebar-tagline,
+[data-theme="dark"]  .nav-group-label,
+[data-theme="dark"]  .nav-item {
+  /* Reaplica os valores fixos pra sobrescrever qualquer tentativa */
+}
+[data-theme="light"] .sidebar,
+[data-theme="dark"]  .sidebar {
+  background: #0A0F1C !important;
+  color: #CBD5F5 !important;
+  border-right-color: rgba(255, 255, 255, 0.08) !important;
+}
+[data-theme="light"] .nav-item,
+[data-theme="dark"]  .nav-item {
+  color: #CBD5F5 !important;
+}
+[data-theme="light"] .nav-item.active,
+[data-theme="dark"]  .nav-item.active {
+  background: linear-gradient(135deg, #3B82F6, #8B5CF6) !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ============================================================
+ * MAIN CONTENT — dinâmico (light/dark) + divisão visual
+ * Cria contraste elegante entre a sidebar fixa-dark e o conteúdo
+ * ============================================================ */
+#main-content,
+.main-content {
+  background: var(--bg-0);
+  color: var(--text-1);
+  /* Divisão visual sutil ao lado da sidebar dark */
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.05);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+/* Reforço de contraste no light mode (conteúdo não pode "apagar" ao lado da sidebar) */
+[data-theme="light"] #main-content,
+[data-theme="light"] .main-content {
+  background: #F8FAFC;
+  color: #0F172A;
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.06);
+}
+[data-theme="dark"] #main-content,
+[data-theme="dark"] .main-content {
+  background: var(--bg-0);
+  color: var(--text-1);
+  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.04);
 }
 
 /* ============================================================
