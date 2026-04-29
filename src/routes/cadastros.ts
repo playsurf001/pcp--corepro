@@ -113,9 +113,25 @@ app.put('/referencias/:id', async (c) => {
 
 app.delete('/referencias/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE referencias SET ativo=0 WHERE id_ref=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Ref=${id}`);
-  return c.json(ok({ id }));
+  const ref = await c.env.DB.prepare(`SELECT cod_ref, desc_ref FROM referencias WHERE id_ref=?`).bind(id).first<any>();
+  if (!ref) return fail('Referência não encontrada.', 404);
+  const uso = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM op_cab WHERE id_ref=?`).bind(id).first<any>();
+  if (uso && uso.c > 0) {
+    return fail(`Não é possível excluir: ${ref.cod_ref} possui ${uso.c} OP(s) vinculada(s). Use "Inativar".`, 409);
+  }
+  await c.env.DB.prepare(`DELETE FROM referencias WHERE id_ref=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Ref=${ref.cod_ref} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/referencias/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE referencias SET ativo=? WHERE id_ref=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Referência não encontrada.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Ref=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== MÁQUINAS ========== */
@@ -158,9 +174,25 @@ app.put('/maquinas/:id', async (c) => {
 
 app.delete('/maquinas/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE maquinas SET ativo=0 WHERE id_maquina=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Maq=${id}`);
-  return c.json(ok({ id }));
+  const m = await c.env.DB.prepare(`SELECT cod_maquina FROM maquinas WHERE id_maquina=?`).bind(id).first<any>();
+  if (!m) return fail('Máquina não encontrada.', 404);
+  const uso = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM operacoes WHERE id_maquina=?`).bind(id).first<any>();
+  if (uso && uso.c > 0) {
+    return fail(`Não é possível excluir: ${m.cod_maquina} é usada em ${uso.c} operação(ões). Use "Inativar".`, 409);
+  }
+  await c.env.DB.prepare(`DELETE FROM maquinas WHERE id_maquina=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Maq=${m.cod_maquina} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/maquinas/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE maquinas SET ativo=? WHERE id_maquina=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Máquina não encontrada.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Maq=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== APARELHOS ========== */
@@ -195,9 +227,25 @@ app.put('/aparelhos/:id', async (c) => {
 
 app.delete('/aparelhos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE aparelhos SET ativo=0 WHERE id_aparelho=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Apar=${id}`);
-  return c.json(ok({ id }));
+  const a = await c.req.param('id') ? await c.env.DB.prepare(`SELECT cod_aparelho FROM aparelhos WHERE id_aparelho=?`).bind(id).first<any>() : null;
+  if (!a) return fail('Aparelho não encontrado.', 404);
+  const uso = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM operacoes WHERE id_aparelho=?`).bind(id).first<any>();
+  if (uso && uso.c > 0) {
+    return fail(`Não é possível excluir: ${a.cod_aparelho} é usado em ${uso.c} operação(ões). Use "Inativar".`, 409);
+  }
+  await c.env.DB.prepare(`DELETE FROM aparelhos WHERE id_aparelho=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Apar=${a.cod_aparelho} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/aparelhos/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE aparelhos SET ativo=? WHERE id_aparelho=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Aparelho não encontrado.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Apar=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== OPERAÇÕES ========== */
@@ -250,9 +298,25 @@ app.put('/operacoes/:id', async (c) => {
 
 app.delete('/operacoes/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE operacoes SET ativo=0 WHERE id_op=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Op=${id}`);
-  return c.json(ok({ id }));
+  const op = await c.env.DB.prepare(`SELECT cod_op FROM operacoes WHERE id_op=?`).bind(id).first<any>();
+  if (!op) return fail('Operação não encontrada.', 404);
+  const uso = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM seq_itens WHERE id_op=?`).bind(id).first<any>();
+  if (uso && uso.c > 0) {
+    return fail(`Não é possível excluir: ${op.cod_op} é usada em ${uso.c} sequência(s). Use "Inativar".`, 409);
+  }
+  await c.env.DB.prepare(`DELETE FROM operacoes WHERE id_op=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Op=${op.cod_op} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/operacoes/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE operacoes SET ativo=? WHERE id_op=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Operação não encontrada.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Op=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== CORES ========== */
@@ -287,9 +351,21 @@ app.put('/cores/:id', async (c) => {
 
 app.delete('/cores/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE cores SET ativo=0 WHERE id_cor=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Cor=${id}`);
-  return c.json(ok({ id }));
+  const cor = await c.env.DB.prepare(`SELECT cod_cor FROM cores WHERE id_cor=?`).bind(id).first<any>();
+  if (!cor) return fail('Cor não encontrada.', 404);
+  await c.env.DB.prepare(`DELETE FROM cores WHERE id_cor=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Cor=${cor.cod_cor} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/cores/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE cores SET ativo=? WHERE id_cor=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Cor não encontrada.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Cor=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== TAMANHOS ========== */
@@ -324,9 +400,21 @@ app.put('/tamanhos/:id', async (c) => {
 
 app.delete('/tamanhos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare(`UPDATE tamanhos SET ativo=0 WHERE id_tam=?`).bind(id).run();
-  await audit(c, 'CAD', 'DEL', `Tam=${id}`);
-  return c.json(ok({ id }));
+  const t = await c.env.DB.prepare(`SELECT cod_tam FROM tamanhos WHERE id_tam=?`).bind(id).first<any>();
+  if (!t) return fail('Tamanho não encontrado.', 404);
+  await c.env.DB.prepare(`DELETE FROM tamanhos WHERE id_tam=?`).bind(id).run();
+  await audit(c, 'CAD', 'DEL', `Tam=${t.cod_tam} [hard]`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+app.patch('/tamanhos/:id/ativo', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json().catch(() => ({}));
+  const ativo = b.ativo ? 1 : 0;
+  const r = await c.env.DB.prepare(`UPDATE tamanhos SET ativo=? WHERE id_tam=?`).bind(ativo, id).run();
+  if (!r.meta.changes) return fail('Tamanho não encontrado.', 404);
+  await audit(c, 'CAD', ativo ? 'ATIV' : 'INAT', `Tam=${id}`);
+  return c.json(ok({ id, ativo }));
 });
 
 /* ========== PARÂMETROS ========== */

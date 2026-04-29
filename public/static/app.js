@@ -33,10 +33,14 @@ const fmt = {
 
 function toast(msg, type = 'info') {
   const map = { info: 'bg-blue-600', success: 'bg-emerald-600', error: 'bg-red-600', warning: 'bg-amber-600' };
-  const t = el('div', { class: `toast ${map[type]} text-white px-4 py-3 rounded-lg shadow-lg` }, msg);
+  const icon = { info: 'fa-info-circle', success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' }[type] || 'fa-info-circle';
+  const t = el('div', { class: 'toast' });
+  t.innerHTML = `<div class="${map[type]} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2"><i class="fas ${icon}"></i><span>${msg}</span></div>`;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 4000);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateY(-8px)'; setTimeout(() => t.remove(), 250); }, 3500);
 }
+// expõe global p/ core.js
+window.toast = toast;
 
 /* ---------- Autenticação ---------- */
 const AUTH = {
@@ -59,6 +63,8 @@ async function api(method, path, body, opts = {}) {
     const status = e.response?.status;
     const code = e.response?.data?.code;
     const msg = e.response?.data?.error || e.message || 'Erro';
+    // Log estruturado p/ debug
+    console.error('[api]', method?.toUpperCase(), path, 'status=' + status, 'code=' + code, '→', msg);
     // Token expirado ou inválido
     if (status === 401 && code === 'AUTH_REQUIRED' && !opts.silent) {
       AUTH.clearToken(); AUTH.clearUser();
@@ -73,6 +79,7 @@ async function api(method, path, body, opts = {}) {
     throw e;
   }
 }
+window.api = api;
 
 /* ---------- Estado global ---------- */
 const state = {
@@ -149,6 +156,7 @@ function renderLayout() {
         <div class="text-sm text-slate-500 flex items-center gap-3">
           <span id="today">${dayjs().format('DD/MM/YYYY')}</span>
           <span class="text-slate-300">|</span>
+          ${Theme.toggleButtonHTML()}
           <div class="relative">
             <button id="user-btn" class="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-slate-100">
               <i class="fas fa-user-circle text-brand text-lg"></i>
@@ -183,6 +191,8 @@ function renderLayout() {
     renderLogin('Sessão encerrada.');
   };
   $('#btn-trocar-senha').onclick = () => openTrocarSenha(false);
+  // Theme toggle (sistema dual light/dark)
+  Theme.bindToggle('#theme-toggle-btn');
 }
 
 function navigate(route) {
@@ -197,11 +207,19 @@ function navigate(route) {
 /* ---------- Renderer principal ---------- */
 async function render() {
   const main = $('#main-content');
-  main.innerHTML = `<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-3xl text-brand"></i></div>`;
+  if (!main) { console.warn('[render] #main-content não encontrado (sem layout?)'); return; }
+  main.innerHTML = `<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-3xl text-brand"></i><div class="text-xs text-slate-400 mt-3 uppercase tracking-widest">Carregando…</div></div>`;
   const handler = ROUTES[state.route] || ROUTES.dashboard;
-  try { await handler(main); }
-  catch (e) { console.error(e); main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle"></i> Erro: ${e.message}</div>`; }
+  try {
+    await handler(main);
+    AppStore?.set?.({ route: state.route, loading: false });
+  } catch (e) {
+    console.error('[render]', state.route, e);
+    main.innerHTML = `<div class="card p-6"><div class="text-red-600 font-semibold mb-2"><i class="fas fa-exclamation-triangle mr-2"></i>Erro ao carregar tela</div><div class="text-sm text-slate-500">${e.message || e}</div><button class="btn btn-secondary mt-4" onclick="render()"><i class="fas fa-redo mr-1"></i>Tentar novamente</button></div>`;
+  }
 }
+window.render = render;
+window.navigate = navigate;
 
 /* ============================================================
  * TELAS
@@ -299,10 +317,29 @@ function kpi(label, value, icon, color) {
  * ============================================================ */
 function makeCrud(config) {
   return async (main) => {
-    const data = (await api('get', config.endpoint)).data;
+    let data = [];
+    try {
+      data = await Data.loadData(config.endpoint);
+    } catch (e) {
+      main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle mr-2"></i>Falha ao carregar ${config.label.toLowerCase()}: ${e.message || e}</div>`;
+      return;
+    }
+
+    // Filtro local por texto (persistido por rota)
+    const scope = `crud_${state.route}`;
+    const savedFilter = FilterStore.get(scope);
+    const search = (savedFilter.q || '').toLowerCase();
+
+    const filtered = !search ? data : data.filter((row) =>
+      config.cols.some((c) => String((c.render ? c.render(row) : row[c.field]) ?? '').toLowerCase().includes(search))
+    );
+
     main.innerHTML = `
-      <div class="flex items-center justify-between mb-4">
-        <div class="text-slate-600 text-sm">${data.length} registro(s)</div>
+      <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
+          <div class="text-slate-600 text-sm">${filtered.length}/${data.length} registro(s)</div>
+          <input type="search" data-filter="q" placeholder="Buscar..." class="text-sm" style="width:240px"/>
+        </div>
         <button id="btn-new" class="btn btn-primary"><i class="fas fa-plus mr-1"></i> Novo</button>
       </div>
       <div class="card overflow-hidden">
@@ -313,9 +350,11 @@ function makeCrud(config) {
           </thead>
           <tbody id="tbody"></tbody>
         </table>
+        ${filtered.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum registro encontrado.</div>' : ''}
       </div>`;
+
     const tbody = $('#tbody');
-    data.forEach((row) => {
+    filtered.forEach((row) => {
       const tr = el('tr', { class: 'border-t hover:bg-slate-50' });
       config.cols.forEach((c) => {
         let v = row[c.field];
@@ -330,58 +369,55 @@ function makeCrud(config) {
       const idv = row[config.idField];
       const isAtivo = row.ativo === 1 || row.ativo === true;
       const toggleBtn = config.toggleAtivo
-        ? `<button title="${isAtivo ? 'Inativar' : 'Reativar'}" class="mr-2" style="color:${isAtivo ? '#F97316' : '#00FF9C'}" data-toggle="${idv}" data-ativo="${isAtivo ? 1 : 0}">
+        ? `<button title="${isAtivo ? 'Inativar' : 'Reativar'}" class="mr-2" style="color:${isAtivo ? 'var(--warning)' : 'var(--success)'}" data-toggle="${idv}" data-ativo="${isAtivo ? 1 : 0}">
              <i class="fas ${isAtivo ? 'fa-toggle-on' : 'fa-toggle-off'}"></i>
            </button>`
         : '';
       acts.innerHTML = `
-        <button title="Editar" class="mr-2" style="color:#60A5FA" data-edit="${idv}"><i class="fas fa-edit"></i></button>
+        <button title="Editar" class="mr-2" style="color:var(--primary)" data-edit="${idv}"><i class="fas fa-edit"></i></button>
         ${toggleBtn}
-        <button title="Excluir definitivamente" style="color:#FF3B3B" data-del="${idv}"><i class="fas fa-trash"></i></button>`;
+        <button title="Excluir definitivamente" style="color:var(--danger)" data-del="${idv}"><i class="fas fa-trash"></i></button>`;
       tr.appendChild(acts);
       tbody.appendChild(tr);
     });
 
-    $('#btn-new').onclick = () => openCrudForm(config, null);
+    // Liga filtros (auto-restore + auto-save)
+    FilterStore.bind(scope, main);
+
+    // Re-render local (não recarrega tudo)
+    const reload = () => ROUTES[state.route](main);
+
+    $('#btn-new').onclick = () => openCrudForm(config, null, reload);
     $$('[data-edit]').forEach((b) => b.onclick = () => {
       const id = parseInt(b.dataset.edit);
-      openCrudForm(config, data.find((x) => x[config.idField] === id));
+      openCrudForm(config, data.find((x) => x[config.idField] === id), reload);
     });
 
-    // Toggle ativo/inativo (sem apagar)
+    // Toggle ativo/inativo
     $$('[data-toggle]').forEach((b) => b.onclick = async () => {
       const id = b.dataset.toggle;
       const atual = parseInt(b.dataset.ativo) === 1;
       const novo = atual ? 0 : 1;
-      const msg = atual ? 'Inativar este cadastro?' : 'Reativar este cadastro?';
-      if (!confirm(msg)) return;
-      try {
-        await api('patch', `${config.endpoint}/${id}/ativo`, { ativo: novo });
-        toast(novo ? 'Reativado.' : 'Inativado.', 'success');
-        render();
-      } catch {}
+      if (!confirm(atual ? 'Inativar este cadastro?' : 'Reativar este cadastro?')) return;
+      const ok = await Data.patchItem(config.endpoint, id, 'ativo', { ativo: novo },
+        { successMsg: novo ? 'Reativado.' : 'Inativado.', btn: b });
+      if (ok) reload();
     });
 
-    // Hard delete (exclusão real) — mensagens ricas via API
+    // Hard delete
     $$('[data-del]').forEach((b) => b.onclick = async () => {
       const id = b.dataset.del;
       const row = data.find((x) => String(x[config.idField]) === String(id));
-      const nome = row ? (row[config.labelField || 'nome_cliente'] || row.cod_cliente || `#${id}`) : `#${id}`;
+      const nome = row ? (row[config.labelField] || row.nome_cliente || row.cod_cliente || row.desc_op || `#${id}`) : `#${id}`;
       const msg = `Excluir DEFINITIVAMENTE ${config.label.toLowerCase()} "${nome}"?\n\n` +
-                  `Esta ação não pode ser desfeita. Se houver registros vinculados (ex: OPs), a exclusão será bloqueada.`;
-      if (!confirm(msg)) return;
-      try {
-        await api('delete', `${config.endpoint}/${id}`);
-        toast(`${config.label} excluído.`, 'success');
-        render();
-      } catch {
-        /* erro já é tratado pelo interceptor (toast) */
-      }
+                  `Esta ação não pode ser desfeita. Se houver registros vinculados, a exclusão será bloqueada.`;
+      const ok = await Data.deleteItem(config.endpoint, id, { confirmMsg: msg, successMsg: `${config.label} excluído.`, btn: b });
+      if (ok) reload();
     });
   };
 }
 
-function openCrudForm(config, row) {
+function openCrudForm(config, row, onSaved) {
   const isEdit = !!row;
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal w-full max-w-xl p-6' });
@@ -391,26 +427,45 @@ function openCrudForm(config, row) {
       ${config.fields.map((f) => renderField(f, row)).join('')}
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" id="cancel" class="btn btn-secondary">Cancelar</button>
-        <button type="submit" class="btn btn-primary"><i class="fas fa-save mr-1"></i> Salvar</button>
+        <button type="submit" id="crud-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i> Salvar</button>
       </div>
     </form>`;
   m.appendChild(card);
   document.body.appendChild(m);
+  // Foco automático no primeiro campo
+  setTimeout(() => card.querySelector('input,select,textarea')?.focus(), 50);
+  // ESC fecha
+  const escHandler = (e) => { if (e.key === 'Escape') { m.remove(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+  // Click no backdrop fecha
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
   $('#cancel').onclick = () => m.remove();
+
   $('#crud-form').onsubmit = async (ev) => {
     ev.preventDefault();
     const body = {};
+    let validationError = null;
     config.fields.forEach((f) => {
-      const v = $(`#f_${f.name}`).value;
+      const node = $(`#f_${f.name}`);
+      if (!node) return;
+      const v = node.value;
       if (f.type === 'number') body[f.name] = v === '' ? null : parseFloat(v);
-      else if (f.type === 'checkbox') body[f.name] = $(`#f_${f.name}`).checked ? 1 : 0;
+      else if (f.type === 'checkbox') body[f.name] = node.checked ? 1 : 0;
       else body[f.name] = v;
+      if (f.required && (v === '' || v == null)) validationError = `Campo "${f.label}" é obrigatório.`;
     });
+    if (validationError) { toast(validationError, 'warning'); return; }
+    const btn = $('#crud-save');
     try {
-      if (isEdit) await api('put', `${config.endpoint}/${row[config.idField]}`, body);
-      else await api('post', config.endpoint, body);
-      toast('Salvo.', 'success'); m.remove(); render();
-    } catch {}
+      await Data.saveData(config.endpoint, body, {
+        id: isEdit ? row[config.idField] : null,
+        btn,
+        successMsg: isEdit ? `${config.label} atualizado.` : `${config.label} criado.`,
+      });
+      m.remove();
+      document.removeEventListener('keydown', escHandler);
+      if (onSaved) onSaved(); else updateUI();
+    } catch { /* toast já exibido pelo Data.saveData */ }
   };
 }
 
@@ -455,6 +510,7 @@ ROUTES.clientes = makeCrud({
 
 ROUTES.referencias = makeCrud({
   endpoint: '/referencias', idField: 'id_ref', label: 'Referência',
+  labelField: 'desc_ref', toggleAtivo: true,
   cols: [
     { field: 'cod_ref', label: 'Código' },
     { field: 'desc_ref', label: 'Descrição' },
@@ -472,6 +528,7 @@ ROUTES.referencias = makeCrud({
 
 ROUTES.maquinas = makeCrud({
   endpoint: '/maquinas', idField: 'id_maquina', label: 'Máquina',
+  labelField: 'desc_maquina', toggleAtivo: true,
   cols: [
     { field: 'cod_maquina', label: 'Código' },
     { field: 'desc_maquina', label: 'Descrição' },
@@ -492,6 +549,7 @@ ROUTES.maquinas = makeCrud({
 
 ROUTES.aparelhos = makeCrud({
   endpoint: '/aparelhos', idField: 'id_aparelho', label: 'Aparelho',
+  labelField: 'desc_aparelho', toggleAtivo: true,
   cols: [
     { field: 'cod_aparelho', label: 'Código' },
     { field: 'desc_aparelho', label: 'Descrição' },
@@ -506,6 +564,7 @@ ROUTES.aparelhos = makeCrud({
 
 ROUTES.cores = makeCrud({
   endpoint: '/cores', idField: 'id_cor', label: 'Cor',
+  labelField: 'nome_cor', toggleAtivo: true,
   cols: [
     { field: 'cod_cor', label: 'Código' },
     { field: 'nome_cor', label: 'Nome' },
@@ -520,6 +579,7 @@ ROUTES.cores = makeCrud({
 
 ROUTES.tamanhos = makeCrud({
   endpoint: '/tamanhos', idField: 'id_tam', label: 'Tamanho',
+  labelField: 'cod_tam', toggleAtivo: true,
   cols: [
     { field: 'cod_tam', label: 'Código' },
     { field: 'ordem', label: 'Ordem' },
@@ -631,27 +691,64 @@ ROUTES.operacoes = async (main) => {
  * PARÂMETROS
  * ============================================================ */
 ROUTES.parametros = async (main) => {
-  const d = (await api('get', '/parametros')).data;
+  let d;
+  try { d = await Data.loadData('/parametros'); }
+  catch (e) { main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle mr-2"></i>Erro: ${e.message || e}</div>`; return; }
+
   main.innerHTML = `
-    <div class="card p-6 max-w-2xl">
-      <h3 class="font-semibold mb-4 text-slate-700">Parâmetros do sistema</h3>
+    <div class="card p-6 max-w-3xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold text-slate-700">Parâmetros do sistema</h3>
+        <button id="btn-reset-form" type="button" class="btn btn-secondary btn-sm" title="Restaurar valores carregados">
+          <i class="fas fa-undo mr-1"></i> Resetar
+        </button>
+      </div>
       <form id="form-param" class="space-y-3">
         ${d.map(p => `
           <div class="grid grid-cols-3 gap-3 items-center">
             <label class="col-span-1 text-sm font-medium text-slate-700" title="${p.descricao || ''}">${p.chave}</label>
-            <input class="col-span-1" id="p_${p.chave}" value="${p.valor || ''}"/>
+            <input class="col-span-1" id="p_${p.chave}" value="${p.valor || ''}" data-original="${(p.valor || '').replace(/"/g, '&quot;')}"/>
             <span class="col-span-1 text-xs text-slate-500">${p.descricao || ''}</span>
           </div>`).join('')}
-        <div class="flex justify-end pt-3"><button class="btn btn-primary"><i class="fas fa-save mr-1"></i> Salvar</button></div>
+        <div class="flex justify-end pt-3"><button id="btn-salvar-param" type="submit" class="btn btn-primary"><i class="fas fa-save mr-1"></i> Salvar</button></div>
       </form>
     </div>`;
+
+  $('#btn-reset-form').onclick = () => {
+    d.forEach(p => { const inp = $('#p_' + p.chave); if (inp) inp.value = p.valor || ''; });
+    toast('Valores restaurados.', 'info');
+  };
+
   $('#form-param').onsubmit = async (e) => {
     e.preventDefault();
-    for (const p of d) {
-      const v = $('#p_' + p.chave).value;
-      if (v !== p.valor) await api('put', `/parametros/${p.chave}`, { valor: v });
+    const btn = $('#btn-salvar-param');
+    setBtnLoading(btn, true);
+    try {
+      let count = 0;
+      const errors = [];
+      for (const p of d) {
+        const v = $('#p_' + p.chave).value;
+        if (v !== p.valor) {
+          try {
+            await api('put', `/parametros/${encodeURIComponent(p.chave)}`, { valor: v });
+            p.valor = v; // sincroniza estado local
+            count++;
+          } catch (err) {
+            errors.push(`${p.chave}: ${err.response?.data?.error || err.message}`);
+          }
+        }
+      }
+      if (errors.length) {
+        toast(`Erro em ${errors.length} parâmetro(s). Veja o console.`, 'error');
+        console.error('[parametros] erros:', errors);
+      } else if (count === 0) {
+        toast('Nenhuma alteração para salvar.', 'info');
+      } else {
+        toast(`${count} parâmetro(s) atualizado(s).`, 'success');
+      }
+    } finally {
+      setBtnLoading(btn, false);
     }
-    toast('Parâmetros atualizados.', 'success'); render();
   };
 };
 
@@ -2266,11 +2363,24 @@ ROUTES.importador = async (main) => {
  * USUÁRIOS (admin)
  * ============================================================ */
 ROUTES.usuarios = async (main) => {
-  const d = (await api('get', '/usuarios')).data;
+  let d;
+  try { d = await Data.loadData('/usuarios'); }
+  catch (e) { main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle mr-2"></i>Erro: ${e.message || e}</div>`; return; }
+
+  const reload = () => ROUTES.usuarios(main);
+  const scope = 'crud_usuarios';
+  const search = (FilterStore.get(scope).q || '').toLowerCase();
+  const filtered = !search ? d : d.filter(u =>
+    [u.login, u.nome, u.perfil].some(x => String(x || '').toLowerCase().includes(search))
+  );
+
   main.innerHTML = `
   <div class="space-y-4">
-    <div class="flex justify-between items-center">
-      <h3 class="text-lg font-semibold text-slate-800">Usuários do Sistema</h3>
+    <div class="flex justify-between items-center gap-3 flex-wrap">
+      <div class="flex items-center gap-3">
+        <h3 class="text-lg font-semibold text-slate-800">Usuários do Sistema</h3>
+        <input type="search" data-filter="q" placeholder="Buscar..." class="text-sm" style="width:220px"/>
+      </div>
       <button id="btn-novo-user" class="btn btn-primary"><i class="fas fa-plus mr-1"></i> Novo usuário</button>
     </div>
     <div class="card overflow-auto">
@@ -2281,7 +2391,7 @@ ROUTES.usuarios = async (main) => {
           <th class="p-2 text-center">Ativo</th><th class="p-2 text-center">Trocar senha</th>
           <th class="p-2 text-right">Ações</th>
         </tr></thead>
-        <tbody>${d.map(u => `
+        <tbody>${filtered.map(u => `
           <tr class="border-t">
             <td class="p-2 font-mono">${u.login}</td>
             <td class="p-2">${u.nome}</td>
@@ -2290,25 +2400,31 @@ ROUTES.usuarios = async (main) => {
             <td class="p-2 text-center">${u.ativo ? '<i class="fas fa-check text-emerald-600"></i>' : '<i class="fas fa-times text-red-600"></i>'}</td>
             <td class="p-2 text-center">${u.trocar_senha ? '<i class="fas fa-exclamation-triangle text-amber-600"></i>' : ''}</td>
             <td class="p-2 text-right">
-              <button class="text-brand" data-edit="${u.id_usuario}" data-row='${JSON.stringify(u)}'><i class="fas fa-edit"></i></button>
+              <button class="text-brand" data-edit="${u.id_usuario}"><i class="fas fa-edit"></i></button>
               <button class="text-red-600 ml-2" data-del="${u.id_usuario}"><i class="fas fa-user-slash"></i></button>
             </td>
           </tr>`).join('')}
         </tbody>
       </table>
+      ${filtered.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum usuário encontrado.</div>' : ''}
     </div>
   </div>`;
-  $('#btn-novo-user').onclick = () => openUsuarioForm(null);
-  $$('[data-edit]').forEach(b => b.onclick = () => openUsuarioForm(JSON.parse(b.dataset.row)));
+
+  FilterStore.bind(scope, main);
+  $('#btn-novo-user').onclick = () => openUsuarioForm(null, reload);
+  $$('[data-edit]').forEach(b => b.onclick = () => {
+    const id = parseInt(b.dataset.edit);
+    const u = d.find(x => x.id_usuario === id);
+    if (u) openUsuarioForm(u, reload);
+  });
   $$('[data-del]').forEach(b => b.onclick = async () => {
-    if (!confirm('Desativar usuário?')) return;
-    await api('delete', '/usuarios/' + b.dataset.del);
-    toast('Usuário desativado.', 'success');
-    ROUTES.usuarios(main);
+    const ok = await Data.deleteItem('/usuarios', b.dataset.del,
+      { confirmMsg: 'Desativar este usuário?', successMsg: 'Usuário desativado.', btn: b });
+    if (ok) reload();
   });
 };
 
-function openUsuarioForm(row) {
+function openUsuarioForm(row, onSaved) {
   const isEdit = !!row;
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-md' });
@@ -2328,26 +2444,39 @@ function openUsuarioForm(row) {
     </div>
     <div class="flex justify-end gap-2 mt-4">
       <button id="u-cancel" class="btn btn-secondary">Cancelar</button>
-      <button id="u-save" class="btn btn-primary">Salvar</button>
+      <button id="u-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
     </div>`;
   m.appendChild(card); document.body.appendChild(m);
+  setTimeout(() => $('#u-nome')?.focus(), 50);
+  const escHandler = (e) => { if (e.key === 'Escape') { m.remove(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
   $('#u-cancel').onclick = () => m.remove();
   $('#u-save').onclick = async () => {
+    const login = $('#u-login').value.trim();
+    const nome = $('#u-nome').value.trim();
+    const senha = $('#u-senha').value;
+    if (!isEdit && !login) { toast('Login é obrigatório.', 'warning'); return; }
+    if (!nome) { toast('Nome é obrigatório.', 'warning'); return; }
+    if (!isEdit && (!senha || senha.length < 6)) { toast('Senha mínima de 6 caracteres.', 'warning'); return; }
+
     const body = {
-      login: $('#u-login').value.trim(),
-      nome: $('#u-nome').value.trim(),
+      login, nome,
       perfil: $('#u-perfil').value,
-      senha: $('#u-senha').value,
+      senha,
       ativo: $('#u-ativo').checked ? 1 : 0,
       trocar_senha: $('#u-trocar').checked ? 1 : 0,
     };
     try {
-      if (isEdit) await api('put', '/usuarios/' + row.id_usuario, body);
-      else await api('post', '/usuarios', body);
-      toast('Usuário salvo.', 'success');
+      await Data.saveData('/usuarios', body, {
+        id: isEdit ? row.id_usuario : null,
+        btn: $('#u-save'),
+        successMsg: isEdit ? 'Usuário atualizado.' : 'Usuário criado.',
+      });
       m.remove();
-      ROUTES.usuarios($('#main-content'));
-    } catch {}
+      document.removeEventListener('keydown', escHandler);
+      if (onSaved) onSaved(); else updateUI();
+    } catch { /* já tratado */ }
   };
 }
 

@@ -57,10 +57,25 @@ function renderSPA(): string {
   <link rel="icon" type="image/png" sizes="192x192" href="/static/logo-icon.png" />
   <link rel="apple-touch-icon" href="/static/logo-icon.png" />
   <link rel="shortcut icon" href="/static/favicon.ico" />
+  <!-- ANTI-FLASH: aplica tema antes de qualquer pintura -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('corepro_theme');
+        var sys = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        var theme = (saved === 'light' || saved === 'dark') ? saved : sys;
+        document.documentElement.setAttribute('data-theme', theme);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', theme === 'light' ? '#F8FAFC' : '#020617');
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=3" rel="stylesheet" />
+  <link href="/static/styles.css?v=4" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -80,7 +95,7 @@ function renderSPA(): string {
     <div class="login-screen">
       <div class="text-center">
         <img src="/static/logo-icon.png" alt="CorePro" style="width:96px;height:96px;filter:drop-shadow(0 4px 20px rgba(37,99,235,.5));animation:pulse 2s ease-in-out infinite;" />
-        <p style="margin-top:20px;color:#9CA3AF;letter-spacing:.12em;font-size:.85rem;text-transform:uppercase;">
+        <p style="margin-top:20px;color:var(--text-2,#9CA3AF);letter-spacing:.12em;font-size:.85rem;text-transform:uppercase;">
           <i class="fas fa-spinner fa-spin" style="color:#2563EB;margin-right:8px;"></i> Inicializando CorePro…
         </p>
       </div>
@@ -90,7 +105,8 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/core.js?v=1"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>`;
 }
