@@ -131,23 +131,22 @@ function renderLayout() {
 
   $('#app').innerHTML = `
   <div class="flex h-screen">
-    <aside id="sidebar" class="sidebar w-64 flex-shrink-0 overflow-y-auto">
-      <div class="sidebar-brand">
-        <a href="#dashboard" data-route="dashboard" title="CorePro — Dashboard">
-          <img src="/static/logo-full.png" alt="CorePro" />
-        </a>
-      </div>
-      <div class="sidebar-tagline">Onde sistemas se tornam negócio</div>
-      <nav class="py-2">
+    <aside id="sidebar" class="sidebar">
+      <a href="#dashboard" data-route="dashboard" class="sidebar-brand" title="CorePro — Dashboard">
+        <img src="/static/logo-full.png" alt="CorePro" />
+        <span class="sidebar-tagline">Onde sistemas se tornam negócio</span>
+      </a>
+      <nav class="sidebar-nav" aria-label="Navegação principal">
         ${Object.entries(groups).map(([g, items]) => `
-          <div class="nav-group-label">${g}</div>
-          ${items.map(i => `
-            <a href="#${i.id}" data-route="${i.id}" class="nav-item">
-              <i class="fas ${i.icon}"></i>
-              <span>${i.label}</span>
-            </a>`).join('')}
+          <div class="nav-section">
+            <div class="nav-group-label">${g}</div>
+            ${items.map(i => `
+              <a href="#${i.id}" data-route="${i.id}" class="nav-item">
+                <i class="fas ${i.icon}"></i>
+                <span>${i.label}</span>
+              </a>`).join('')}
+          </div>
         `).join('')}
-        <div style="height:24px"></div>
       </nav>
     </aside>
     <div class="flex-1 flex flex-col overflow-hidden">

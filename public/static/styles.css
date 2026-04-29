@@ -37,8 +37,15 @@
 
   /* Bordas */
   --border: rgba(255, 255, 255, 0.08);
-  --border-1: rgba(148, 163, 184, 0.12);
+  --border-1: rgba(255, 255, 255, 0.08);
   --border-2: rgba(148, 163, 184, 0.22);
+
+  /* Sidebar tokens (DARK) */
+  --sidebar-bg: #0A0F1C;
+  --sidebar-text: #CBD5F5;
+  --sidebar-hover: rgba(255, 255, 255, 0.04);
+  --sidebar-active: linear-gradient(135deg, #3B82F6, #8B5CF6);
+  --sidebar-active-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 
   /* Glows */
   --glow-primary:   0 0 12px rgba(59, 130, 246, 0.5);
@@ -48,8 +55,8 @@
   --glow-danger:    0 0 12px rgba(255, 59, 59, 0.5);
 
   /* Gradiente marca */
-  --brand-gradient: linear-gradient(135deg, #2563EB 0%, #7C3AED 100%);
-  --brand-gradient-soft: linear-gradient(135deg, rgba(37,99,235,0.18) 0%, rgba(124,58,237,0.18) 100%);
+  --brand-gradient: linear-gradient(135deg, #3B82F6 0%, #8B5CF6 100%);
+  --brand-gradient-soft: linear-gradient(135deg, rgba(59,130,246,0.18) 0%, rgba(139,92,246,0.18) 100%);
 
   /* Shadows */
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.35);
@@ -106,6 +113,13 @@
   --border: #E2E8F0;
   --border-1: #E2E8F0;
   --border-2: #CBD5E1;
+
+  /* Sidebar tokens (LIGHT) */
+  --sidebar-bg: #FFFFFF;
+  --sidebar-text: #334155;
+  --sidebar-hover: #F1F5F9;
+  --sidebar-active: linear-gradient(135deg, #2563EB, #7C3AED);
+  --sidebar-active-shadow: 0 6px 18px rgba(59, 130, 246, 0.25);
 
   /* Glows (mais sutis no light) */
   --glow-primary:   0 0 0 3px rgba(37, 99, 235, 0.15);
@@ -202,86 +216,149 @@ label {
 .border, .border-t, .border-b, .border-slate-200, .border-slate-300 { border-color: var(--border-1) !important; }
 
 /* ============================================================
- * SIDEBAR
+ * SIDEBAR — 260px • flex column • estrutura idêntica light/dark
  * ============================================================ */
 .sidebar {
-  background: var(--surface-1);
-  border-right: 1px solid var(--border-1);
-  position: relative;
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 0;
+  gap: 8px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
 }
-[data-theme="dark"] .sidebar {
-  background: linear-gradient(180deg, #0B1120 0%, #05080F 100%);
-}
-[data-theme="light"] .sidebar {
-  background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
-  box-shadow: 1px 0 3px rgba(15, 23, 42, 0.04);
-}
-.sidebar::before {
-  content: ""; position: absolute; inset: 0;
-  background: radial-gradient(400px 200px at 0% 0%, rgba(124,58,237,0.08), transparent 60%);
-  pointer-events: none;
-}
-[data-theme="light"] .sidebar::before { display: none; }
 
+/* Header da sidebar (logo + tagline) */
 .sidebar-brand {
-  display: flex; align-items: center; justify-content: center;
-  padding: 18px 16px 14px;
-  border-bottom: 1px solid var(--border-1);
-  background: linear-gradient(180deg, rgba(37,99,235,0.06), transparent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
 }
-[data-theme="light"] .sidebar-brand {
-  background: linear-gradient(180deg, rgba(37,99,235,0.04), transparent);
+.sidebar-brand img {
+  max-width: 140px;
+  height: auto;
+  display: block;
 }
-.sidebar-brand img { max-width: 180px; height: auto; }
-[data-theme="dark"] .sidebar-brand img { filter: drop-shadow(0 2px 10px rgba(37,99,235,0.35)); }
-[data-theme="light"] .sidebar-brand img { filter: drop-shadow(0 2px 6px rgba(37,99,235,0.20)); }
-
+[data-theme="dark"] .sidebar-brand img {
+  filter: drop-shadow(0 2px 10px rgba(59, 130, 246, 0.35));
+}
+[data-theme="light"] .sidebar-brand img {
+  filter: drop-shadow(0 2px 6px rgba(37, 99, 235, 0.18));
+}
 .sidebar-tagline {
-  text-align: center; font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
-  color: var(--text-3); margin-top: 8px; padding-bottom: 14px;
-  border-bottom: 1px solid var(--border-1);
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-top: 6px;
+  line-height: 1.4;
+  color: var(--sidebar-text);
+  opacity: 0.7;
 }
+
+/* Container das seções de menu */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  padding: 4px 0 16px;
+}
+
+/* Cada grupo de menu */
+.nav-section { margin-top: 8px; }
+.nav-section:first-of-type { margin-top: 0; }
+
+/* Título da seção */
 .nav-group-label {
-  padding: 18px 18px 6px; font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
-  color: var(--text-3); font-weight: 600;
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  opacity: 0.6;
+  margin-bottom: 4px;
+  color: var(--sidebar-text);
 }
+
+/* Item do menu */
 .nav-item {
-  display: flex; align-items: center; gap: 12px;
-  padding: 9px 16px; margin: 2px 10px; border-radius: 8px;
-  color: var(--text-2) !important; font-size: 0.875rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin: 2px 10px;
+  border-radius: 10px;
+  color: var(--sidebar-text) !important;
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
   border: 1px solid transparent;
-  transition: all .2s ease-in-out;
-  cursor: pointer; text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease,
+              transform 0.2s ease, box-shadow 0.2s ease;
 }
-.nav-item i { width: 18px; text-align: center; color: var(--text-3); transition: color .2s; }
+.nav-item i {
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+
+/* Hover: leve translação + background suave */
 .nav-item:hover {
-  background: var(--brand-gradient-soft);
-  color: var(--text-1) !important;
-  border-color: rgba(37,99,235,0.25);
+  background: var(--sidebar-hover);
+  transform: translateX(4px);
 }
-.nav-item:hover i { color: var(--primary); }
+.nav-item:hover i { opacity: 1; }
+
+/* Item ativo: gradiente da marca + texto branco + glow */
 .nav-item.active {
-  background: var(--brand-gradient);
-  color: #fff !important;
-  border-color: transparent;
-  box-shadow: var(--glow-primary);
+  background: var(--sidebar-active);
+  color: #FFFFFF !important;
+  box-shadow: var(--sidebar-active-shadow);
+  transform: translateX(0);
 }
-.nav-item.active i { color: #fff; }
+.nav-item.active i {
+  color: #FFFFFF;
+  opacity: 1;
+}
+.nav-item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 
 /* ============================================================
- * TOPBAR
+ * TOPBAR — header padding 16px, borda inferior var(--border)
  * ============================================================ */
 #topbar {
-  background: var(--surface-1) !important;
+  padding: 16px;
+  background: var(--bg-card) !important;
+  border-bottom: 1px solid var(--border) !important;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border-1) !important;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
 }
-[data-theme="dark"] #topbar { background: rgba(11, 17, 32, 0.75) !important; }
-[data-theme="light"] #topbar { background: rgba(255, 255, 255, 0.85) !important; }
-#topbar h2 { color: var(--text-1) !important; }
-#topbar #user-menu { background: var(--surface-1) !important; border: 1px solid var(--border-2) !important; }
-#user-btn:hover { background: var(--brand-gradient-soft) !important; }
+[data-theme="dark"] #topbar { background: rgba(10, 15, 28, 0.85) !important; }
+[data-theme="light"] #topbar { background: rgba(255, 255, 255, 0.92) !important; }
+#topbar h2 { color: var(--text-primary) !important; }
+#topbar #user-menu {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+}
+#user-btn {
+  border-radius: 10px;
+  transition: background-color 0.2s ease;
+}
+#user-btn:hover { background: var(--sidebar-hover) !important; }
 
 /* Botão toggle de tema */
 .theme-toggle {
