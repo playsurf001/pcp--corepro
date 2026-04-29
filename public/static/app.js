@@ -229,42 +229,111 @@ const ROUTES = {};
 ROUTES.dashboard = async (main) => {
   const r = await api('get', '/dashboard');
   const d = r.data;
+
+  // % refugo invertido (quanto menor, melhor) — usamos como "saúde de qualidade"
+  const refugo = Number(d.refugo_pct || 0);
+  const eficiencia = Number(d.eficiencia_real || 0);
+  const opsTotal = Number(d.ops_abertas || 0);
+  const opsAtrasadas = Number(d.ops_atrasadas || 0);
+  const pctAtraso = opsTotal ? (opsAtrasadas / opsTotal) * 100 : 0;
+
   main.innerHTML = `
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-      ${kpi('OPs Abertas', d.ops_abertas, 'fa-folder-open', 'bg-blue-500')}
-      ${kpi('OPs Atrasadas', d.ops_atrasadas, 'fa-exclamation-triangle', 'bg-red-500')}
-      ${kpi('Peças em Aberto', fmt.int(d.pecas_aberto), 'fa-cubes', 'bg-indigo-500')}
-      ${kpi('Prazo Médio (dias)', fmt.num(d.prazo_medio_dias, 1), 'fa-calendar-alt', 'bg-amber-500')}
-      ${kpi('Minutos em Aberto', fmt.int(d.minutos_aberto), 'fa-clock', 'bg-cyan-500')}
-      ${kpi('Produção Boa (mês)', fmt.int(d.producao_boa_mes), 'fa-check-circle', 'bg-emerald-500')}
-      ${kpi('Refugo %', fmt.pct(d.refugo_pct), 'fa-trash-alt', 'bg-rose-500')}
-      ${kpi('Eficiência Real', fmt.pct(d.eficiencia_real), 'fa-gauge-high', 'bg-purple-500')}
+    ${UI.pageHeader({
+      breadcrumb: [{ label: 'Início' }, { label: 'Dashboard' }],
+      title: 'Visão Geral da Produção',
+      badge: 'MES',
+      desc: 'Indicadores em tempo real de Ordens de Produção, eficiência operacional e qualidade.',
+      live: true,
+      actions: `
+        <button class="btn-icon" id="btn-refresh-dash" title="Atualizar dados"><i class="fas fa-sync-alt"></i></button>
+        <button class="btn btn-primary" data-route-link="ops"><i class="fas fa-plus mr-2"></i>Nova OP</button>
+      `,
+    })}
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+      ${UI.kpi({
+        label: 'OPs Abertas', value: fmt.int(d.ops_abertas), icon: 'fa-folder-open',
+        accent: 'blue', sub: 'no momento'
+      })}
+      ${UI.kpi({
+        label: 'OPs Atrasadas', value: fmt.int(d.ops_atrasadas), icon: 'fa-triangle-exclamation',
+        accent: 'red',
+        trend: { dir: opsAtrasadas > 0 ? 'down' : 'up', text: pctAtraso.toFixed(1) + '%' },
+        sub: 'do total aberto',
+        progress: pctAtraso
+      })}
+      ${UI.kpi({
+        label: 'Peças em Aberto', value: fmt.int(d.pecas_aberto), icon: 'fa-cubes',
+        accent: 'indigo', sub: 'a produzir'
+      })}
+      ${UI.kpi({
+        label: 'Prazo Médio', value: fmt.num(d.prazo_medio_dias, 1), icon: 'fa-calendar-day',
+        accent: 'amber', sub: 'dias úteis'
+      })}
+      ${UI.kpi({
+        label: 'Minutos em Aberto', value: fmt.int(d.minutos_aberto), icon: 'fa-clock',
+        accent: 'cyan', sub: 'tempo planejado'
+      })}
+      ${UI.kpi({
+        label: 'Produção Boa (mês)', value: fmt.int(d.producao_boa_mes), icon: 'fa-circle-check',
+        accent: 'green', sub: 'peças aprovadas'
+      })}
+      ${UI.kpi({
+        label: 'Refugo', value: fmt.pct(d.refugo_pct), icon: 'fa-recycle',
+        accent: 'rose',
+        trend: { dir: refugo > 3 ? 'down' : 'up', text: refugo > 3 ? 'Alto' : 'OK' },
+        sub: 'meta < 3%',
+        progress: Math.min(100, refugo * 10)
+      })}
+      ${UI.kpi({
+        label: 'Eficiência Real', value: fmt.pct(d.eficiencia_real), icon: 'fa-gauge-high',
+        accent: 'purple',
+        trend: { dir: eficiencia >= 80 ? 'up' : eficiencia >= 60 ? 'flat' : 'down', text: eficiencia >= 80 ? 'Ótimo' : eficiencia >= 60 ? 'OK' : 'Baixo' },
+        sub: 'OEE estimado',
+        progress: eficiencia
+      })}
     </div>
+
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="card p-5">
-        <h3 class="font-semibold mb-3 text-slate-700">Carga por Cliente (top 10)</h3>
+        ${UI.section({ title: 'Carga por Cliente', icon: 'fa-users', meta: 'TOP 10' })}
         <canvas id="ch-cli" height="220"></canvas>
       </div>
       <div class="card p-5">
-        <h3 class="font-semibold mb-3 text-slate-700">Carga por Referência (top 10)</h3>
+        ${UI.section({ title: 'Carga por Referência', icon: 'fa-tags', meta: 'TOP 10' })}
         <canvas id="ch-ref" height="220"></canvas>
       </div>
       <div class="card p-5">
-        <h3 class="font-semibold mb-3 text-slate-700">OPs por Status</h3>
+        ${UI.section({ title: 'OPs por Status', icon: 'fa-chart-pie', meta: 'tempo real' })}
         <canvas id="ch-st" height="180"></canvas>
       </div>
       <div class="card p-5">
-        <h3 class="font-semibold mb-3 text-slate-700">Dicas rápidas</h3>
-        <ul class="space-y-2 text-sm text-slate-600">
-          <li>✅ Cadastre primeiro: Máquinas → Aparelhos → Operações → Referências.</li>
-          <li>✅ Crie a <b>Sequência Operacional</b> da referência e <b>ATIVE</b> a versão.</li>
-          <li>✅ Abra OPs preenchendo <b>cores e tamanhos</b> (a soma deve bater com a qtde).</li>
-          <li>✅ Use o <b>Balanceamento</b> para saber quantas máquinas/operadores.</li>
-          <li>✅ Imprima a <b>Ficha de Acompanhamento</b> e registre no <b>Apontamento</b>.</li>
+        ${UI.section({ title: 'Fluxo recomendado', icon: 'fa-route' })}
+        <ul class="space-y-2 text-sm" style="color:var(--text-secondary)">
+          <li><i class="fas fa-check" style="color:var(--primary)"></i> &nbsp;Cadastre: <b>Máquinas → Aparelhos → Operações → Referências</b></li>
+          <li><i class="fas fa-check" style="color:var(--primary)"></i> &nbsp;Crie a <b>Sequência Operacional</b> e <b>ATIVE</b> a versão.</li>
+          <li><i class="fas fa-check" style="color:var(--primary)"></i> &nbsp;Abra OPs preenchendo <b>cores e tamanhos</b> (soma = qtde).</li>
+          <li><i class="fas fa-check" style="color:var(--primary)"></i> &nbsp;Use o <b>Balanceamento</b> para dimensionar máquinas/operadores.</li>
+          <li><i class="fas fa-check" style="color:var(--primary)"></i> &nbsp;Imprima a <b>Ficha</b> e registre no <b>Apontamento</b>.</li>
         </ul>
       </div>
     </div>
   `;
+
+  // Live tick
+  UI.liveTick(main, Date.now());
+
+  // Botão refresh com spinner
+  const btnRefresh = $('#btn-refresh-dash');
+  if (btnRefresh) btnRefresh.onclick = async () => {
+    btnRefresh.classList.add('is-spinning');
+    try { await ROUTES.dashboard(main); }
+    finally { btnRefresh.classList.remove('is-spinning'); }
+  };
+
+  // Atalho "Nova OP"
+  const newOpBtn = main.querySelector('[data-route-link="ops"]');
+  if (newOpBtn) newOpBtn.onclick = () => navigate('ops');
 
   // Tema CorePro para Chart.js (cores neon + eixos escuros)
   const CP_THEME = {

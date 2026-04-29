@@ -315,3 +315,138 @@ const Actions = {
 };
 Actions._attachOnce();
 window.Actions = Actions;
+
+/* ============================================================
+ * UI HELPERS — componentes inspirados em sistemas MES industriais
+ * page header (breadcrumb + ações), KPIs v2, pills, empty state,
+ * toolbar sticky, indicador "live"
+ * ============================================================ */
+const UI = {
+  /** Header padrão de página: breadcrumb + título + descrição + ações */
+  pageHeader({ breadcrumb = [], title = '', badge = '', desc = '', actions = '', live = false } = {}) {
+    const bc = breadcrumb.length
+      ? `<div class="breadcrumb">${breadcrumb.map((b, i) => {
+          const sep = i < breadcrumb.length - 1 ? '<span class="sep"><i class="fas fa-chevron-right" style="font-size:9px"></i></span>' : '';
+          const item = b.href
+            ? `<a href="${b.href}">${b.label}</a>`
+            : `<span>${b.label}</span>`;
+          return `${item}${sep}`;
+        }).join('')}</div>`
+      : '';
+    const liveTag = live
+      ? `<span class="live-indicator" title="Atualizado agora"><span class="pulse"></span><span>Atualizado <span data-live-time>agora</span></span></span>`
+      : '';
+    return `
+      <div class="page-header">
+        <div class="ph-left">
+          ${bc}
+          <div class="ph-title">
+            <span>${title}</span>
+            ${badge ? `<span class="ph-badge">${badge}</span>` : ''}
+          </div>
+          ${desc ? `<div class="ph-desc">${desc}</div>` : ''}
+        </div>
+        <div class="ph-actions">
+          ${liveTag}
+          ${actions}
+        </div>
+      </div>`;
+  },
+
+  /** KPI card v2 (estilo MES com acento lateral, ícone, trend e progresso opcional) */
+  kpi({ label, value, icon = 'fa-chart-line', accent = 'blue', trend = null, sub = '', progress = null }) {
+    const trendBlock = trend
+      ? `<span class="kpi-trend ${trend.dir}"><i class="fas fa-arrow-${trend.dir === 'up' ? 'up' : trend.dir === 'down' ? 'down' : 'right'}"></i>${trend.text}</span>`
+      : '';
+    const subBlock = sub ? `<span class="kpi-sub">${sub}</span>` : '';
+    const progBlock = (progress !== null && progress !== undefined)
+      ? `<div class="kpi-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>`
+      : '';
+    return `
+      <div class="kpi-card-v2 acc-${accent}">
+        <div class="kpi-head">
+          <span class="kpi-label">${label}</span>
+          <span class="kpi-icon-mini"><i class="fas ${icon}"></i></span>
+        </div>
+        <div class="kpi-value">${value}</div>
+        ${progBlock}
+        <div class="kpi-foot">
+          ${trendBlock}
+          ${subBlock}
+        </div>
+      </div>`;
+  },
+
+  /** Pill / badge de status */
+  pill(text, variant = 'neutral', icon = '') {
+    const ico = icon ? `<i class="fas ${icon}" style="font-size:9px"></i>` : '<span class="dot"></span>';
+    return `<span class="pill pill-${variant}">${ico}<span>${text}</span></span>`;
+  },
+
+  /** Pill automático para status comuns de produção */
+  statusPill(status) {
+    const map = {
+      'Aberta':      ['neutral',  'fa-folder-open'],
+      'Planejada':   ['purple',   'fa-calendar-check'],
+      'EmProducao':  ['primary',  'fa-play'],
+      'Em Produção': ['primary',  'fa-play'],
+      'Pausada':     ['warning',  'fa-pause'],
+      'Concluida':   ['success',  'fa-check'],
+      'Concluída':   ['success',  'fa-check'],
+      'Atrasada':    ['danger',   'fa-exclamation'],
+      'Cancelada':   ['danger',   'fa-times'],
+      'Ativa':       ['success',  'fa-circle-check'],
+      'Inativa':     ['neutral',  'fa-circle'],
+    };
+    const [variant, ic] = map[status] || ['neutral', ''];
+    return UI.pill(status, variant, ic);
+  },
+
+  /** Empty state ilustrado */
+  empty({ icon = 'fa-inbox', title = 'Sem dados', desc = '', action = '' } = {}) {
+    return `
+      <div class="empty-state">
+        <div class="es-icon"><i class="fas ${icon}"></i></div>
+        <div class="es-title">${title}</div>
+        ${desc ? `<div class="es-desc">${desc}</div>` : ''}
+        ${action || ''}
+      </div>`;
+  },
+
+  /** Toolbar sticky com busca + filtros + ação primária */
+  toolbar({ searchId = 'tb-search', searchPh = 'Buscar...', filters = '', actions = '' } = {}) {
+    return `
+      <div class="toolbar-sticky">
+        <div class="tb-search">
+          <i class="fas fa-search"></i>
+          <input id="${searchId}" type="text" placeholder="${searchPh}" autocomplete="off" />
+        </div>
+        ${filters}
+        <div class="tb-spacer"></div>
+        ${actions}
+      </div>`;
+  },
+
+  /** Section header (subtítulo dentro de card) */
+  section({ title, icon = '', meta = '' } = {}) {
+    return `
+      <div class="section-head">
+        <div class="sh-title">${icon ? `<i class="fas ${icon}"></i>` : ''}<span>${title}</span></div>
+        ${meta ? `<div class="sh-meta">${meta}</div>` : ''}
+      </div>`;
+  },
+
+  /** Atualiza o indicador live (texto "há Xs") periodicamente */
+  liveTick(rootEl, since = Date.now()) {
+    const upd = () => {
+      const el = (rootEl || document).querySelector('[data-live-time]');
+      if (!el) return;
+      const s = Math.floor((Date.now() - since) / 1000);
+      el.textContent = s < 5 ? 'agora' : s < 60 ? `há ${s}s` : `há ${Math.floor(s/60)}min`;
+    };
+    upd();
+    if (this._liveTimer) clearInterval(this._liveTimer);
+    this._liveTimer = setInterval(upd, 5000);
+  },
+};
+window.UI = UI;

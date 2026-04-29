@@ -509,6 +509,263 @@ label {
 .kpi-icon.bg-purple-500 { background: linear-gradient(135deg, #7C3AED, #5B21B6); }
 .kpi-card .text-2xl { color: var(--text-1) !important; font-weight: 700; letter-spacing: -0.02em; }
 
+/* KPI v2 — inspirado em sistemas MES (CTextil/Zempt) */
+.kpi-card-v2 {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.kpi-card-v2:hover {
+  transform: translateY(-2px);
+  border-color: rgba(37, 99, 235, 0.4);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+}
+[data-theme="dark"] .kpi-card-v2:hover { box-shadow: 0 12px 30px rgba(0,0,0,0.45); }
+.kpi-card-v2::after {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--accent-color, var(--primary));
+  border-radius: 0 4px 4px 0;
+}
+.kpi-card-v2 .kpi-head {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.kpi-card-v2 .kpi-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+  color: var(--text-secondary); font-weight: 600;
+}
+.kpi-card-v2 .kpi-icon-mini {
+  width: 36px; height: 36px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft, rgba(37,99,235,0.12));
+  color: var(--accent-color, var(--primary)); font-size: 15px;
+}
+.kpi-card-v2 .kpi-value {
+  font-size: 28px; font-weight: 700; line-height: 1;
+  color: var(--text-primary); letter-spacing: -0.02em;
+}
+.kpi-card-v2 .kpi-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+}
+.kpi-card-v2 .kpi-trend {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-weight: 600;
+}
+.kpi-card-v2 .kpi-trend.up    { color: #10B981; background: rgba(16,185,129,0.12); }
+.kpi-card-v2 .kpi-trend.down  { color: #EF4444; background: rgba(239,68,68,0.12); }
+.kpi-card-v2 .kpi-trend.flat  { color: var(--text-secondary); background: rgba(148,163,184,0.12); }
+.kpi-card-v2 .kpi-sub  { color: var(--text-secondary); }
+
+/* Variantes de cor de acento */
+.kpi-card-v2.acc-blue    { --accent-color:#2563EB; --accent-soft:rgba(37,99,235,.12); }
+.kpi-card-v2.acc-purple  { --accent-color:#7C3AED; --accent-soft:rgba(124,58,237,.12); }
+.kpi-card-v2.acc-green   { --accent-color:#10B981; --accent-soft:rgba(16,185,129,.12); }
+.kpi-card-v2.acc-red     { --accent-color:#EF4444; --accent-soft:rgba(239,68,68,.12); }
+.kpi-card-v2.acc-amber   { --accent-color:#F59E0B; --accent-soft:rgba(245,158,11,.12); }
+.kpi-card-v2.acc-cyan    { --accent-color:#06B6D4; --accent-soft:rgba(6,182,212,.12); }
+.kpi-card-v2.acc-indigo  { --accent-color:#6366F1; --accent-soft:rgba(99,102,241,.12); }
+.kpi-card-v2.acc-rose    { --accent-color:#F43F5E; --accent-soft:rgba(244,63,94,.12); }
+
+/* Mini barra de progresso opcional dentro do KPI */
+.kpi-progress {
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: rgba(148,163,184,0.18);
+}
+.kpi-progress > span {
+  display: block; height: 100%;
+  background: var(--accent-color, var(--primary));
+  border-radius: 999px;
+  transition: width .6s ease;
+}
+
+/* ============================================================
+ * PAGE HEADER — breadcrumb + título + descrição + ações
+ * Inspirado em MES industrial (contexto + ação clara)
+ * ============================================================ */
+.page-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  padding: 4px 0 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.page-header .ph-left { min-width: 0; flex: 1; }
+.page-header .breadcrumb {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-secondary);
+  margin-bottom: 6px; flex-wrap: wrap;
+}
+.page-header .breadcrumb a {
+  color: var(--text-secondary); text-decoration: none; transition: color .2s;
+}
+.page-header .breadcrumb a:hover { color: var(--primary); }
+.page-header .breadcrumb .sep { opacity: .5; }
+.page-header .ph-title {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary); letter-spacing: -0.02em; line-height: 1.2;
+  display: flex; align-items: center; gap: 10px;
+}
+.page-header .ph-title .ph-badge {
+  font-size: 11px; padding: 3px 8px; border-radius: 999px;
+  background: rgba(37,99,235,0.12); color: var(--primary);
+  font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+}
+.page-header .ph-desc {
+  font-size: 13px; color: var(--text-secondary);
+  margin-top: 4px; max-width: 720px;
+}
+.page-header .ph-actions {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+}
+
+/* Indicador "atualizado há ..." (live data feel) */
+.live-indicator {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-secondary);
+  padding: 6px 10px; border-radius: 999px;
+  background: var(--bg-card); border: 1px solid var(--border);
+}
+.live-indicator .pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #10B981; box-shadow: 0 0 0 0 rgba(16,185,129,.6);
+  animation: live-pulse 1.8s infinite;
+}
+@keyframes live-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(16,185,129,.6); }
+  70%  { box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+  100% { box-shadow: 0 0 0 0   rgba(16,185,129,0); }
+}
+
+/* ============================================================
+ * STATUS PILLS — badges padronizados (produção)
+ * ============================================================ */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: .03em;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+}
+.pill-success  { color: #047857; background: rgba(16,185,129,0.14); }
+.pill-info     { color: #0E7490; background: rgba(6,182,212,0.14); }
+.pill-warning  { color: #B45309; background: rgba(245,158,11,0.16); }
+.pill-danger   { color: #B91C1C; background: rgba(239,68,68,0.14); }
+.pill-primary  { color: #1D4ED8; background: rgba(37,99,235,0.14); }
+.pill-purple   { color: #6D28D9; background: rgba(124,58,237,0.14); }
+.pill-neutral  { color: var(--text-secondary); background: rgba(148,163,184,0.18); }
+[data-theme="dark"] .pill-success  { color: #34D399; }
+[data-theme="dark"] .pill-info     { color: #22D3EE; }
+[data-theme="dark"] .pill-warning  { color: #FBBF24; }
+[data-theme="dark"] .pill-danger   { color: #F87171; }
+[data-theme="dark"] .pill-primary  { color: #60A5FA; }
+[data-theme="dark"] .pill-purple   { color: #A78BFA; }
+
+/* ============================================================
+ * TOOLBAR / FILTROS STICKY — sempre visíveis ao rolar
+ * ============================================================ */
+.toolbar-sticky {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.toolbar-sticky .tb-search {
+  position: relative; flex: 1; min-width: 220px;
+}
+.toolbar-sticky .tb-search input {
+  padding-left: 36px;
+}
+.toolbar-sticky .tb-search i {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  color: var(--text-secondary); font-size: 13px;
+}
+.toolbar-sticky .tb-spacer { flex: 1; }
+
+/* ============================================================
+ * EMPTY STATE — sem dados, com ilustração + ação
+ * ============================================================ */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 56px 24px;
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+}
+.empty-state .es-icon {
+  width: 72px; height: 72px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(37,99,235,0.10);
+  color: var(--primary); font-size: 30px;
+  margin-bottom: 14px;
+}
+.empty-state .es-title {
+  font-size: 16px; font-weight: 600;
+  color: var(--text-primary); margin-bottom: 4px;
+}
+.empty-state .es-desc {
+  font-size: 13px; color: var(--text-secondary);
+  margin-bottom: 18px; max-width: 420px;
+}
+
+/* ============================================================
+ * SECTION HEADER — sub-titulo dentro de cards
+ * ============================================================ */
+.section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; gap: 12px;
+}
+.section-head .sh-title {
+  font-size: 13px; font-weight: 600;
+  color: var(--text-primary);
+  display: flex; align-items: center; gap: 8px;
+}
+.section-head .sh-title i {
+  color: var(--primary); opacity: .85;
+}
+.section-head .sh-meta {
+  font-size: 11px; color: var(--text-secondary);
+  text-transform: uppercase; letter-spacing: .1em;
+}
+
+/* ============================================================
+ * BOTÃO "icon-only" arredondado (refresh, mais opções)
+ * ============================================================ */
+.btn-icon {
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all .2s ease;
+}
+.btn-icon:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: rgba(37,99,235,0.06);
+}
+.btn-icon.is-spinning i { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ============================================================
  * TABELAS
  * ============================================================ */
