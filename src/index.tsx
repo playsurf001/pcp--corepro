@@ -12,6 +12,7 @@ import producao from './routes/producao';
 import importador from './routes/importador';
 import relatorios from './routes/relatorios';
 import terceirizacao from './routes/terceirizacao';
+import mes from './routes/mes';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
 
@@ -38,6 +39,7 @@ app.route('/api', producao);
 app.route('/api', importador);
 app.route('/api', relatorios);
 app.route('/api', terceirizacao);
+app.route('/api', mes);
 
 // SPA: uma única página, navegação por hash
 app.get('/', (c) => {
@@ -105,8 +107,9 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="/static/core.js?v=1"></script>
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/core.js?v=2"></script>
+  <script src="/static/app.js?v=5"></script>
+  <script src="/static/mes.js?v=1"></script>
 </body>
 </html>`;
 }

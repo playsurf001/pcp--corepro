@@ -485,3 +485,151 @@ const UI = {
   },
 };
 window.UI = UI;
+
+/* ============================================================
+ * MODAL — helper padronizado (centralizado, ESC fecha, backdrop click,
+ * footer com Cancelar/Salvar alinhados)
+ * ============================================================ */
+const Modal = {
+  _stack: [],
+
+  /**
+   * Abre modal padronizado.
+   * opts: { title, body (HTML), size: 'sm'|'md'|'lg'|'xl', saveText, cancelText,
+   *         hideSave, hideCancel, onSave (async, return false p/ não fechar),
+   *         onOpen (após render), onClose }
+   */
+  open(opts = {}) {
+    const sizeMap = { sm: 'max-w-md', md: 'max-w-xl', lg: 'max-w-3xl', xl: 'max-w-5xl' };
+    const sizeCls = sizeMap[opts.size || 'md'];
+
+    const back = document.createElement('div');
+    back.className = 'modal-backdrop';
+    back.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px;animation:modalFadeIn .18s ease';
+
+    const card = document.createElement('div');
+    card.className = `modal w-full ${sizeCls}`;
+    card.style.cssText = 'background:var(--bg-card,#fff);color:var(--text-primary);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);max-height:92vh;overflow:hidden;display:flex;flex-direction:column;animation:modalSlideIn .22s cubic-bezier(.4,.0,.2,1)';
+
+    const showSave   = !opts.hideSave;
+    const showCancel = !opts.hideCancel;
+
+    card.innerHTML = `
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0">
+        <h3 style="font-size:16px;font-weight:700;color:var(--text-primary);margin:0">${opts.title || ''}</h3>
+        <button class="btn-icon modal-x" title="Fechar" style="width:34px;height:34px"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body" style="padding:22px;overflow-y:auto;flex:1">${opts.body || ''}</div>
+      ${(showSave || showCancel) ? `
+      <div style="padding:14px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px;flex-shrink:0;background:var(--bg-secondary,transparent)">
+        ${showCancel ? `<button class="btn btn-secondary modal-cancel" type="button">${opts.cancelText || 'Cancelar'}</button>` : ''}
+        ${showSave ? `<button class="btn btn-primary modal-save" type="button"><i class="fas fa-save mr-2"></i>${opts.saveText || 'Salvar'}</button>` : ''}
+      </div>` : ''}
+    `;
+
+    back.appendChild(card);
+    document.body.appendChild(back);
+    this._stack.push(back);
+
+    const close = () => {
+      if (typeof opts.onClose === 'function') {
+        try { opts.onClose(); } catch (e) {}
+      }
+      back.style.animation = 'modalFadeOut .15s ease forwards';
+      setTimeout(() => {
+        back.remove();
+        const idx = this._stack.indexOf(back);
+        if (idx >= 0) this._stack.splice(idx, 1);
+      }, 150);
+      document.removeEventListener('keydown', onEsc);
+    };
+
+    const onEsc = (e) => {
+      if (e.key === 'Escape' && this._stack[this._stack.length - 1] === back) {
+        e.preventDefault(); close();
+      }
+    };
+    document.addEventListener('keydown', onEsc);
+
+    back.addEventListener('click', (e) => { if (e.target === back) close(); });
+    card.querySelector('.modal-x').onclick = close;
+    const btnCancel = card.querySelector('.modal-cancel');
+    if (btnCancel) btnCancel.onclick = close;
+
+    const btnSave = card.querySelector('.modal-save');
+    if (btnSave) {
+      btnSave.onclick = async () => {
+        if (typeof opts.onSave !== 'function') { close(); return; }
+        const orig = btnSave.innerHTML;
+        btnSave.disabled = true;
+        btnSave.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Salvando...';
+        try {
+          const r = await opts.onSave();
+          if (r !== false) close();
+        } catch (e) {
+          if (window.toast) window.toast(e.message || 'Erro ao salvar.', 'error');
+        } finally {
+          btnSave.disabled = false;
+          btnSave.innerHTML = orig;
+        }
+      };
+    }
+
+    // Foco automático no primeiro input
+    setTimeout(() => {
+      const firstField = card.querySelector('input:not([type="hidden"]),select,textarea');
+      if (firstField) firstField.focus();
+      if (typeof opts.onOpen === 'function') {
+        try { opts.onOpen(card); } catch (e) { console.error(e); }
+      }
+    }, 60);
+
+    return { close, card };
+  },
+
+  closeAll() {
+    while (this._stack.length) {
+      const m = this._stack.pop();
+      m.remove();
+    }
+  }
+};
+window.Modal = Modal;
+
+// Animações para modal (injetadas dinamicamente)
+(function () {
+  if (document.getElementById('modal-anim-style')) return;
+  const st = document.createElement('style');
+  st.id = 'modal-anim-style';
+  st.textContent = `
+    @keyframes modalFadeIn  { from{opacity:0} to{opacity:1} }
+    @keyframes modalFadeOut { from{opacity:1} to{opacity:0} }
+    @keyframes modalSlideIn { from{transform:translateY(20px) scale(.96);opacity:0} to{transform:translateY(0) scale(1);opacity:1} }
+  `;
+  document.head.appendChild(st);
+})();
+
+/* ============================================================
+ * TOAST — adiciona métodos .success/.error/.info/.warning
+ * (mantém compatibilidade com toast(msg, type) já usado no app)
+ * ============================================================ */
+(function () {
+  const base = window.toast;
+  if (typeof base === 'function' && !base.success) {
+    base.success = (m) => base(m, 'success');
+    base.error   = (m) => base(m, 'error');
+    base.info    = (m) => base(m, 'info');
+    base.warning = (m) => base(m, 'warning');
+  }
+  // Caso toast ainda não exista neste momento, definimos um stub simples
+  if (typeof window.toast !== 'function') {
+    const stub = (m) => { try { console.log('[toast]', m); } catch (e) {} };
+    stub.success = stub; stub.error = stub; stub.info = stub; stub.warning = stub;
+    window.toast = stub;
+  }
+})();
+
+/* Garante debounce global (já existe acima neste arquivo, mas exponho) */
+if (typeof window.debounce !== 'function' && typeof debounce === 'function') {
+  window.debounce = debounce;
+}
