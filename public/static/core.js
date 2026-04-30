@@ -436,6 +436,41 @@ const UI = {
       </div>`;
   },
 
+  /** Barra de progresso inline (para tabelas de OP) */
+  progress(pct, opts = {}) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    const variant = opts.variant
+      || (p >= 100 ? 'done' : p >= 70 ? '' : opts.late ? 'warn' : '');
+    return `<div class="op-progress">
+      <div class="bar ${variant}"><span style="width:${p}%"></span></div>
+      <span class="pct">${p.toFixed(0)}%</span>
+    </div>`;
+  },
+
+  /** Card de alerta (dashboard MES) */
+  alert({ tipo = 'warning', icon = 'fa-circle-exclamation', titulo = '', desc = '', acao = '' } = {}) {
+    const click = acao ? `onclick="navigate('${acao}')" style="cursor:pointer"` : '';
+    return `
+      <div class="alert-card ${tipo}" ${click}>
+        <div class="ac-icon"><i class="fas ${icon}"></i></div>
+        <div style="flex:1;min-width:0">
+          <div class="ac-title">${titulo}</div>
+          ${desc ? `<div class="ac-desc">${desc}</div>` : ''}
+        </div>
+      </div>`;
+  },
+
+  /** Linha de ranking (top operadores, top produtos) */
+  rankRow(pos, nome, sub, score) {
+    const top = pos <= 3 ? `top${pos}` : '';
+    return `
+      <div class="rank-row ${top}">
+        <div class="pos">${pos}</div>
+        <div class="name"><b>${nome}</b>${sub ? `<small>${sub}</small>` : ''}</div>
+        <div class="score">${score}</div>
+      </div>`;
+  },
+
   /** Atualiza o indicador live (texto "há Xs") periodicamente */
   liveTick(rootEl, since = Date.now()) {
     const upd = () => {

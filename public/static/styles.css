@@ -746,6 +746,89 @@ label {
 }
 
 /* ============================================================
+ * BARRA DE PROGRESSO (OP, produção)
+ * Usada inline em tabelas para mostrar % concluído da OP
+ * ============================================================ */
+.op-progress {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 120px;
+}
+.op-progress .bar {
+  flex: 1; height: 8px; border-radius: 999px;
+  background: rgba(148,163,184,0.20); overflow: hidden;
+}
+.op-progress .bar > span {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #3B82F6, #8B5CF6);
+  transition: width .5s ease;
+}
+.op-progress .bar.warn > span { background: linear-gradient(90deg, #F59E0B, #EF4444); }
+.op-progress .bar.done > span { background: linear-gradient(90deg, #10B981, #059669); }
+.op-progress .pct {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  min-width: 38px; text-align: right;
+}
+
+/* Linha de tabela "atrasada" — fundo sutil vermelho */
+tr.row-late td {
+  background: rgba(239, 68, 68, 0.06) !important;
+}
+[data-theme="dark"] tr.row-late td {
+  background: rgba(239, 68, 68, 0.08) !important;
+}
+
+/* ============================================================
+ * ALERTA CARD (dashboard MES)
+ * ============================================================ */
+.alert-card {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 14px; border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.alert-card:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(15,23,42,0.06); }
+.alert-card .ac-icon {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 15px;
+}
+.alert-card.danger  { border-left: 4px solid #EF4444; }
+.alert-card.warning { border-left: 4px solid #F59E0B; }
+.alert-card.success { border-left: 4px solid #10B981; }
+.alert-card.danger  .ac-icon { background: rgba(239,68,68,0.12); color: #EF4444; }
+.alert-card.warning .ac-icon { background: rgba(245,158,11,0.14); color: #F59E0B; }
+.alert-card.success .ac-icon { background: rgba(16,185,129,0.12); color: #10B981; }
+.alert-card .ac-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.alert-card .ac-desc  { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+/* ============================================================
+ * RANKING / TOP LIST (dashboard)
+ * ============================================================ */
+.rank-list { display: flex; flex-direction: column; gap: 8px; }
+.rank-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  transition: background-color .15s ease;
+}
+.rank-row:hover { background: rgba(37,99,235,0.04); }
+.rank-row .pos {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, #94A3B8, #64748B);
+  flex-shrink: 0;
+}
+.rank-row.top1 .pos { background: linear-gradient(135deg, #FBBF24, #D97706); }
+.rank-row.top2 .pos { background: linear-gradient(135deg, #94A3B8, #64748B); }
+.rank-row.top3 .pos { background: linear-gradient(135deg, #F97316, #C2410C); }
+.rank-row .name { flex: 1; min-width: 0; }
+.rank-row .name b { color: var(--text-primary); display: block; font-size: 13px; }
+.rank-row .name small { color: var(--text-secondary); font-size: 11px; }
+.rank-row .score { font-weight: 700; color: var(--primary); font-size: 13px; white-space: nowrap; }
+
+/* ============================================================
  * BOTÃO "icon-only" arredondado (refresh, mais opções)
  * ============================================================ */
 .btn-icon {

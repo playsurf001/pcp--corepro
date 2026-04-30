@@ -227,8 +227,12 @@ const ROUTES = {};
 
 /* ---------- DASHBOARD ---------- */
 ROUTES.dashboard = async (main) => {
-  const r = await api('get', '/dashboard');
+  const [r, rMes] = await Promise.all([
+    api('get', '/dashboard'),
+    api('get', '/dashboard/mes', null, { silent: true }).catch(() => ({ data: null })),
+  ]);
   const d = r.data;
+  const mes = rMes && rMes.data ? rMes.data : null;
 
   // % refugo invertido (quanto menor, melhor) — usamos como "saúde de qualidade"
   const refugo = Number(d.refugo_pct || 0);
@@ -293,6 +297,71 @@ ROUTES.dashboard = async (main) => {
         progress: eficiencia
       })}
     </div>
+
+    ${mes ? `
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+      <div class="card p-5 lg:col-span-2">
+        ${UI.section({ title: 'Alertas Críticos', icon: 'fa-bell', meta: `${mes.alertas.length} sinal(is)` })}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          ${mes.alertas.map(a => UI.alert(a)).join('')}
+        </div>
+      </div>
+      <div class="card p-5">
+        ${UI.section({ title: 'Top Operadores (7d)', icon: 'fa-trophy', meta: 'ranking' })}
+        <div class="rank-list">
+          ${(mes.top_operadores && mes.top_operadores.length)
+            ? mes.top_operadores.map((op, i) => UI.rankRow(
+                i + 1,
+                op.operador || '—',
+                `${fmt.int(op.pecas)} peças · ${fmt.num(op.horas, 1)}h`,
+                fmt.pct(op.eficiencia)
+              )).join('')
+            : `<div style="text-align:center;color:var(--text-secondary);font-size:13px;padding:20px 0">
+                 <i class="fas fa-users-slash" style="font-size:24px;opacity:.4;display:block;margin-bottom:8px"></i>
+                 Sem apontamentos nos últimos 7 dias
+               </div>`}
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-5 mb-5">
+      ${UI.section({ title: 'OPs em Produção', icon: 'fa-industry', meta: `${(mes.ops_ativas || []).length} ativa(s)` })}
+      ${(mes.ops_ativas && mes.ops_ativas.length) ? `
+        <div class="overflow-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-100"><tr>
+              <th class="px-3 py-2 text-left">Nº OP</th>
+              <th class="px-3 py-2 text-left">Referência / Cliente</th>
+              <th class="px-3 py-2 text-right">Peças</th>
+              <th class="px-3 py-2 text-left">Progresso</th>
+              <th class="px-3 py-2 text-left">Entrega</th>
+              <th class="px-3 py-2 text-left">Status</th>
+            </tr></thead>
+            <tbody>
+              ${mes.ops_ativas.map(op => {
+                const pct = op.qtde_pecas > 0 ? Math.min(100, (op.produzido / op.qtde_pecas) * 100) : 0;
+                const status = op.atrasada ? 'Atrasada' : op.status;
+                return `<tr class="border-t${op.atrasada ? ' row-late' : ''}">
+                  <td class="px-3 py-2 font-mono font-semibold">${op.num_op}</td>
+                  <td class="px-3 py-2">
+                    <div style="font-weight:600">${op.cod_ref}</div>
+                    <div style="font-size:11px;color:var(--text-secondary)"><i class="fas fa-user mr-1"></i>${op.nome_cliente}</div>
+                  </td>
+                  <td class="px-3 py-2 text-right">${fmt.int(op.qtde_pecas)}</td>
+                  <td class="px-3 py-2">${UI.progress(pct, { late: !!op.atrasada })}</td>
+                  <td class="px-3 py-2 ${op.atrasada ? 'font-semibold' : ''}" style="${op.atrasada ? 'color:#EF4444' : ''}">${fmt.date(op.dt_entrega)}</td>
+                  <td class="px-3 py-2">${UI.statusPill(status)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>` : `${UI.empty({
+          icon: 'fa-industry',
+          title: 'Nenhuma OP em produção',
+          desc: 'Quando OPs estiverem ativas, elas aparecerão aqui em tempo real.'
+        })}`}
+    </div>
+    ` : ''}
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="card p-5">
@@ -1050,8 +1119,19 @@ ROUTES.ops = async (main) => {
   const [opsRes, refs, clis] = await Promise.all([
     api('get', '/ops'), api('get', '/referencias'), api('get', '/clientes'),
   ]);
-  const data = opsRes.data;
+  let data = opsRes.data;
+
   main.innerHTML = `
+    ${UI.pageHeader({
+      breadcrumb: [{ label: 'Início', href: '#dashboard' }, { label: 'Produção' }, { label: 'Ordens de Produção' }],
+      title: 'Ordens de Produção',
+      badge: 'MES',
+      desc: 'Gerencie OPs com status em tempo real, % de conclusão e indicadores de atraso.',
+      actions: `
+        <button class="btn-icon" id="btn-refresh-ops" title="Atualizar"><i class="fas fa-sync-alt"></i></button>
+        <button class="btn btn-primary" id="btn-new-op"><i class="fas fa-plus mr-2"></i>Nova OP</button>
+      `,
+    })}
     <div class="card p-4 mb-4 grid grid-cols-2 md:grid-cols-5 gap-3">
       <div><label>Status</label><select id="f-status">
         <option value="">Todos</option>
@@ -1062,20 +1142,17 @@ ROUTES.ops = async (main) => {
       <div><label>Referência</label><select id="f-ref"><option value="">Todas</option>${refs.data.map(r => `<option value="${r.id_ref}">${r.cod_ref}</option>`).join('')}</select></div>
       <div><label>Buscar</label><input id="f-q" placeholder="Nº OP / obs"/></div>
       <div class="flex items-end gap-2">
-        <button id="f-apply" class="btn btn-secondary flex-1"><i class="fas fa-filter mr-1"></i> Filtrar</button>
-        <button id="btn-new-op" class="btn btn-primary flex-1"><i class="fas fa-plus mr-1"></i> Nova OP</button>
+        <button id="f-apply" class="btn btn-secondary w-full"><i class="fas fa-filter mr-1"></i> Filtrar</button>
       </div>
     </div>
     <div class="card overflow-auto">
       <table class="w-full text-sm table-sticky">
         <thead class="bg-slate-100"><tr>
           <th class="px-3 py-2 text-left">Nº OP</th>
-          <th class="px-3 py-2 text-left">Emissão</th>
-          <th class="px-3 py-2 text-left">Referência</th>
-          <th class="px-3 py-2 text-left">Cliente</th>
-          <th class="px-3 py-2 text-right">Qtd Peças</th>
+          <th class="px-3 py-2 text-left">Referência / Cliente</th>
+          <th class="px-3 py-2 text-right">Peças</th>
+          <th class="px-3 py-2 text-left">Progresso</th>
           <th class="px-3 py-2 text-left">Entrega</th>
-          <th class="px-3 py-2 text-left">Versão Seq</th>
           <th class="px-3 py-2 text-left">Status</th>
           <th class="px-3 py-2 text-center">Ações</th>
         </tr></thead>
@@ -1083,28 +1160,74 @@ ROUTES.ops = async (main) => {
       </table>
     </div>`;
 
+  // Mapa id_op -> progresso (lazy fetch para não travar)
+  const progressoMap = new Map();
+
+  const statusToPill = (status, atrasada) => {
+    if (atrasada && status !== 'Concluida' && status !== 'Cancelada') return UI.statusPill('Atrasada');
+    return UI.statusPill(status);
+  };
+
   const drawBody = (items) => {
     const tbody = $('#tbody'); tbody.innerHTML = '';
-    if (!items.length) { tbody.innerHTML = `<tr><td colspan="9" class="p-6 text-center text-slate-500">Nenhuma OP encontrada.</td></tr>`; return; }
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="p-0">${UI.empty({
+        icon: 'fa-clipboard-list',
+        title: 'Nenhuma OP encontrada',
+        desc: 'Ajuste os filtros ou crie a primeira OP para começar a planejar a produção.',
+        action: '<button class="btn btn-primary" onclick="document.getElementById(\'btn-new-op\').click()"><i class="fas fa-plus mr-2"></i>Criar OP</button>'
+      })}</td></tr>`;
+      return;
+    }
     items.forEach((r) => {
-      const tr = el('tr', { class: 'border-t hover:bg-slate-50' + (r.atrasada ? ' bg-red-50' : '') });
+      const tr = el('tr', { class: 'border-t' + (r.atrasada ? ' row-late' : '') });
+      const progressId = `prog-${r.id_op}`;
+      // Placeholder progresso (carrega async)
       tr.innerHTML = `
         <td class="px-3 py-2 font-mono font-semibold">${r.num_op}</td>
-        <td class="px-3 py-2">${fmt.date(r.dt_emissao)}</td>
-        <td class="px-3 py-2">${r.cod_ref} — ${r.desc_ref}</td>
-        <td class="px-3 py-2">${r.nome_cliente}</td>
-        <td class="px-3 py-2 text-right">${fmt.int(r.qtde_pecas)}</td>
-        <td class="px-3 py-2 ${r.atrasada ? 'text-red-600 font-semibold' : ''}">${fmt.date(r.dt_entrega)} ${r.atrasada ? '<i class="fas fa-exclamation-triangle ml-1"></i>' : ''}</td>
-        <td class="px-3 py-2">v${r.seq_versao}</td>
-        <td class="px-3 py-2"><span class="badge badge-${r.status}">${r.status}</span></td>
+        <td class="px-3 py-2">
+          <div style="font-weight:600">${r.cod_ref} <span style="color:var(--text-secondary);font-weight:400">— ${r.desc_ref}</span></div>
+          <div style="font-size:11px;color:var(--text-secondary)"><i class="fas fa-user mr-1"></i>${r.nome_cliente}</div>
+        </td>
+        <td class="px-3 py-2 text-right font-semibold">${fmt.int(r.qtde_pecas)}</td>
+        <td class="px-3 py-2" id="${progressId}"><div class="op-progress"><div class="bar"><span style="width:0%"></span></div><span class="pct" style="color:var(--text-secondary)">…</span></div></td>
+        <td class="px-3 py-2 ${r.atrasada ? 'font-semibold' : ''}" style="${r.atrasada ? 'color:#EF4444' : ''}">
+          <i class="far fa-calendar mr-1" style="opacity:.7"></i>${fmt.date(r.dt_entrega)}
+          ${r.atrasada ? '<i class="fas fa-exclamation-triangle ml-1" title="Atrasada"></i>' : ''}
+        </td>
+        <td class="px-3 py-2">${statusToPill(r.status, r.atrasada)}</td>
         <td class="px-3 py-2 text-center whitespace-nowrap">
-          <button class="text-blue-600 mx-1" data-edit="${r.id_op}" title="Editar"><i class="fas fa-edit"></i></button>
-          <button class="text-indigo-600 mx-1" data-balanc="${r.id_op}" title="Balanceamento"><i class="fas fa-balance-scale"></i></button>
-          <button class="text-emerald-600 mx-1" data-ficha="${r.id_op}" title="Ficha"><i class="fas fa-file-invoice"></i></button>
-          <button class="text-red-600 mx-1" data-del="${r.id_op}" title="Excluir"><i class="fas fa-trash"></i></button>
+          <button class="btn-icon" data-edit="${r.id_op}" title="Editar" style="width:32px;height:32px"><i class="fas fa-edit"></i></button>
+          <button class="btn-icon" data-balanc="${r.id_op}" title="Balanceamento" style="width:32px;height:32px"><i class="fas fa-balance-scale"></i></button>
+          <button class="btn-icon" data-ficha="${r.id_op}" title="Ficha" style="width:32px;height:32px"><i class="fas fa-file-invoice"></i></button>
+          <button class="btn-icon" data-del="${r.id_op}" title="Excluir" style="width:32px;height:32px;color:#EF4444"><i class="fas fa-trash"></i></button>
         </td>`;
       tbody.appendChild(tr);
     });
+
+    // Carrega progresso assincronamente em paralelo (max 8 simultâneos)
+    const ids = items.map(r => r.id_op);
+    const fetchProg = async (id) => {
+      if (progressoMap.has(id)) return progressoMap.get(id);
+      try {
+        const rs = await api('get', `/ops/${id}/progresso`, null, { silent: true });
+        progressoMap.set(id, rs.data);
+        return rs.data;
+      } catch { return null; }
+    };
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 8) chunks.push(ids.slice(i, i + 8));
+    (async () => {
+      for (const chunk of chunks) {
+        const results = await Promise.all(chunk.map(fetchProg));
+        results.forEach((p) => {
+          if (!p) return;
+          const cell = document.getElementById(`prog-${p.id_op}`);
+          if (cell) cell.innerHTML = UI.progress(p.pct_concluido, { late: p.atrasada });
+        });
+      }
+    })();
+
     $$('[data-edit]').forEach(b => b.onclick = () => openOPEditor(parseInt(b.dataset.edit)));
     $$('[data-balanc]').forEach(b => b.onclick = () => { state.balancOp = parseInt(b.dataset.balanc); navigate('balanceamento'); });
     $$('[data-ficha]').forEach(b => b.onclick = () => { state.fichaOp = parseInt(b.dataset.ficha); navigate('ficha'); });
@@ -1116,6 +1239,12 @@ ROUTES.ops = async (main) => {
   drawBody(data);
 
   $('#btn-new-op').onclick = () => openOPEditor(null);
+  const btnRefresh = $('#btn-refresh-ops');
+  if (btnRefresh) btnRefresh.onclick = async () => {
+    btnRefresh.classList.add('is-spinning');
+    try { progressoMap.clear(); await ROUTES.ops(main); }
+    finally { btnRefresh.classList.remove('is-spinning'); }
+  };
   $('#f-apply').onclick = async () => {
     const params = [
       ['status', $('#f-status').value],
@@ -1124,6 +1253,7 @@ ROUTES.ops = async (main) => {
       ['search', $('#f-q').value],
     ].filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
     const rs = await api('get', '/ops' + (params ? '?' + params : ''));
+    progressoMap.clear();
     drawBody(rs.data);
   };
 };
@@ -1460,7 +1590,36 @@ function drawFicha(r) {
  * ============================================================ */
 ROUTES.apontamento = async (main) => {
   const [ops, ap] = await Promise.all([api('get', '/ops'), api('get', '/apontamentos')]);
+
+  // Métricas do dia (operadores, peças, eficiência média)
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const apHoje = ap.data.filter(a => (a.data || '').slice(0, 10) === hoje);
+  const pecasHoje = apHoje.reduce((s, a) => s + (Number(a.qtd_boa) || 0), 0);
+  const refHoje = apHoje.reduce((s, a) => s + (Number(a.qtd_refugo) || 0), 0);
+  const horasHoje = apHoje.reduce((s, a) => s + (Number(a.horas_trab) || 0), 0);
+  const eficMed = apHoje.length
+    ? apHoje.reduce((s, a) => s + (Number(a.efic_real) || 0), 0) / apHoje.length : 0;
+
   main.innerHTML = `
+    ${UI.pageHeader({
+      breadcrumb: [{ label: 'Início', href: '#dashboard' }, { label: 'Produção' }, { label: 'Apontamento' }],
+      title: 'Apontamento de Produção',
+      badge: 'MES',
+      desc: 'Registro em tempo real do que foi produzido. Eficiência calculada automaticamente.',
+      live: true,
+      actions: `<button class="btn-icon" id="btn-refresh-ap" title="Atualizar"><i class="fas fa-sync-alt"></i></button>`,
+    })}
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${UI.kpi({ label: 'Peças Boas (hoje)', value: fmt.int(pecasHoje), icon: 'fa-circle-check', accent: 'green', sub: 'aprovadas' })}
+      ${UI.kpi({ label: 'Refugo (hoje)', value: fmt.int(refHoje), icon: 'fa-recycle', accent: 'rose', sub: 'rejeitadas' })}
+      ${UI.kpi({ label: 'Horas Trabalhadas', value: fmt.num(horasHoje, 1), icon: 'fa-clock', accent: 'cyan', sub: 'no dia' })}
+      ${UI.kpi({ label: 'Eficiência Média', value: fmt.pct(eficMed), icon: 'fa-gauge-high', accent: 'purple',
+        progress: Math.min(100, eficMed * 100),
+        trend: { dir: eficMed >= 0.85 ? 'up' : eficMed >= 0.7 ? 'flat' : 'down', text: eficMed >= 0.85 ? 'Ótimo' : eficMed >= 0.7 ? 'OK' : 'Baixa' }
+      })}
+    </div>
+
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="card p-5">
         <h3 class="font-semibold mb-3 text-slate-700"><i class="fas fa-plus-circle mr-1"></i> Novo apontamento</h3>
@@ -1481,6 +1640,7 @@ ROUTES.apontamento = async (main) => {
       </div>
       <div class="card p-5 lg:col-span-2 overflow-auto">
         <h3 class="font-semibold mb-3 text-slate-700"><i class="fas fa-list mr-1"></i> Últimos apontamentos</h3>
+        ${ap.data.length ? `
         <table class="w-full text-sm">
           <thead class="bg-slate-100"><tr>
             <th class="p-2 text-left">Data</th>
@@ -1494,7 +1654,11 @@ ROUTES.apontamento = async (main) => {
             <th class="p-2 text-right">Efic.</th>
             <th class="p-2 w-10"></th>
           </tr></thead>
-          <tbody>${ap.data.map(a => `
+          <tbody>${ap.data.map(a => {
+            const ef = Number(a.efic_real) || 0;
+            const efClass = ef >= 0.85 ? 'text-emerald-600' : ef >= 0.7 ? 'text-amber-600' : 'text-red-600';
+            const lowAlert = ef < 0.6 ? '<i class="fas fa-arrow-down ml-1" title="Produtividade baixa"></i>' : '';
+            return `
             <tr class="border-t">
               <td class="p-2">${fmt.date(a.data)}</td>
               <td class="p-2 font-mono">${a.num_op}</td>
@@ -1504,14 +1668,25 @@ ROUTES.apontamento = async (main) => {
               <td class="p-2 text-right">${fmt.int(a.qtd_boa)}</td>
               <td class="p-2 text-right">${fmt.int(a.qtd_refugo)}</td>
               <td class="p-2 text-right">${fmt.num(a.horas_trab, 1)}</td>
-              <td class="p-2 text-right ${a.efic_real >= 0.85 ? 'text-emerald-600' : a.efic_real >= 0.7 ? 'text-amber-600' : 'text-red-600'}">${fmt.pct(a.efic_real)}</td>
-              <td class="p-2 text-center"><button class="text-red-600" data-del="${a.id_apont}"><i class="fas fa-times"></i></button></td>
-            </tr>`).join('')}
+              <td class="p-2 text-right font-semibold ${efClass}">${fmt.pct(ef)}${lowAlert}</td>
+              <td class="p-2 text-center"><button class="btn-icon" data-del="${a.id_apont}" title="Excluir" style="width:30px;height:30px;color:#EF4444"><i class="fas fa-times"></i></button></td>
+            </tr>`;}).join('')}
           </tbody>
-        </table>
-        ${!ap.data.length ? '<div class="text-center text-slate-500 p-6">Nenhum apontamento.</div>' : ''}
+        </table>` : UI.empty({
+          icon: 'fa-clipboard-check',
+          title: 'Nenhum apontamento',
+          desc: 'Use o formulário ao lado para registrar o primeiro apontamento de produção.'
+        })}
       </div>
     </div>`;
+
+  const btnRefAp = $('#btn-refresh-ap');
+  if (btnRefAp) btnRefAp.onclick = async () => {
+    btnRefAp.classList.add('is-spinning');
+    try { await ROUTES.apontamento(main); }
+    finally { btnRefAp.classList.remove('is-spinning'); }
+  };
+  UI.liveTick(main, Date.now());
   $('#f-ap').onsubmit = async (e) => {
     e.preventDefault();
     const body = {

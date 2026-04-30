@@ -385,6 +385,243 @@ app.get('/dashboard', async (c) => {
   );
 });
 
+/* ===================== MES — PROGRESSO DA OP =====================
+   Calcula % concluído de cada OP com base na produção apontada.
+   Status calculado dinamicamente: Pendente / EmProducao / Finalizada / Atrasada
+================================================================ */
+app.get('/ops/:id/progresso', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const op = await c.env.DB.prepare(
+    `SELECT op.id_op, op.num_op, op.qtde_pecas, op.dt_emissao, op.dt_entrega, op.status,
+            r.cod_ref, r.desc_ref, c.nome_cliente,
+            (SELECT COALESCE(SUM(tempo_padrao),0) FROM seq_itens WHERE id_seq_cab=op.id_seq_cab) AS tempo_total_ref
+     FROM op_cab op
+     JOIN referencias r ON r.id_ref=op.id_ref
+     JOIN clientes c ON c.id_cliente=op.id_cliente
+     WHERE op.id_op=?`
+  ).bind(id).first<any>();
+  if (!op) return fail('OP não encontrada.', 404);
+
+  // Produção apontada (boa + refugo) e horas
+  const ap = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(qtd_boa),0) AS boa, COALESCE(SUM(qtd_refugo),0) AS ref,
+            COALESCE(SUM(horas_trab),0) AS horas
+     FROM apontamento WHERE id_op=?`
+  ).bind(id).first<{ boa: number; ref: number; horas: number }>();
+
+  const qtdMeta = toInt(op.qtde_pecas);
+  const produzido = toInt(ap?.boa, 0);
+  const refugo   = toInt(ap?.ref, 0);
+  const horas    = toNum(ap?.horas, 0);
+
+  const tempoEstimadoMin = toNum(op.tempo_total_ref) * qtdMeta;
+  const tempoRealMin = horas * 60;
+
+  const pctConcluido = qtdMeta > 0 ? Math.min(100, (produzido / qtdMeta) * 100) : 0;
+  const hoje = new Date().toISOString().slice(0, 10);
+  const atrasada = op.status !== 'Concluida' && op.status !== 'Cancelada' && op.dt_entrega < hoje;
+
+  // Status MES dinâmico (sobrepõe ao salvo se inconsistente)
+  let statusMes: string = op.status;
+  if (op.status === 'Concluida' || op.status === 'Cancelada') {
+    statusMes = op.status === 'Concluida' ? 'Finalizada' : 'Cancelada';
+  } else if (atrasada) {
+    statusMes = 'Atrasada';
+  } else if (produzido === 0) {
+    statusMes = 'Pendente';
+  } else if (produzido >= qtdMeta) {
+    statusMes = 'Finalizada';
+  } else {
+    statusMes = 'EmProducao';
+  }
+
+  return c.json(ok({
+    id_op: op.id_op,
+    num_op: op.num_op,
+    cod_ref: op.cod_ref,
+    desc_ref: op.desc_ref,
+    nome_cliente: op.nome_cliente,
+    qtde_pecas: qtdMeta,
+    produzido,
+    refugo,
+    pendente: Math.max(0, qtdMeta - produzido),
+    pct_concluido: Number(pctConcluido.toFixed(2)),
+    tempo_estimado_min: Math.round(tempoEstimadoMin),
+    tempo_real_min: Math.round(tempoRealMin),
+    desvio_min: Math.round(tempoRealMin - tempoEstimadoMin),
+    dt_entrega: op.dt_entrega,
+    atrasada: atrasada ? 1 : 0,
+    status: op.status,
+    status_mes: statusMes,
+  }));
+});
+
+/* ===================== MES — DASHBOARD ESTENDIDO =====================
+   Top grupos (operadores+ranking), alertas críticos, OPs em produção
+   Endpoint independente para não quebrar /dashboard existente.
+================================================================ */
+app.get('/dashboard/mes', async (c) => {
+  const q = c.req.query();
+  const dia = q.dia || new Date().toISOString().slice(0, 10);
+
+  // Produção do dia
+  const prodDia = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(qtd_boa),0) AS boa,
+            COALESCE(SUM(qtd_refugo),0) AS refugo,
+            COALESCE(SUM(horas_trab),0) AS horas
+     FROM apontamento WHERE date(data) = date(?)`
+  ).bind(dia).first<any>();
+
+  // Eficiência geral do dia
+  const eficDia = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(ap.qtd_boa * si.tempo_padrao), 0) AS num,
+            COALESCE(SUM(ap.horas_trab * 60), 0) AS den
+     FROM apontamento ap
+     JOIN seq_itens si ON si.id_seq_item=ap.id_seq_item
+     WHERE date(ap.data) = date(?)`
+  ).bind(dia).first<{ num: number; den: number }>();
+  const eficienciaDia = toNum(eficDia?.den, 0) > 0
+    ? toNum(eficDia?.num, 0) / toNum(eficDia?.den, 0) : 0;
+
+  // Top operadores do dia (ranking de produtividade)
+  const topOper = await c.env.DB.prepare(
+    `SELECT ap.operador,
+            COALESCE(SUM(ap.qtd_boa),0) AS pecas,
+            COALESCE(SUM(ap.horas_trab),0) AS horas,
+            CASE WHEN SUM(ap.horas_trab*60) > 0
+                 THEN SUM(ap.qtd_boa * si.tempo_padrao) / SUM(ap.horas_trab*60)
+                 ELSE 0 END AS eficiencia
+     FROM apontamento ap
+     JOIN seq_itens si ON si.id_seq_item=ap.id_seq_item
+     WHERE date(ap.data) >= date(?, '-7 day')
+     GROUP BY ap.operador
+     ORDER BY eficiencia DESC, pecas DESC
+     LIMIT 5`
+  ).bind(dia).all();
+
+  // OPs em produção (com progresso)
+  const opsAtivas = await c.env.DB.prepare(
+    `SELECT op.id_op, op.num_op, op.qtde_pecas, op.dt_entrega, op.status,
+            r.cod_ref, c.nome_cliente,
+            COALESCE((SELECT SUM(qtd_boa) FROM apontamento WHERE id_op=op.id_op),0) AS produzido,
+            CASE WHEN op.status NOT IN ('Concluida','Cancelada') AND date(op.dt_entrega) < date('now')
+                 THEN 1 ELSE 0 END AS atrasada
+     FROM op_cab op
+     JOIN referencias r ON r.id_ref=op.id_ref
+     JOIN clientes c ON c.id_cliente=op.id_cliente
+     WHERE op.status IN ('Aberta','Planejada','EmProducao')
+     ORDER BY op.dt_entrega ASC
+     LIMIT 8`
+  ).all();
+
+  // Alertas críticos
+  const alertas: any[] = [];
+  // 1) OPs atrasadas
+  const atrasadas = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM op_cab
+     WHERE status NOT IN ('Concluida','Cancelada') AND date(dt_entrega) < date('now')`
+  ).first<{ c: number }>();
+  if (toInt(atrasadas?.c, 0) > 0) {
+    alertas.push({
+      tipo: 'danger', icon: 'fa-triangle-exclamation',
+      titulo: `${atrasadas?.c} OP(s) atrasada(s)`,
+      desc: 'Data de entrega vencida — priorize estas ordens.',
+      acao: 'ops?status=atrasadas',
+    });
+  }
+  // 2) OPs sem apontamento há mais de 3 dias
+  const semApont = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM op_cab op
+     WHERE op.status='EmProducao'
+       AND NOT EXISTS (
+         SELECT 1 FROM apontamento WHERE id_op=op.id_op AND date(data) >= date('now','-3 day')
+       )`
+  ).first<{ c: number }>();
+  if (toInt(semApont?.c, 0) > 0) {
+    alertas.push({
+      tipo: 'warning', icon: 'fa-clock',
+      titulo: `${semApont?.c} OP(s) sem apontamento há 3+ dias`,
+      desc: 'Em produção mas sem registros recentes — verifique.',
+      acao: 'apontamento',
+    });
+  }
+  // 3) Refugo alto na semana
+  const refSem = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(qtd_boa),0) AS boa, COALESCE(SUM(qtd_refugo),0) AS ref
+     FROM apontamento WHERE date(data) >= date('now','-7 day')`
+  ).first<{ boa: number; ref: number }>();
+  const totalSem = toNum(refSem?.boa, 0) + toNum(refSem?.ref, 0);
+  const pctRefSem = totalSem > 0 ? toNum(refSem?.ref, 0) / totalSem : 0;
+  if (pctRefSem > 0.05) {
+    alertas.push({
+      tipo: 'warning', icon: 'fa-recycle',
+      titulo: `Refugo alto: ${(pctRefSem * 100).toFixed(1)}%`,
+      desc: 'Acima da meta de 5% nos últimos 7 dias.',
+      acao: 'relatorios',
+    });
+  }
+  // 4) Eficiência baixa hoje
+  if (toNum(eficDia?.den, 0) > 0 && eficienciaDia < 0.6) {
+    alertas.push({
+      tipo: 'warning', icon: 'fa-gauge-low',
+      titulo: `Eficiência abaixo do esperado: ${(eficienciaDia * 100).toFixed(1)}%`,
+      desc: 'Produtividade abaixo de 60% no dia.',
+      acao: 'apontamento',
+    });
+  }
+  // 5) Tudo OK
+  if (alertas.length === 0) {
+    alertas.push({
+      tipo: 'success', icon: 'fa-circle-check',
+      titulo: 'Tudo certo',
+      desc: 'Nenhum alerta crítico no momento.',
+      acao: '',
+    });
+  }
+
+  return c.json(ok({
+    dia,
+    producao_dia: {
+      boa: toInt(prodDia?.boa, 0),
+      refugo: toInt(prodDia?.refugo, 0),
+      horas: toNum(prodDia?.horas, 0),
+    },
+    eficiencia_dia: eficienciaDia,
+    top_operadores: topOper.results,
+    ops_ativas: opsAtivas.results,
+    alertas,
+  }));
+});
+
+/* ===================== MES — RANKING DE PRODUTOS =====================
+   Lista referências com tempo médio real, peças produzidas e produtividade
+================================================================ */
+app.get('/produtos/ranking', async (c) => {
+  const rs = await c.env.DB.prepare(
+    `SELECT r.id_ref, r.cod_ref, r.desc_ref,
+            COALESCE(sc.versao, 0) AS versao_ativa,
+            COALESCE((SELECT SUM(tempo_padrao) FROM seq_itens WHERE id_seq_cab=sc.id_seq_cab), 0) AS tempo_padrao,
+            COALESCE(SUM(ap.qtd_boa), 0) AS pecas_produzidas,
+            COALESCE(SUM(ap.qtd_refugo), 0) AS pecas_refugo,
+            COALESCE(SUM(ap.horas_trab), 0) AS horas_trabalhadas,
+            CASE WHEN SUM(ap.qtd_boa) > 0
+                 THEN SUM(ap.horas_trab*60) / SUM(ap.qtd_boa)
+                 ELSE 0 END AS tempo_medio_real_min,
+            CASE WHEN SUM(ap.horas_trab*60) > 0
+                 THEN SUM(ap.qtd_boa * si.tempo_padrao) / SUM(ap.horas_trab*60)
+                 ELSE 0 END AS produtividade
+     FROM referencias r
+     LEFT JOIN seq_cab sc ON sc.id_ref=r.id_ref AND sc.ativa=1
+     LEFT JOIN op_cab op ON op.id_ref=r.id_ref
+     LEFT JOIN apontamento ap ON ap.id_op=op.id_op
+     LEFT JOIN seq_itens si ON si.id_seq_item=ap.id_seq_item
+     WHERE r.ativo=1
+     GROUP BY r.id_ref, r.cod_ref, r.desc_ref, sc.versao, sc.id_seq_cab
+     ORDER BY produtividade DESC, pecas_produzidas DESC`
+  ).all();
+  return c.json(ok(rs.results));
+});
+
 /* ===================== AUDITORIA ===================== */
 app.get('/auditoria', async (c) => {
   const q = c.req.query();
