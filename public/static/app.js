@@ -2919,42 +2919,166 @@ const TERC_PRINT = {
 
   _printCSS() {
     return `
-      @page { size: A4 portrait; margin: 10mm 8mm; }
+      @page { size: A4 portrait; margin: 6mm 6mm; }
       * { box-sizing: border-box; }
-      body { font-family: Arial, 'Helvetica Neue', sans-serif; font-size: 10pt; color: #000; margin: 0; padding: 0; background: #fff; }
-      .sheet { width: 100%; max-width: 200mm; margin: 0 auto; }
-      .empresa-header { display: flex; align-items: center; gap: 12px; padding: 6px 4px; border-bottom: 2px solid #000; margin-bottom: 6px; }
-      .empresa-logo { width: 70px; height: 60px; object-fit: contain; }
+      html, body { margin: 0; padding: 0; background: #fff; }
+      body { font-family: Arial, 'Helvetica Neue', sans-serif; font-size: 9pt; color: #000; }
+
+      /* === FOLHA A4 com 2 VIAS === */
+      .sheet { width: 100%; max-width: 198mm; margin: 0 auto; }
+      .via-wrap { display: flex; flex-direction: column; gap: 0; }
+      .via {
+        width: 100%;
+        padding: 2mm 0 1mm;
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+      .via.via-1 { border-bottom: 2px dashed #555; padding-bottom: 4mm; margin-bottom: 4mm; }
+      .via-tag {
+        display: inline-block;
+        background: #1e3a8a; color: #fff;
+        font-weight: bold; font-size: 9pt;
+        padding: 2px 10px; border-radius: 3px;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+      }
+      .via-tag.tag-terc { background: #047857; }
+      .corte-info {
+        font-size: 7.5pt; color: #666; text-align: center;
+        margin: 1mm 0 2mm;
+        letter-spacing: 1px;
+      }
+
+      /* === CABEÇALHO === */
+      .empresa-header {
+        display: flex; align-items: center; gap: 10px;
+        padding: 4px 2px; border-bottom: 1.5px solid #1e3a8a;
+        margin-bottom: 4px;
+      }
+      .empresa-logo { width: 50px; height: 42px; object-fit: contain; }
       .empresa-info { flex: 1; text-align: center; }
-      .empresa-nome { font-size: 16pt; font-weight: bold; }
-      .empresa-contato { font-size: 9pt; color: #333; }
-      .empresa-datas { text-align: right; font-size: 9pt; line-height: 1.45; }
-      .empresa-datas b { display: inline-block; min-width: 100px; text-align: right; }
-      .titulo { font-size: 14pt; font-weight: bold; text-align: left; margin: 6px 0 4px; }
-      .sub { font-size: 11pt; margin: 4px 0; }
-      .sub b { background: #ffff99; padding: 2px 6px; border: 1px solid #888; }
-      .box-right { float: right; text-align: right; font-size: 10pt; }
-      .box-right .ctrl { display: inline-block; border: 2px solid #000; padding: 3px 10px; background: #fff; font-weight: bold; margin-top: 2px; }
-      table.grid { width: 100%; border-collapse: collapse; margin-top: 4px; }
-      table.grid th, table.grid td { border: 1px solid #000; padding: 3px 4px; font-size: 9pt; text-align: center; }
-      table.grid th { background: #e5e7eb; font-weight: bold; }
+      .empresa-nome { font-size: 13pt; font-weight: bold; line-height: 1.1; }
+      .empresa-contato { font-size: 7.5pt; color: #333; line-height: 1.2; }
+      .empresa-datas { text-align: right; font-size: 7.5pt; line-height: 1.3; min-width: 110px; }
+      .empresa-datas b { display: inline-block; min-width: 70px; text-align: right; font-weight: 600; }
+
+      /* === TÍTULO E SUBTÍTULO === */
+      .titulo-bar {
+        display: flex; justify-content: space-between; align-items: center;
+        margin: 3px 0 2px; gap: 8px;
+      }
+      .titulo { font-size: 11pt; font-weight: bold; margin: 0; }
+      .sub { font-size: 9pt; margin: 0; }
+      .sub b {
+        background: #fef3c7; padding: 1px 6px;
+        border: 1px solid #d97706; border-radius: 2px;
+        font-weight: bold;
+      }
+      .box-right { text-align: right; font-size: 8.5pt; }
+      .box-right .ctrl {
+        display: inline-block; border: 1.5px solid #000;
+        padding: 2px 8px; background: #fff; font-weight: bold;
+        font-size: 9pt;
+      }
+
+      /* === TABELA PRINCIPAL — LARGURAS PROPORCIONAIS === */
+      table.grid {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 3px;
+        table-layout: fixed; /* travamento de colunas para evitar estouros */
+      }
+      table.grid th, table.grid td {
+        border: 0.5px solid #555;
+        padding: 2px 3px;
+        font-size: 8pt;
+        text-align: center;
+        vertical-align: middle;
+        word-wrap: break-word;
+        overflow: hidden;
+        line-height: 1.25;
+      }
+      table.grid thead th {
+        background: #dbeafe;
+        font-weight: bold;
+        font-size: 7.5pt;
+        line-height: 1.1;
+        padding: 3px 2px;
+      }
+      table.grid thead .grade-header {
+        background: #c7d2fe;
+        letter-spacing: 0.5px;
+      }
       table.grid td.left { text-align: left; }
       table.grid td.right { text-align: right; }
-      table.grid tr.destaque td { background: #fffbe6; font-weight: bold; }
-      .desc-italic { font-style: italic; color: #333; font-size: 9pt; margin: 2px 0 6px; padding: 0 2px; }
-      .assina-area { display: flex; justify-content: space-between; gap: 20px; margin-top: 14px; padding: 0 4px; }
+      table.grid td.center { text-align: center; }
+      table.grid tbody tr td { background: #fff; }
+      table.grid tbody tr.zebra td { background: #f8fafc; }
+      table.grid tbody tr.empty td { background: #fcfcfd; }
+
+      /* Larguras proporcionais inteligentes (em %) */
+      .col-ctrl   { width: 5.5%; }   /* Nº Controle  - pequeno */
+      .col-op     { width: 5.5%; }   /* Nº OP        - pequeno */
+      .col-ref    { width: 7.5%; }   /* Referência   - médio */
+      .col-desc   { width: 14%;  }   /* Descrição    - médio (reduzido) */
+      .col-serv   { width: 10%;  }   /* Serviço      - médio */
+      .col-cor    { width: 6.5%; }   /* Cor          - pequeno */
+      .col-grade  { width: 3.3%; }   /* cada coluna de tamanho (10 colunas = 33%) */
+      .col-qtd    { width: 5%;   }   /* Qtde total   - pequeno */
+      .col-preco  { width: 5.5%; }   /* Preço        - pequeno */
+      .col-valor  { width: 7.5%; }   /* Valor total  - médio */
+
+      /* Linha de total geral */
+      tr.tot-row td {
+        background: #1e3a8a !important;
+        color: #fff;
+        font-weight: bold;
+        font-size: 9pt;
+        padding: 4px 4px;
+        border-color: #1e3a8a;
+      }
+      tr.tot-row td.tot-label { text-align: right; letter-spacing: 0.3px; }
+
+      /* === ASSINATURAS === */
+      .assina-area {
+        display: flex; justify-content: space-between;
+        gap: 20px; margin-top: 8mm; padding: 0 4px;
+      }
       .assina-col { flex: 1; }
-      .assina-col .linha { border-top: 1px solid #000; margin-top: 28px; padding-top: 2px; text-align: center; font-size: 9pt; }
-      .coleta-title { background: #d1fae5; border: 1px solid #000; text-align: center; font-weight: bold; padding: 4px; margin-top: 8px; font-size: 11pt; }
-      .comprovante-bloco { border: 1.5px solid #000; padding: 8px; margin-bottom: 10px; background: #f0fdf4; }
-      .comprovante-bloco h3 { text-align: center; background: #fff; border: 1px solid #000; padding: 4px; font-size: 11pt; margin: 0 0 6px; }
-      .dashed { border-top: 2px dashed #666; margin: 8px 0; padding-top: 4px; font-size: 8pt; color: #666; text-align: center; }
-      .alert { color: #b91c1c; font-weight: bold; margin: 6px 0; }
-      .page-break { page-break-after: always; }
+      .assina-col .linha {
+        border-top: 1px solid #000;
+        margin-top: 0;
+        padding-top: 2px;
+        text-align: center;
+        font-size: 8pt;
+      }
+      .footer-info {
+        margin-top: 3mm;
+        font-size: 7pt;
+        color: #666;
+        text-align: center;
+        border-top: 0.5px dotted #aaa;
+        padding-top: 2px;
+      }
+
+      /* === LEGADO (comprovante / parcial) === */
+      .desc-italic { font-style: italic; color: #333; font-size: 8.5pt; margin: 2px 0 4px; padding: 0 2px; }
+      .coleta-title { background: #d1fae5; border: 1px solid #000; text-align: center; font-weight: bold; padding: 3px; margin-top: 6px; font-size: 10pt; }
+      .comprovante-bloco { border: 1.5px solid #000; padding: 6px; margin-bottom: 8px; background: #f0fdf4; }
+      .comprovante-bloco h3 { text-align: center; background: #fff; border: 1px solid #000; padding: 3px; font-size: 10pt; margin: 0 0 4px; }
+      .dashed { border-top: 2px dashed #666; margin: 6px 0; padding-top: 3px; font-size: 7.5pt; color: #666; text-align: center; }
+      .alert { color: #b91c1c; font-weight: bold; margin: 4px 0; }
+      .page-break { page-break-after: always; break-after: page; }
       .no-print { display: none; }
+
       @media print {
         body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
         .no-print { display: none !important; }
+        .via { page-break-inside: avoid; break-inside: avoid; }
+        table.grid { page-break-inside: auto; }
+        table.grid tr { page-break-inside: avoid; break-inside: avoid; }
+        table.grid thead { display: table-header-group; }
+        table.grid tfoot { display: table-footer-group; }
       }
     `;
   },
@@ -2978,22 +3102,20 @@ const TERC_PRINT = {
 
   // Tabela grade de tamanhos (replica a estrutura da coluna Gr + Tamanhos)
   _gradeHeaderHTML(tams) {
-    return `<th>P<br><span style="font-weight:normal">34</span></th>
-            <th>M<br><span style="font-weight:normal">36</span></th>
-            <th>G<br><span style="font-weight:normal">38</span></th>
-            <th>GG<br><span style="font-weight:normal">40</span></th>
-            <th>EG<br><span style="font-weight:normal">42</span></th>
-            <th>SG<br><span style="font-weight:normal">44</span></th>
-            <th>46</th><th>48</th><th>50</th><th>52</th>`;
+    const cols = [
+      ['P', '34'], ['M', '36'], ['G', '38'], ['GG', '40'],
+      ['EG', '42'], ['SG', '44'], ['46', ''], ['48', ''], ['50', ''], ['52', '']
+    ];
+    return cols.map(([t, n]) =>
+      `<th class="col-grade grade-header">${t}${n ? `<br><span style="font-weight:normal;font-size:6.5pt;color:#444">${n}</span>` : ''}</th>`
+    ).join('');
   },
 
   _gradeCellsFromRem(rem) {
     // Mapeia os 10 tamanhos padrão da planilha (P, M, G, GG, EG, SG + 46, 48, 50, 52)
     const ORDEM = ['P', 'M', 'G', 'GG', 'EG', 'SG', '46', '48', '50', '52'];
-    const g = Object.fromEntries((rem.grade || []).map(x => [x.tamanho, x.qtd]));
-    // Mapeia também os tamanhos "extras" usados no CorePro (PP, XG, UN, TAM1, TAM2)
-    // Se o sistema usa PP, mostra na coluna P; XG → junto com EG/SG se houver sobra; UN → P
-    return ORDEM.map(t => `<td>${g[t] || ''}</td>`).join('');
+    const g = Object.fromEntries((Array.isArray(rem.grade) ? rem.grade : []).map(x => [x.tamanho, x.qtd]));
+    return ORDEM.map(t => `<td class="col-grade center">${g[t] ? fmt.int(g[t]) : ''}</td>`).join('');
   },
 
   /* ================================================================
@@ -3006,71 +3128,102 @@ const TERC_PRINT = {
     if (remessas.length === 0) { toast('Sem remessas', 'warning'); return; }
     const empresa = await TERC.loadEmpresa();
 
-    const r0 = remessas[0];
+    const r0 = remessas[0] || {};
     const nomeTerc = r0.nome_terc || 'Terceirização';
     const setor = r0.nome_setor || '';
 
-    // Datas: usa da primeira remessa como referência, mas imprime todas as da lista
+    // Datas: usa da primeira remessa como referência
     const dtSaida = r0.dt_saida ? dayjs(r0.dt_saida).format('DD/MM/YYYY') : '';
     const dtInicio = r0.dt_inicio ? dayjs(r0.dt_inicio).format('DD/MM/YYYY') : dtSaida;
     const dtPrev = r0.dt_previsao ? dayjs(r0.dt_previsao).format('DD/MM/YYYY') : '';
 
     const metaDir = `
-      <div><b>Data de Saída:</b> ${dtSaida}</div>
-      <div><b>Data de Início:</b> ${dtInicio}</div>
-      <div><b>Previsão retorno:</b> ${dtPrev}</div>
+      <div><b>Data Saída:</b> ${dtSaida || '—'}</div>
+      <div><b>Data Início:</b> ${dtInicio || '—'}</div>
+      <div><b>Previsão:</b> ${dtPrev || '—'}</div>
     `;
 
-    // Totais
+    // Totais (defensivos)
     const tot = remessas.reduce((a, r) => ({
       qtd: a.qtd + (Number(r.qtd_total) || 0),
       valor: a.valor + (Number(r.valor_total) || 0),
     }), { qtd: 0, valor: 0 });
 
-    const linhas = remessas.map(r => `
-      <tr class="destaque">
-        <td style="background:#fffbe6;font-weight:bold">${r.num_controle}</td>
-        <td>${r.num_op || '—'}</td>
-        <td class="left"><b>${r.cod_ref || ''}</b></td>
-        <td class="left">${r.desc_ref || ''}</td>
-        <td class="left">${r.desc_servico || ''}</td>
-        <td>${r.cor || '—'}</td>
+    // Linhas da tabela — quantidade dinâmica, sem preencher com vazias exageradas
+    const linhas = remessas.map((r, i) => `
+      <tr${i % 2 === 1 ? ' class="zebra"' : ''}>
+        <td class="col-ctrl center"><b>${r.num_controle || ''}</b></td>
+        <td class="col-op center">${r.num_op || '—'}</td>
+        <td class="col-ref left"><b>${r.cod_ref || ''}</b></td>
+        <td class="col-desc left">${r.desc_ref || ''}</td>
+        <td class="col-serv left">${r.desc_servico || ''}</td>
+        <td class="col-cor center">${r.cor || '—'}</td>
         ${this._gradeCellsFromRem(r)}
-        <td class="right"><b>${fmt.int(r.qtd_total)}</b></td>
-        <td class="right">${fmt.num(r.preco_unit, 2)}</td>
-        <td class="right"><b>${fmt.num(r.valor_total, 2)}</b></td>
+        <td class="col-qtd right"><b>${fmt.int(r.qtd_total || 0)}</b></td>
+        <td class="col-preco right">${fmt.num(r.preco_unit || 0, 2)}</td>
+        <td class="col-valor right"><b>${fmt.num(r.valor_total || 0, 2)}</b></td>
       </tr>
     `).join('');
 
-    // Linhas em branco para completar (visual igual à planilha)
-    const vazias = Math.max(0, 15 - remessas.length);
+    // Linhas vazias mínimas para "preencher" tabela curta sem inflar
+    // Em layout de 2 vias (A4 dividido em 2), no máx ~5 linhas em branco por via
+    const minLinhas = 5;
+    const vazias = Math.max(0, minLinhas - remessas.length);
     const linhasVazias = Array(vazias).fill(0).map(() => `
-      <tr>
-        <td style="background:#fffbe6">&nbsp;</td>
-        <td></td><td></td><td></td><td></td><td></td>
-        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-        <td></td><td></td><td></td>
+      <tr class="empty">
+        <td class="col-ctrl">&nbsp;</td>
+        <td class="col-op"></td>
+        <td class="col-ref"></td>
+        <td class="col-desc"></td>
+        <td class="col-serv"></td>
+        <td class="col-cor"></td>
+        <td class="col-grade"></td><td class="col-grade"></td><td class="col-grade"></td>
+        <td class="col-grade"></td><td class="col-grade"></td><td class="col-grade"></td>
+        <td class="col-grade"></td><td class="col-grade"></td><td class="col-grade"></td>
+        <td class="col-grade"></td>
+        <td class="col-qtd"></td>
+        <td class="col-preco"></td>
+        <td class="col-valor"></td>
       </tr>
     `).join('');
 
-    const body = `
-      <div class="sheet">
+    // Construtor de UMA VIA (cabeçalho + tabela + assinaturas)
+    const buildVia = (tag, tagClass, recebedor) => `
+      <div class="via ${tag === '1ª VIA' ? 'via-1' : 'via-2'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+          <span class="via-tag ${tagClass}">${tag} — ${recebedor.toUpperCase()}</span>
+          <span style="font-size:7.5pt;color:#666">Romaneio Nº <b>${r0.num_controle || '—'}</b> · ${dayjs().format('DD/MM/YYYY HH:mm')}</span>
+        </div>
+
         ${this._headerHTML(empresa, metaDir)}
-        <div class="titulo">Romaneio de Serviço${setor ? ' - ' + setor : ''}</div>
-        <div class="sub"><b>Terceirização:</b> ${nomeTerc}</div>
-        <table class="grid" style="font-size:8pt">
+
+        <div class="titulo-bar">
+          <div class="titulo">Romaneio de Serviço${setor ? ' — ' + setor : ''}</div>
+          <div class="sub"><b>Terceirização: ${nomeTerc}</b></div>
+        </div>
+
+        <table class="grid">
+          <colgroup>
+            <col class="col-ctrl"><col class="col-op"><col class="col-ref">
+            <col class="col-desc"><col class="col-serv"><col class="col-cor">
+            <col class="col-grade"><col class="col-grade"><col class="col-grade">
+            <col class="col-grade"><col class="col-grade"><col class="col-grade">
+            <col class="col-grade"><col class="col-grade"><col class="col-grade">
+            <col class="col-grade">
+            <col class="col-qtd"><col class="col-preco"><col class="col-valor">
+          </colgroup>
           <thead>
             <tr>
-              <th rowspan="2">Nº de<br>Controle</th>
-              <th rowspan="2">Nº OP</th>
-              <th rowspan="2">Ref.</th>
-              <th rowspan="2">Descrição da<br>Referência</th>
-              <th rowspan="2">Descrição do<br>Serviço</th>
-              <th rowspan="2">Cor</th>
-              <th colspan="10" style="background:#d1fae5">T a m a n h o s</th>
-              <th rowspan="2">Qtde<br>Total</th>
-              <th rowspan="2">Preço</th>
-              <th rowspan="2">Valor<br>Total</th>
+              <th rowspan="2" class="col-ctrl">Nº<br>Ctrl</th>
+              <th rowspan="2" class="col-op">Nº<br>OP</th>
+              <th rowspan="2" class="col-ref">Ref.</th>
+              <th rowspan="2" class="col-desc">Descrição</th>
+              <th rowspan="2" class="col-serv">Serviço</th>
+              <th rowspan="2" class="col-cor">Cor</th>
+              <th colspan="10" class="grade-header">T A M A N H O S</th>
+              <th rowspan="2" class="col-qtd">Qtd<br>Total</th>
+              <th rowspan="2" class="col-preco">Preço</th>
+              <th rowspan="2" class="col-valor">Valor Total</th>
             </tr>
             <tr>
               ${this._gradeHeaderHTML()}
@@ -3079,25 +3232,38 @@ const TERC_PRINT = {
           <tbody>
             ${linhas}
             ${linhasVazias}
-            <tr style="background:#e5e7eb;font-weight:bold">
-              <td colspan="16" class="right">TOTAL GERAL</td>
-              <td class="right">${fmt.int(tot.qtd)}</td>
-              <td></td>
-              <td class="right">${TERC.fmtBRL(tot.valor)}</td>
+            <tr class="tot-row">
+              <td colspan="16" class="tot-label">TOTAL GERAL</td>
+              <td class="col-qtd right">${fmt.int(tot.qtd)}</td>
+              <td class="col-preco"></td>
+              <td class="col-valor right">${TERC.fmtBRL(tot.valor)}</td>
             </tr>
           </tbody>
         </table>
 
-        <div class="assina-area" style="margin-top:30px">
+        <div class="assina-area">
           <div class="assina-col">
-            <div class="linha">Entregue por (Empresa)</div>
+            <div style="height:14mm"></div>
+            <div class="linha"><b>Entregue por (Empresa)</b><br><span style="font-size:7pt;color:#666">Nome / Assinatura / Data</span></div>
           </div>
           <div class="assina-col">
-            <div class="linha">Recebido por (${nomeTerc})</div>
+            <div style="height:14mm"></div>
+            <div class="linha"><b>Recebido por (${nomeTerc})</b><br><span style="font-size:7pt;color:#666">Nome / Assinatura / Data</span></div>
           </div>
         </div>
-        <div style="margin-top:14px;font-size:8pt;color:#555;text-align:center">
-          Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} por ${state.user?.nome || state.user?.login || '—'} · CorePro PCP
+
+        <div class="footer-info">
+          ${tag} · ${recebedor} · Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} por ${state.user?.nome || state.user?.login || '—'} · CorePro PCP
+        </div>
+      </div>
+    `;
+
+    const body = `
+      <div class="sheet">
+        <div class="via-wrap">
+          ${buildVia('1ª VIA', 'tag-emp', 'EMPRESA')}
+          <div class="corte-info">- - - - - - - - - - - - - - - - - - - - -  ✂  RECORTAR / DOBRAR  ✂  - - - - - - - - - - - - - - - - - - - - -</div>
+          ${buildVia('2ª VIA', 'tag-terc', 'TERCEIRIZADO')}
         </div>
       </div>
     `;
