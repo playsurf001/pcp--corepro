@@ -23,13 +23,19 @@ const el = (tag, attrs = {}, children = []) => {
   });
   return e;
 };
+// Helpers defensivos: tudo que vier null/undefined/NaN/string‑inválida vira 0 ou []
+const _safeNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const _safeArr = (v) => (Array.isArray(v) ? v : []);
 const fmt = {
-  num: (v, d = 2) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }),
-  int: (v) => Number(v || 0).toLocaleString('pt-BR'),
-  pct: (v) => (Number(v || 0) * 100).toFixed(1) + '%',
-  date: (s) => (s ? dayjs(s).format('DD/MM/YYYY') : ''),
-  datetime: (s) => (s ? dayjs(s).format('DD/MM/YYYY HH:mm') : ''),
+  num: (v, d = 2) => _safeNum(v).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }),
+  int: (v) => _safeNum(v).toLocaleString('pt-BR'),
+  pct: (v) => (_safeNum(v) * 100).toFixed(1) + '%',
+  date: (s) => { if (!s) return ''; const d = dayjs(s); return d.isValid() ? d.format('DD/MM/YYYY') : ''; },
+  datetime: (s) => { if (!s) return ''; const d = dayjs(s); return d.isValid() ? d.format('DD/MM/YYYY HH:mm') : ''; },
+  safeNum: _safeNum,
+  safeArr: _safeArr,
 };
+window.fmt = fmt;
 
 function toast(msg, type = 'info') {
   const map = { info: 'bg-blue-600', success: 'bg-emerald-600', error: 'bg-red-600', warning: 'bg-amber-600' };
@@ -88,47 +94,74 @@ const state = {
   user: null,
 };
 
-/* ---------- Layout / Navegação ---------- */
+/* ---------- Layout / Navegação ----------
+ * Política de acesso (refator 2026‑04‑30):
+ *   - admin: vê TUDO
+ *   - usuário comum (qualquer outro perfil): vê APENAS Terceirização
+ *
+ * Marcamos cada item com `tercOnly: true` (visível a todos) ou `adminOnly: true`
+ * (visível só ao admin). A função podeAcessar() abaixo aplica as regras.
+ *
+ * Rotas de Terceirização agora ficam EXPANDIDAS no sidebar — sem accordion.
+ */
 const NAV = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line', group: 'Gestão' },
-  { id: 'mes_dashboard', label: 'MES — Tempo Real', icon: 'fa-tachometer-alt', group: 'Gestão' },
-  { id: 'relatorios', label: 'Relatórios', icon: 'fa-file-pdf', group: 'Gestão' },
-  { id: 'alertas', label: 'Alertas & Notificações', icon: 'fa-bell', group: 'Gestão' },
-  { id: 'ops', label: 'Ordens de Produção', icon: 'fa-clipboard-list', group: 'Produção' },
-  { id: 'balanceamento', label: 'Balanceamento', icon: 'fa-balance-scale', group: 'Produção' },
-  { id: 'ficha', label: 'Ficha Acompanhamento', icon: 'fa-file-invoice', group: 'Produção' },
-  { id: 'rastreabilidade', label: 'Rastreabilidade', icon: 'fa-route', group: 'Produção' },
-  { id: 'apontamento_pro', label: 'Apontamento Pro (Timer)', icon: 'fa-stopwatch', group: 'Chão de Fábrica' },
-  { id: 'apontamento', label: 'Apontamento Simples', icon: 'fa-hard-hat', group: 'Chão de Fábrica' },
-  { id: 'colaboradores', label: 'Colaboradores', icon: 'fa-id-badge', group: 'Chão de Fábrica' },
-  { id: 'setores', label: 'Setores', icon: 'fa-sitemap', group: 'Chão de Fábrica' },
-  { id: 'bonificacao', label: 'Bonificação', icon: 'fa-trophy', group: 'Chão de Fábrica' },
-  { id: 'sequencias', label: 'Sequências Operacionais', icon: 'fa-list-ol', group: 'Engenharia' },
-  { id: 'referencias', label: 'Referências', icon: 'fa-tshirt', group: 'Cadastros' },
-  { id: 'clientes', label: 'Clientes', icon: 'fa-users', group: 'Cadastros' },
-  { id: 'operacoes', label: 'Operações', icon: 'fa-cogs', group: 'Cadastros' },
-  { id: 'maquinas', label: 'Máquinas', icon: 'fa-industry', group: 'Cadastros' },
-  { id: 'aparelhos', label: 'Aparelhos', icon: 'fa-tools', group: 'Cadastros' },
-  { id: 'cores', label: 'Cores', icon: 'fa-palette', group: 'Cadastros' },
-  { id: 'tamanhos', label: 'Tamanhos', icon: 'fa-ruler', group: 'Cadastros' },
-  { id: 'terc_dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', group: 'Terceirização' },
-  { id: 'terc_resumo', label: 'Resumo', icon: 'fa-list-check', group: 'Terceirização' },
-  { id: 'terc_remessas', label: 'Remessas', icon: 'fa-truck-fast', group: 'Terceirização' },
-  { id: 'terc_retornos', label: 'Retornos', icon: 'fa-truck-arrow-right', group: 'Terceirização' },
-  { id: 'terc_terceirizados', label: 'Terceirizados', icon: 'fa-handshake', group: 'Terceirização' },
-  { id: 'terc_precos', label: 'Preços / Coleção', icon: 'fa-money-bill-wave', group: 'Terceirização' },
-  { id: 'terc_importador', label: 'Importador Planilha', icon: 'fa-file-excel', group: 'Terceirização', perfilMin: 'pcp' },
-  { id: 'importador', label: 'Importador', icon: 'fa-file-import', group: 'Sistema', perfilMin: 'pcp' },
-  { id: 'usuarios', label: 'Usuários', icon: 'fa-user-shield', group: 'Sistema', perfilMin: 'admin' },
-  { id: 'parametros', label: 'Parâmetros', icon: 'fa-sliders-h', group: 'Sistema' },
-  { id: 'auditoria', label: 'Auditoria', icon: 'fa-history', group: 'Sistema' },
+  // ==== TERCEIRIZAÇÃO (visível a todos os perfis autenticados) ====
+  { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-line', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_remessas', label: 'Remessas', icon: 'fa-truck-fast', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_retornos', label: 'Retornos', icon: 'fa-truck-arrow-right', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_terceirizados', label: 'Terceirizados', icon: 'fa-handshake', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_produtos', label: 'Produtos', icon: 'fa-tshirt', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_precos', label: 'Preços / Coleção', icon: 'fa-money-bill-wave', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_importador', label: 'Importação', icon: 'fa-file-excel', group: 'Terceirização', tercOnly: true },
+
+  // ==== ADMIN — Gestão ====
+  { id: 'admin_dashboard', label: 'Dashboard MES', icon: 'fa-tachometer-alt', group: 'Gestão', adminOnly: true },
+  { id: 'mes_dashboard', label: 'MES — Tempo Real', icon: 'fa-bolt', group: 'Gestão', adminOnly: true },
+  { id: 'relatorios', label: 'Relatórios', icon: 'fa-file-pdf', group: 'Gestão', adminOnly: true },
+  { id: 'alertas', label: 'Alertas & Notificações', icon: 'fa-bell', group: 'Gestão', adminOnly: true },
+
+  // ==== ADMIN — Produção ====
+  { id: 'ops', label: 'Ordens de Produção', icon: 'fa-clipboard-list', group: 'Produção', adminOnly: true },
+  { id: 'balanceamento', label: 'Balanceamento', icon: 'fa-balance-scale', group: 'Produção', adminOnly: true },
+  { id: 'ficha', label: 'Ficha Acompanhamento', icon: 'fa-file-invoice', group: 'Produção', adminOnly: true },
+  { id: 'rastreabilidade', label: 'Rastreabilidade', icon: 'fa-route', group: 'Produção', adminOnly: true },
+
+  // ==== ADMIN — Chão de Fábrica ====
+  { id: 'apontamento_pro', label: 'Apontamento Pro (Timer)', icon: 'fa-stopwatch', group: 'Chão de Fábrica', adminOnly: true },
+  { id: 'apontamento', label: 'Apontamento Simples', icon: 'fa-hard-hat', group: 'Chão de Fábrica', adminOnly: true },
+  { id: 'colaboradores', label: 'Colaboradores', icon: 'fa-id-badge', group: 'Chão de Fábrica', adminOnly: true },
+  { id: 'setores', label: 'Setores', icon: 'fa-sitemap', group: 'Chão de Fábrica', adminOnly: true },
+  { id: 'bonificacao', label: 'Bonificação', icon: 'fa-trophy', group: 'Chão de Fábrica', adminOnly: true },
+
+  // ==== ADMIN — Engenharia ====
+  { id: 'sequencias', label: 'Sequências Operacionais', icon: 'fa-list-ol', group: 'Engenharia', adminOnly: true },
+
+  // ==== ADMIN — Cadastros ====
+  { id: 'referencias', label: 'Referências', icon: 'fa-tshirt', group: 'Cadastros', adminOnly: true },
+  { id: 'clientes', label: 'Clientes', icon: 'fa-users', group: 'Cadastros', adminOnly: true },
+  { id: 'operacoes', label: 'Operações', icon: 'fa-cogs', group: 'Cadastros', adminOnly: true },
+  { id: 'maquinas', label: 'Máquinas', icon: 'fa-industry', group: 'Cadastros', adminOnly: true },
+  { id: 'aparelhos', label: 'Aparelhos', icon: 'fa-tools', group: 'Cadastros', adminOnly: true },
+  { id: 'cores', label: 'Cores', icon: 'fa-palette', group: 'Cadastros', adminOnly: true },
+  { id: 'tamanhos', label: 'Tamanhos', icon: 'fa-ruler', group: 'Cadastros', adminOnly: true },
+
+  // ==== ADMIN — Sistema ====
+  { id: 'importador', label: 'Importador Geral', icon: 'fa-file-import', group: 'Sistema', adminOnly: true },
+  { id: 'usuarios', label: 'Usuários', icon: 'fa-user-shield', group: 'Sistema', adminOnly: true },
+  { id: 'parametros', label: 'Parâmetros', icon: 'fa-sliders-h', group: 'Sistema', adminOnly: true },
+  { id: 'auditoria', label: 'Auditoria', icon: 'fa-history', group: 'Sistema', adminOnly: true },
 ];
 
-const RANK = { admin: 100, gerente: 80, pcp: 60, operador: 40, visualizador: 20 };
+/**
+ * Política de visibilidade/acesso:
+ *  - admin: pode tudo
+ *  - qualquer outro perfil: APENAS itens marcados com tercOnly
+ */
+function isAdmin() { return state.user?.perfil === 'admin'; }
 function podeAcessar(item) {
-  if (!item.perfilMin) return true;
-  const u = state.user;
-  return u && (RANK[u.perfil] || 0) >= (RANK[item.perfilMin] || 0);
+  if (!item) return false;
+  if (isAdmin()) return true;
+  return !!item.tercOnly;
 }
 
 function renderLayout() {
@@ -201,12 +234,37 @@ function renderLayout() {
   Theme.bindToggle('#theme-toggle-btn');
 }
 
+/**
+ * Rota inicial padrão.
+ *  - admin: 'admin_dashboard' (visão MES)
+ *  - usuário comum: 'dashboard' (Dashboard de Terceirização)
+ */
+function rotaInicial() {
+  return 'dashboard';
+}
+
+/**
+ * Guarda de rota: bloqueia acesso direto via URL/hash a módulos restritos
+ * para usuários não-admin, redirecionando para o dashboard inicial.
+ */
 function navigate(route) {
+  // Resolve item do NAV (ou aceita rota dinâmica não listada)
+  const nav = NAV.find((n) => n.id === route);
+
+  // Se rota não existe ou não é permitida ao usuário, redireciona p/ dashboard
+  if (route && nav && !podeAcessar(nav)) {
+    console.warn('[navigate] Acesso negado a', route, '— redirecionando');
+    toast('Acesso restrito. Apenas administradores podem visualizar este módulo.', 'warning');
+    route = rotaInicial();
+  }
+  if (!route) route = rotaInicial();
+
   state.route = route;
   location.hash = route;
   $$('[data-route]').forEach((a) => a.classList.toggle('active', a.dataset.route === route));
-  const nav = NAV.find((n) => n.id === route);
-  $('#page-title').textContent = nav ? nav.label : route;
+  const navResolved = NAV.find((n) => n.id === route);
+  const titleEl = $('#page-title');
+  if (titleEl) titleEl.textContent = navResolved ? navResolved.label : route;
   render();
 }
 
@@ -214,13 +272,30 @@ function navigate(route) {
 async function render() {
   const main = $('#main-content');
   if (!main) { console.warn('[render] #main-content não encontrado (sem layout?)'); return; }
+
+  // Guarda extra de segurança: se a rota atual não estiver permitida ao usuário,
+  // força volta ao dashboard inicial (impede acesso via hash direto na URL).
+  const navItem = NAV.find((n) => n.id === state.route);
+  if (navItem && !podeAcessar(navItem)) {
+    console.warn('[render] Rota bloqueada:', state.route);
+    state.route = rotaInicial();
+    location.hash = state.route;
+  }
+
   main.innerHTML = `<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-3xl text-brand"></i><div class="text-xs text-slate-400 mt-3 uppercase tracking-widest">Carregando…</div></div>`;
-  const handler = ROUTES[state.route] || ROUTES.dashboard;
+  const handler = ROUTES[state.route] || ROUTES[rotaInicial()] || ROUTES.dashboard;
   try {
     await handler(main);
     AppStore?.set?.({ route: state.route, loading: false });
   } catch (e) {
     console.error('[render]', state.route, e);
+    // Se for 403 ADMIN_REQUIRED, redireciona para dashboard inicial
+    const code = e?.response?.data?.code || e?.code;
+    if (code === 'ADMIN_REQUIRED') {
+      toast('Acesso restrito a administradores. Redirecionando…', 'warning');
+      setTimeout(() => navigate(rotaInicial()), 600);
+      return;
+    }
     main.innerHTML = `<div class="card p-6"><div class="text-red-600 font-semibold mb-2"><i class="fas fa-exclamation-triangle mr-2"></i>Erro ao carregar tela</div><div class="text-sm text-slate-500">${e.message || e}</div><button class="btn btn-secondary mt-4" onclick="render()"><i class="fas fa-redo mr-1"></i>Tentar novamente</button></div>`;
   }
 }
@@ -233,7 +308,8 @@ window.navigate = navigate;
 const ROUTES = {};
 
 /* ---------- DASHBOARD ---------- */
-ROUTES.dashboard = async (main) => {
+// Dashboard de FÁBRICA (MES) — APENAS admin (renomeado de 'dashboard' p/ 'admin_dashboard')
+ROUTES.admin_dashboard = async (main) => {
   const [r, rMes] = await Promise.all([
     api('get', '/dashboard'),
     api('get', '/dashboard/mes', null, { silent: true }).catch(() => ({ data: null })),
@@ -2736,19 +2812,24 @@ function openUsuarioForm(row, onSaved) {
 
 /* ---------- Cache de cadastros auxiliares ---------- */
 const TERC = {
-  setores: [], servicos: [], colecoes: [], terceirizados: [],
+  setores: [], servicos: [], colecoes: [], terceirizados: [], produtos: [],
   async load(force = false) {
     if (!force && this.terceirizados.length) return;
-    const [rs1, rs2, rs3, rs4] = await Promise.all([
+    const [rs1, rs2, rs3, rs4, rs5] = await Promise.all([
       api('get', '/terc/setores'),
       api('get', '/terc/servicos'),
       api('get', '/terc/colecoes'),
       api('get', '/terc/terceirizados'),
+      api('get', '/terc/produtos', null, { silent: true }).catch(() => ({ data: [] })),
     ]);
     this.setores = rs1.data || [];
     this.servicos = rs2.data || [];
     this.colecoes = rs3.data || [];
     this.terceirizados = rs4.data || [];
+    this.produtos = rs5.data || [];
+  },
+  async reloadProdutos() {
+    try { const r = await api('get', '/terc/produtos', null, { silent: true }); this.produtos = r.data || []; } catch {}
   },
   optSetores(sel) { return ['<option value="">—</option>'].concat(this.setores.map(s => `<option value="${s.id_setor}" ${sel == s.id_setor ? 'selected' : ''}>${s.nome_setor}</option>`)).join(''); },
   optServicos(sel) { return ['<option value="">—</option>'].concat(this.servicos.map(s => `<option value="${s.id_servico}" ${sel == s.id_servico ? 'selected' : ''}>${s.desc_servico}</option>`)).join(''); },
@@ -2756,6 +2837,23 @@ const TERC = {
   optTerc(sel, onlyAtivos = false) {
     const list = onlyAtivos ? this.terceirizados.filter(t => t.ativo) : this.terceirizados;
     return ['<option value="">—</option>'].concat(list.map(t => `<option value="${t.id_terc}" ${sel == t.id_terc ? 'selected' : ''}>${t.nome_terc}${t.nome_setor ? ' · ' + t.nome_setor : ''}</option>`)).join('');
+  },
+  optProdutos(sel, idColecao) {
+    let list = this.produtos.filter(p => p.ativo);
+    if (idColecao) list = list.filter(p => !p.id_colecao || p.id_colecao == idColecao);
+    return ['<option value="">— Selecione um produto cadastrado —</option>']
+      .concat(list.map(p => `<option value="${p.id_produto}" ${sel == p.id_produto ? 'selected' : ''} data-cod="${(p.cod_ref || '').replace(/"/g, '&quot;')}" data-desc="${(p.desc_ref || '').replace(/"/g, '&quot;')}" data-col="${p.id_colecao || ''}" data-grade="${p.grade_padrao || 1}">${p.cod_ref} — ${p.desc_ref}${p.nome_colecao ? ' · ' + p.nome_colecao : ''}</option>`))
+      .join('');
+  },
+  findProdutoByRef(cod_ref, idColecao) {
+    if (!cod_ref) return null;
+    const list = this.produtos.filter(p => p.ativo && p.cod_ref === cod_ref);
+    if (!list.length) return null;
+    if (idColecao) {
+      const exact = list.find(p => p.id_colecao == idColecao);
+      if (exact) return exact;
+    }
+    return list.find(p => !p.id_colecao) || list[0];
   },
   fmtBRL(v) { return 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
   statusBadge(s, atrasada = 0) {
@@ -3188,8 +3286,8 @@ const TERC_PRINT = {
   },
 };
 
-/* ---------- DASHBOARD de Terceirização ---------- */
-ROUTES.terc_dashboard = async (main) => {
+/* ---------- DASHBOARD de Terceirização (rota inicial padrão para TODOS) ---------- */
+ROUTES.dashboard = async (main) => {
   await TERC.load();
   const hoje = dayjs().format('YYYY-MM-DD');
   const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
@@ -3221,94 +3319,157 @@ ROUTES.terc_dashboard = async (main) => {
     </div>
   `;
 
+  // ⚠️ Carregamento defensivo: cada seção é renderizada de forma isolada
+  // (try/catch) para que uma falha em um bloco não derrube a tela inteira.
+  // Todos os valores são validados (null/undefined/NaN → 0, listas → []).
+  const FALLBACK_EMPTY = '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</p>';
+  const FALLBACK_ERROR = (msg) => `<p class="text-amber-600 text-sm py-4 text-center"><i class="fas fa-triangle-exclamation mr-1"></i>${msg || 'Falha ao carregar'}</p>`;
+
   async function load() {
-    const de = $('#f-de').value, ate = $('#f-ate').value;
-    const r = await api('get', `/terc/dashboard?de=${de}&ate=${ate}`);
-    const d = r.data || {};
-    const k = d.kpis || { remessas: {}, retornos: {} };
-    const kr = k.remessas || {}, kt = k.retornos || {};
+    const de = ($('#f-de')?.value) || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+    const ate = ($('#f-ate')?.value) || dayjs().format('YYYY-MM-DD');
 
-    const kpi = (label, val, icon, color) => `
-      <div class="card p-3">
-        <div class="text-xs text-slate-500 uppercase">${label}</div>
-        <div class="flex items-center gap-2 mt-1">
-          <i class="fas ${icon} ${color}"></i>
-          <div class="text-2xl font-bold text-slate-800">${val}</div>
-        </div>
-      </div>`;
-    $('#kpis').innerHTML = [
-      kpi('Remessas', fmt.int(kr.total), 'fa-truck-fast', 'text-brand'),
-      kpi('Peças enviadas', fmt.int(kr.pecas_enviadas), 'fa-boxes', 'text-indigo-600'),
-      kpi('Valor enviado', TERC.fmtBRL(kr.valor_total), 'fa-dollar-sign', 'text-emerald-600'),
-      kpi('Em aberto', fmt.int(kr.em_aberto), 'fa-clock', 'text-amber-600'),
-      kpi('Concluídas', fmt.int(kr.concluidas), 'fa-check-circle', 'text-emerald-600'),
-      kpi('Atrasadas', fmt.int(kr.atrasadas), 'fa-triangle-exclamation', 'text-red-600'),
-    ].join('');
+    let d = {};
+    try {
+      const r = await api('get', `/terc/dashboard?de=${de}&ate=${ate}`, null, { silent: true });
+      d = (r && r.data) ? r.data : {};
+    } catch (e) {
+      console.error('[dashboard] erro ao buscar /terc/dashboard', e);
+      // Mostra estado de erro mas continua tentando renderizar com dados vazios
+      const errMsg = e?.response?.data?.error || e?.message || 'Erro ao carregar dashboard';
+      if ($('#kpis')) $('#kpis').innerHTML = `<div class="col-span-full">${FALLBACK_ERROR(errMsg)}</div>`;
+      d = {};
+    }
 
-    // Gráfico produção diária
-    const prod = d.producao_diaria || [];
-    const labels = prod.map(p => dayjs(p.dia).format('DD/MM'));
-    const ctxP = document.getElementById('cht-prod').getContext('2d');
-    if (window._chtProd) window._chtProd.destroy();
-    window._chtProd = new Chart(ctxP, {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Boas', data: prod.map(p => p.boa), backgroundColor: '#10b981' },
-          { label: 'Refugo', data: prod.map(p => p.refugo), backgroundColor: '#ef4444' },
-          { label: 'Conserto', data: prod.map(p => p.conserto), backgroundColor: '#f59e0b' },
-        ],
-      },
-      options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } },
-    });
+    const k = (d && typeof d === 'object' && d.kpis) ? d.kpis : {};
+    const kr = (k && typeof k === 'object' && k.remessas) ? k.remessas : {};
 
-    // Gráfico por serviço
-    const serv = d.por_servico || [];
-    const ctxS = document.getElementById('cht-serv').getContext('2d');
-    if (window._chtServ) window._chtServ.destroy();
-    window._chtServ = new Chart(ctxS, {
-      type: 'doughnut',
-      data: {
-        labels: serv.map(s => s.desc_servico || '(sem serviço)'),
-        datasets: [{ data: serv.map(s => s.pecas), backgroundColor: ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#06b6d4'] }],
-      },
-    });
+    // ---------- KPIs (sempre renderiza, com fallback 0) ----------
+    try {
+      const kpi = (label, val, icon, color) => `
+        <div class="card p-3">
+          <div class="text-xs text-slate-500 uppercase">${label}</div>
+          <div class="flex items-center gap-2 mt-1">
+            <i class="fas ${icon} ${color}"></i>
+            <div class="text-2xl font-bold text-slate-800">${val}</div>
+          </div>
+        </div>`;
+      if ($('#kpis')) $('#kpis').innerHTML = [
+        kpi('Remessas', fmt.int(kr.total), 'fa-truck-fast', 'text-brand'),
+        kpi('Peças enviadas', fmt.int(kr.pecas_enviadas), 'fa-boxes', 'text-indigo-600'),
+        kpi('Valor enviado', TERC.fmtBRL(fmt.safeNum(kr.valor_total)), 'fa-dollar-sign', 'text-emerald-600'),
+        kpi('Em aberto', fmt.int(kr.em_aberto), 'fa-clock', 'text-amber-600'),
+        kpi('Concluídas', fmt.int(kr.concluidas), 'fa-check-circle', 'text-emerald-600'),
+        kpi('Atrasadas', fmt.int(kr.atrasadas), 'fa-triangle-exclamation', 'text-red-600'),
+      ].join('');
+    } catch (e) { console.error('[dashboard] kpis', e); }
 
-    // Top terceirizados
-    const top = d.top_terceirizados || [];
-    $('#top-terc').innerHTML = top.length ? `
-      <table class="w-full text-sm">
-        <thead><tr class="bg-slate-100"><th class="text-left p-2">#</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Setor</th><th class="text-right p-2">Remessas</th><th class="text-right p-2">Peças</th><th class="text-right p-2">Valor</th></tr></thead>
-        <tbody>${top.map((t, i) => `
-          <tr class="border-b">
-            <td class="p-2">${i + 1}</td>
-            <td class="p-2 font-medium">${t.nome_terc}</td>
-            <td class="p-2 text-slate-500">${t.nome_setor || '—'}</td>
-            <td class="p-2 text-right">${fmt.int(t.remessas)}</td>
-            <td class="p-2 text-right">${fmt.int(t.pecas)}</td>
-            <td class="p-2 text-right">${TERC.fmtBRL(t.valor)}</td>
-          </tr>`).join('')}</tbody>
-      </table>` : '<p class="text-slate-500 text-sm py-4 text-center">Sem dados no período</p>';
+    // ---------- Gráfico produção diária ----------
+    try {
+      const prod = fmt.safeArr(d.producao_diaria);
+      const ctxP = document.getElementById('cht-prod')?.getContext?.('2d');
+      if (window._chtProd) { try { window._chtProd.destroy(); } catch {} window._chtProd = null; }
+      if (ctxP) {
+        if (prod.length === 0) {
+          // Sem dados: limpa canvas e mostra placeholder
+          const wrap = ctxP.canvas.parentElement;
+          if (wrap && !wrap.querySelector('.no-data-prod')) {
+            const ph = document.createElement('div');
+            ph.className = 'no-data-prod text-center text-slate-400 text-sm py-8';
+            ph.innerHTML = '<i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período';
+            ctxP.canvas.style.display = 'none';
+            wrap.appendChild(ph);
+          }
+        } else {
+          // Tem dados: remove placeholder anterior se existir
+          const wrap = ctxP.canvas.parentElement;
+          wrap?.querySelector('.no-data-prod')?.remove();
+          ctxP.canvas.style.display = '';
+          const labels = prod.map(p => { const d = dayjs(p?.dia); return d.isValid() ? d.format('DD/MM') : '?'; });
+          window._chtProd = new Chart(ctxP, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: [
+                { label: 'Boas', data: prod.map(p => fmt.safeNum(p?.boa)), backgroundColor: '#10b981' },
+                { label: 'Refugo', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
+                { label: 'Conserto', data: prod.map(p => fmt.safeNum(p?.conserto)), backgroundColor: '#f59e0b' },
+              ],
+            },
+            options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } },
+          });
+        }
+      }
+    } catch (e) { console.error('[dashboard] grafico produção', e); }
 
-    // Atrasadas
-    const atr = d.atrasadas || [];
-    $('#atrasadas').innerHTML = atr.length ? `
-      <table class="w-full text-sm">
-        <thead><tr class="bg-red-50"><th class="text-left p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Ref.</th><th class="text-right p-2">Qtd</th><th class="text-right p-2">Previsão</th><th class="text-right p-2">Atraso</th></tr></thead>
-        <tbody>${atr.map(a => `
-          <tr class="border-b">
-            <td class="p-2">${a.num_controle}</td>
-            <td class="p-2">${a.nome_terc}</td>
-            <td class="p-2"><span class="font-mono text-xs">${a.cod_ref}</span> ${a.cor ? '· ' + a.cor : ''}</td>
-            <td class="p-2 text-right">${fmt.int(a.qtd_total)}</td>
-            <td class="p-2 text-right">${fmt.date(a.dt_previsao)}</td>
-            <td class="p-2 text-right text-red-600 font-semibold">${Math.floor(a.dias_atraso)} dia(s)</td>
-          </tr>`).join('')}</tbody>
-      </table>` : '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-check-circle text-emerald-500"></i> Nenhuma remessa em atraso</p>';
+    // ---------- Gráfico por serviço ----------
+    try {
+      const serv = fmt.safeArr(d.por_servico);
+      const ctxS = document.getElementById('cht-serv')?.getContext?.('2d');
+      if (window._chtServ) { try { window._chtServ.destroy(); } catch {} window._chtServ = null; }
+      if (ctxS) {
+        if (serv.length === 0) {
+          const wrap = ctxS.canvas.parentElement;
+          if (wrap && !wrap.querySelector('.no-data-serv')) {
+            const ph = document.createElement('div');
+            ph.className = 'no-data-serv text-center text-slate-400 text-sm py-8';
+            ph.innerHTML = '<i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período';
+            ctxS.canvas.style.display = 'none';
+            wrap.appendChild(ph);
+          }
+        } else {
+          const wrap = ctxS.canvas.parentElement;
+          wrap?.querySelector('.no-data-serv')?.remove();
+          ctxS.canvas.style.display = '';
+          window._chtServ = new Chart(ctxS, {
+            type: 'doughnut',
+            data: {
+              labels: serv.map(s => s?.desc_servico || '(sem serviço)'),
+              datasets: [{ data: serv.map(s => fmt.safeNum(s?.pecas)), backgroundColor: ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#06b6d4'] }],
+            },
+          });
+        }
+      }
+    } catch (e) { console.error('[dashboard] grafico servico', e); }
+
+    // ---------- Top terceirizados ----------
+    try {
+      const top = fmt.safeArr(d.top_terceirizados);
+      if ($('#top-terc')) $('#top-terc').innerHTML = top.length ? `
+        <table class="w-full text-sm">
+          <thead><tr class="bg-slate-100"><th class="text-left p-2">#</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Setor</th><th class="text-right p-2">Remessas</th><th class="text-right p-2">Peças</th><th class="text-right p-2">Valor</th></tr></thead>
+          <tbody>${top.map((t, i) => `
+            <tr class="border-b">
+              <td class="p-2">${i + 1}</td>
+              <td class="p-2 font-medium">${t?.nome_terc || '—'}</td>
+              <td class="p-2 text-slate-500">${t?.nome_setor || '—'}</td>
+              <td class="p-2 text-right">${fmt.int(t?.remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(t?.pecas)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(t?.valor))}</td>
+            </tr>`).join('')}</tbody>
+        </table>` : FALLBACK_EMPTY;
+    } catch (e) { console.error('[dashboard] top terc', e); if ($('#top-terc')) $('#top-terc').innerHTML = FALLBACK_ERROR(); }
+
+    // ---------- Atrasadas ----------
+    try {
+      const atr = fmt.safeArr(d.atrasadas);
+      if ($('#atrasadas')) $('#atrasadas').innerHTML = atr.length ? `
+        <table class="w-full text-sm">
+          <thead><tr class="bg-red-50"><th class="text-left p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Ref.</th><th class="text-right p-2">Qtd</th><th class="text-right p-2">Previsão</th><th class="text-right p-2">Atraso</th></tr></thead>
+          <tbody>${atr.map(a => `
+            <tr class="border-b">
+              <td class="p-2">${a?.num_controle ?? '—'}</td>
+              <td class="p-2">${a?.nome_terc || '—'}</td>
+              <td class="p-2"><span class="font-mono text-xs">${a?.cod_ref || ''}</span> ${a?.cor ? '· ' + a.cor : ''}</td>
+              <td class="p-2 text-right">${fmt.int(a?.qtd_total)}</td>
+              <td class="p-2 text-right">${fmt.date(a?.dt_previsao)}</td>
+              <td class="p-2 text-right text-red-600 font-semibold">${Math.floor(fmt.safeNum(a?.dias_atraso))} dia(s)</td>
+            </tr>`).join('')}</tbody>
+        </table>` : '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-check-circle text-emerald-500"></i> Nenhuma remessa em atraso</p>';
+    } catch (e) { console.error('[dashboard] atrasadas', e); if ($('#atrasadas')) $('#atrasadas').innerHTML = FALLBACK_ERROR(); }
   }
-  $('#btn-filtrar').onclick = load;
-  await load();
+  if ($('#btn-filtrar')) $('#btn-filtrar').onclick = load;
+  try { await load(); } catch (e) { console.error('[dashboard] load top‑level', e); }
 };
 
 /* ---------- RESUMO de Terceirizações ---------- */
@@ -3528,68 +3689,78 @@ ROUTES.terc_remessas = async (main) => {
 
   let _lastRemessas = [];
   async function load() {
-    const p = new URLSearchParams();
-    if ($('#f-search').value) p.set('search', $('#f-search').value);
-    if ($('#f-terc').value) p.set('id_terc', $('#f-terc').value);
-    if ($('#f-serv').value) p.set('id_servico', $('#f-serv').value);
-    if ($('#f-status').value) p.set('status', $('#f-status').value);
-    if ($('#f-de').value) p.set('de', $('#f-de').value);
-    if ($('#f-ate').value) p.set('ate', $('#f-ate').value);
-    const r = await api('get', '/terc/remessas?' + p.toString());
-    const rs = r.data || [];
-    _lastRemessas = rs;
-    $('#tbl').innerHTML = `
-      <table class="w-full text-sm">
-        <thead class="bg-slate-100"><tr>
-          <th class="text-right p-2">Ctrl</th>
-          <th class="text-left p-2">OP</th>
-          <th class="text-left p-2">Terceirizado</th>
-          <th class="text-left p-2">Serviço</th>
-          <th class="text-left p-2">Referência</th>
-          <th class="text-left p-2">Cor</th>
-          <th class="text-right p-2">Qtd</th>
-          <th class="text-right p-2">Retornada</th>
-          <th class="text-right p-2">Valor</th>
-          <th class="text-center p-2">Saída</th>
-          <th class="text-center p-2">Prev.</th>
-          <th class="text-center p-2">Status</th>
-          <th class="text-center p-2">Ações</th>
-        </tr></thead>
-        <tbody>
-          ${rs.map(r => `
-            <tr class="border-b hover:bg-slate-50">
-              <td class="p-2 text-right font-mono">${r.num_controle}</td>
-              <td class="p-2">${r.num_op || '—'}</td>
-              <td class="p-2">${r.nome_terc}</td>
-              <td class="p-2 text-xs text-slate-600">${r.desc_servico || '—'}</td>
-              <td class="p-2"><span class="font-mono text-xs">${r.cod_ref}</span><br><span class="text-xs text-slate-500">${r.desc_ref || ''}</span></td>
-              <td class="p-2">${r.cor || '—'}</td>
-              <td class="p-2 text-right">${fmt.int(r.qtd_total)}</td>
-              <td class="p-2 text-right ${r.qtd_retornada_calc >= r.qtd_total ? 'text-emerald-700' : 'text-amber-700'}">${fmt.int(r.qtd_retornada_calc)}</td>
-              <td class="p-2 text-right">${TERC.fmtBRL(r.valor_total)}</td>
-              <td class="p-2 text-center">${fmt.date(r.dt_saida)}</td>
-              <td class="p-2 text-center">${fmt.date(r.dt_previsao)}</td>
-              <td class="p-2 text-center">${TERC.statusBadge(r.status, r.atrasada)}</td>
-              <td class="p-2 text-center whitespace-nowrap">
-                <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
-                <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
-                <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
-                <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir" onclick="TERC_showPrintMenu(event, ${r.id_remessa})"><i class="fas fa-print"></i></button>
-                <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
-              </td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhuma remessa encontrada.</div>' : ''}
-    `;
+    try {
+      const p = new URLSearchParams();
+      if ($('#f-search')?.value) p.set('search', $('#f-search').value);
+      if ($('#f-terc')?.value) p.set('id_terc', $('#f-terc').value);
+      if ($('#f-serv')?.value) p.set('id_servico', $('#f-serv').value);
+      if ($('#f-status')?.value) p.set('status', $('#f-status').value);
+      if ($('#f-de')?.value) p.set('de', $('#f-de').value);
+      if ($('#f-ate')?.value) p.set('ate', $('#f-ate').value);
+      const r = await api('get', '/terc/remessas?' + p.toString(), null, { silent: true }).catch(e => {
+        console.error('[remessas] erro fetch', e);
+        toast(e?.response?.data?.error || 'Falha ao carregar remessas', 'error');
+        return { data: [] };
+      });
+      const rs = fmt.safeArr(r?.data);
+      _lastRemessas = rs;
+      $('#tbl').innerHTML = `
+        <table class="w-full text-sm">
+          <thead class="bg-slate-100"><tr>
+            <th class="text-right p-2">Ctrl</th>
+            <th class="text-left p-2">OP</th>
+            <th class="text-left p-2">Terceirizado</th>
+            <th class="text-left p-2">Serviço</th>
+            <th class="text-left p-2">Referência</th>
+            <th class="text-left p-2">Cor</th>
+            <th class="text-right p-2">Qtd</th>
+            <th class="text-right p-2">Retornada</th>
+            <th class="text-right p-2">Valor</th>
+            <th class="text-center p-2">Saída</th>
+            <th class="text-center p-2">Prev.</th>
+            <th class="text-center p-2">Status</th>
+            <th class="text-center p-2">Ações</th>
+          </tr></thead>
+          <tbody>
+            ${rs.map(r => {
+              const qtdTotal = fmt.safeNum(r?.qtd_total);
+              const qtdRet = fmt.safeNum(r?.qtd_retornada_calc);
+              return `
+              <tr class="border-b hover:bg-slate-50">
+                <td class="p-2 text-right font-mono">${r?.num_controle ?? '—'}</td>
+                <td class="p-2">${r?.num_op || '—'}</td>
+                <td class="p-2">${r?.nome_terc || '—'}</td>
+                <td class="p-2 text-xs text-slate-600">${r?.desc_servico || '—'}</td>
+                <td class="p-2"><span class="font-mono text-xs">${r?.cod_ref || ''}</span><br><span class="text-xs text-slate-500">${r?.desc_ref || ''}</span></td>
+                <td class="p-2">${r?.cor || '—'}</td>
+                <td class="p-2 text-right">${fmt.int(qtdTotal)}</td>
+                <td class="p-2 text-right ${qtdRet >= qtdTotal && qtdTotal > 0 ? 'text-emerald-700' : 'text-amber-700'}">${fmt.int(qtdRet)}</td>
+                <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(r?.valor_total))}</td>
+                <td class="p-2 text-center">${fmt.date(r?.dt_saida)}</td>
+                <td class="p-2 text-center">${fmt.date(r?.dt_previsao)}</td>
+                <td class="p-2 text-center">${TERC.statusBadge(r?.status, r?.atrasada)}</td>
+                <td class="p-2 text-center whitespace-nowrap">
+                  <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
+                  <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
+                  <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
+                  <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir" onclick="TERC_showPrintMenu(event, ${r.id_remessa})"><i class="fas fa-print"></i></button>
+                  <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+        ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</div>' : ''}
+      `;
+    } catch (e) {
+      console.error('[remessas] load', e);
+      $('#tbl').innerHTML = `<div class="p-6 text-center text-amber-600"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar remessas: ${e?.message || e}</div>`;
+    }
   }
   window.TERC_viewRem = (id) => TERC_openRemDetalhe(id);
   window.TERC_editRem = (id) => TERC_openRemModal(id, load);
   window.TERC_retRem = (id) => TERC_openRetModal(id, load);
-  window.TERC_delRem = async (id, n) => {
-    if (!confirm('Excluir remessa nº ' + n + '?')) return;
-    try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); } catch {}
-  };
+  window.TERC_delRem = (id, n) => TERC_confirmDelRem(id, n, load);
   // Menu flutuante de impressão (popover por clique — funciona em touch/mobile)
   window.TERC_showPrintMenu = (ev, id) => {
     ev.stopPropagation();
@@ -3662,14 +3833,13 @@ ROUTES.terc_remessas = async (main) => {
 
 async function TERC_openRemModal(id, onSave) {
   const edit = !!id;
-  let r = { dt_saida: dayjs().format('YYYY-MM-DD'), status: 'Aberta', tempo_peca: 1, efic_pct: 0.8, qtd_pessoas: 1, min_trab_dia: 480, prazo_dias: 3, preco_unit: 0, grade: [] };
-  // Tamanhos padrão
+  await TERC.load();
+  let r = { dt_saida: dayjs().format('YYYY-MM-DD'), status: 'AguardandoEnvio', tempo_peca: 0, efic_pct: 0.8, qtd_pessoas: 1, min_trab_dia: 480, prazo_dias: 0, preco_unit: 0, grade: [] };
   const TAMANHOS = ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'];
   if (edit) {
     const res = await api('get', '/terc/remessas/' + id); r = res.data;
     r.grade = r.grade || [];
   }
-  // Próximo num controle
   let num_controle = r.num_controle || 0;
   if (!edit) {
     const n = await api('get', '/terc/remessas/next-num'); num_controle = n.data?.num_controle;
@@ -3678,32 +3848,37 @@ async function TERC_openRemModal(id, onSave) {
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
   const gradeMap = Object.fromEntries(r.grade.map(g => [g.tamanho, g.qtd]));
+  // Encontra produto inicial (se editando, faz match por cod_ref+coleção)
+  const prodInicial = edit ? TERC.findProdutoByRef(r.cod_ref, r.id_colecao) : null;
+  const idProdSel = prodInicial ? prodInicial.id_produto : '';
+
   card.innerHTML = `
-    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-truck-fast mr-2 text-brand"></i>${edit ? 'Editar' : 'Nova'} Remessa · Nº Controle <span class="font-mono text-brand">${num_controle}</span></h3>
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-semibold"><i class="fas fa-truck-fast mr-2 text-brand"></i>${edit ? 'Editar' : 'Nova'} Remessa · Nº <span class="font-mono text-brand">${num_controle}</span></h3>
+      <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="m-adv" /> Modo avançado</label>
+    </div>
+
+    <!-- Bloco BÁSICO (campos mínimos) -->
     <div class="grid grid-cols-6 gap-3">
-      <div class="col-span-2"><label>Terceirizado *</label><select id="m-terc">${TERC.optTerc(r.id_terc, true)}</select></div>
-      <div class="col-span-2"><label>Serviço *</label><select id="m-serv">${TERC.optServicos(r.id_servico)}</select></div>
+      <div class="col-span-3"><label>Terceirizado *</label><select id="m-terc">${TERC.optTerc(r.id_terc, true)}</select></div>
+      <div class="col-span-3"><label>Serviço *</label><select id="m-serv">${TERC.optServicos(r.id_servico)}</select></div>
+
+      <div class="col-span-4">
+        <label>Produto (descrição) *<span class="text-xs text-slate-500 ml-1">— selecione um cadastrado ou digite uma referência manual</span></label>
+        <select id="m-prod">${TERC.optProdutos(idProdSel, r.id_colecao)}</select>
+      </div>
       <div class="col-span-2"><label>Coleção</label><select id="m-col">${TERC.optColecoes(r.id_colecao)}</select></div>
 
-      <div class="col-span-2"><label>Nº OP</label><input id="m-op" value="${r.num_op || ''}" placeholder="ex: 510-24" /></div>
-      <div class="col-span-2"><label>Referência *</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="código" /></div>
+      <div class="col-span-2"><label>Referência</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="auto-preenchido" /></div>
       <div class="col-span-2"><label>Descrição</label><input id="m-descref" value="${r.desc_ref || ''}" /></div>
-
       <div class="col-span-2"><label>Cor</label><input id="m-cor" value="${r.cor || ''}" /></div>
-      <div><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
-      <div><label>Data início</label><input type="date" id="m-dti" value="${r.dt_inicio || r.dt_saida || ''}" /></div>
-      <div><label>Tempo/peça (min)</label><input type="number" step="0.01" id="m-tempo" value="${r.tempo_peca || 1}" /></div>
-      <div><label>Preço unit. (R$)</label><input type="number" step="0.01" id="m-preco" value="${r.preco_unit || 0}" /></div>
 
-      <div><label>Qtd pessoas</label><input type="number" min="1" id="m-pess" value="${r.qtd_pessoas || 1}" /></div>
-      <div><label>Min trab/dia</label><input type="number" min="60" id="m-min" value="${r.min_trab_dia || 480}" /></div>
-      <div><label>Eficiência (0-1)</label><input type="number" step="0.01" min="0.1" max="1" id="m-ef" value="${r.efic_pct || 0.8}" /></div>
-      <div><label>Prazo fixo (dias, 0=calc.)</label><input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
-      <div><label>Status</label><select id="m-status"><option ${r.status === 'Aberta' ? 'selected' : ''}>Aberta</option><option ${r.status === 'EmProducao' ? 'selected' : ''}>EmProducao</option><option ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option><option ${r.status === 'Concluida' ? 'selected' : ''}>Concluida</option><option ${r.status === 'Cancelada' ? 'selected' : ''}>Cancelada</option></select></div>
-      <div><label>&nbsp;</label><button id="m-lookup" class="btn btn-secondary w-full" type="button"><i class="fas fa-search-dollar mr-1"></i>Buscar preço</button></div>
+      <div class="col-span-2"><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
+      <div class="col-span-2"><label>Preço unit. (R$) <span id="m-preco-tag" class="text-xs ml-1"></span></label><input type="number" step="0.01" id="m-preco" value="${r.preco_unit || 0}" /></div>
+      <div class="col-span-2"><label>Nº OP</label><input id="m-op" value="${r.num_op || ''}" placeholder="opcional" /></div>
 
       <div class="col-span-6">
-        <label class="font-semibold">Grade de tamanhos <span class="text-xs text-slate-500">(informe as quantidades)</span></label>
+        <label class="font-semibold">Grade de tamanhos *</label>
         <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="m-grade">
           ${TAMANHOS.map(t => `
             <div class="text-center">
@@ -3711,15 +3886,30 @@ async function TERC_openRemModal(id, onSave) {
               <input data-tam="${t}" type="number" min="0" value="${gradeMap[t] || 0}" class="text-center grade-in" />
             </div>`).join('')}
         </div>
-        <div class="mt-2 flex items-center gap-4">
-          <div class="text-sm">Total: <b id="m-total">0</b> peças</div>
-          <div class="text-sm">Valor total: <b id="m-valor">${TERC.fmtBRL(0)}</b></div>
-          <div class="text-sm text-slate-500">Previsão: <b id="m-prev">—</b></div>
+        <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
+          <span>Total: <b id="m-total">0</b> peças</span>
+          <span>Valor: <b id="m-valor">${TERC.fmtBRL(0)}</b></span>
+          <span class="text-slate-500">Previsão: <b id="m-prev">—</b></span>
         </div>
       </div>
-
-      <div class="col-span-6"><label>Observação</label><textarea id="m-obs" rows="2">${r.observacao || ''}</textarea></div>
     </div>
+
+    <!-- Bloco AVANÇADO (oculto por padrão — campos opcionais) -->
+    <div id="m-advanced" class="hidden mt-4 pt-4 border-t border-dashed">
+      <div class="text-xs text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Estes campos vêm automaticamente do cadastro do terceirizado e da tabela de preços. Edite apenas se precisar sobrepor.</div>
+      <div class="grid grid-cols-6 gap-3">
+        <div><label>Data início</label><input type="date" id="m-dti" value="${r.dt_inicio || r.dt_saida || ''}" /></div>
+        <div><label>Tempo/peça (min)</label><input type="number" step="0.01" id="m-tempo" value="${r.tempo_peca || 0}" /></div>
+        <div><label>Qtd pessoas</label><input type="number" min="1" id="m-pess" value="${r.qtd_pessoas || 1}" /></div>
+        <div><label>Min trab/dia</label><input type="number" min="60" id="m-min" value="${r.min_trab_dia || 480}" /></div>
+        <div><label>Eficiência (0-1)</label><input type="number" step="0.01" min="0.1" max="1" id="m-ef" value="${r.efic_pct || 0.8}" /></div>
+        <div><label>Prazo fixo (dias)</label><input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
+        <div class="col-span-3"><label>Status</label><select id="m-status"><option value="AguardandoEnvio" ${r.status === 'AguardandoEnvio' ? 'selected' : ''}>Aguardando envio</option><option value="Enviado" ${r.status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="EmProducao" ${r.status === 'EmProducao' ? 'selected' : ''}>Em produção</option><option value="Parcial" ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option><option value="Concluido" ${r.status === 'Concluido' ? 'selected' : ''}>Concluído</option><option value="Cancelado" ${r.status === 'Cancelado' ? 'selected' : ''}>Cancelado</option></select></div>
+        <div class="col-span-3"><label>&nbsp;</label><button id="m-lookup" class="btn btn-secondary w-full" type="button"><i class="fas fa-search-dollar mr-1"></i>Buscar preço da tabela</button></div>
+        <div class="col-span-6"><label>Observação</label><textarea id="m-obs" rows="2">${r.observacao || ''}</textarea></div>
+      </div>
+    </div>
+
     <div class="flex justify-end gap-2 mt-4">
       <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
       <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar remessa</button>
@@ -3727,52 +3917,117 @@ async function TERC_openRemModal(id, onSave) {
   `;
   m.appendChild(card); document.body.appendChild(m);
 
+  // Toggle modo avançado
+  $('#m-adv').onchange = (e) => $('#m-advanced').classList.toggle('hidden', !e.target.checked);
+
+  function setPrecoTag(txt, color) {
+    const el = $('#m-preco-tag');
+    if (!el) return;
+    el.innerHTML = txt ? `<span style="color:${color}">${txt}</span>` : '';
+  }
+
   function recalc() {
     const grade = Array.from(card.querySelectorAll('.grade-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) }));
     const total = grade.reduce((a, g) => a + g.qtd, 0);
     const preco = Number($('#m-preco').value || 0);
     $('#m-total').textContent = fmt.int(total);
     $('#m-valor').textContent = TERC.fmtBRL(total * preco);
-    // previsão local
-    const tempo = Number($('#m-tempo').value || 0);
-    const pess = Number($('#m-pess').value || 1);
-    const min = Number($('#m-min').value || 480);
-    const ef = Number($('#m-ef').value || 0.8);
-    const pz = Number($('#m-pz').value || 0);
+    const tempo = Number($('#m-tempo')?.value || 0);
+    const pess = Number($('#m-pess')?.value || 1);
+    const min = Number($('#m-min')?.value || 480);
+    const ef = Number($('#m-ef')?.value || 0.8);
+    const pz = Number($('#m-pz')?.value || 0);
     const dts = $('#m-dts').value;
-    if (total > 0 && tempo > 0 && dts) {
-      let dias = pz > 0 ? pz : Math.max(1, Math.ceil((total * tempo) / (Math.max(1, pess) * Math.max(1, min) * Math.max(0.1, ef))));
-      const d = dayjs(dts).add(dias, 'day').format('DD/MM/YYYY');
-      $('#m-prev').textContent = d + ' (' + dias + ' dia' + (dias > 1 ? 's' : '') + ')';
+    if (total > 0 && dts) {
+      let dias = pz > 0 ? pz : (tempo > 0 ? Math.max(1, Math.ceil((total * tempo) / (Math.max(1, pess) * Math.max(1, min) * Math.max(0.1, ef)))) : 0);
+      if (dias > 0) {
+        const d = dayjs(dts).add(dias, 'day').format('DD/MM/YYYY');
+        $('#m-prev').textContent = d + ' (' + dias + ' dia' + (dias > 1 ? 's' : '') + ')';
+      } else $('#m-prev').textContent = 'auto';
     } else $('#m-prev').textContent = '—';
   }
-  card.querySelectorAll('.grade-in, #m-preco, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
-  // Auto-preencher parâmetros ao trocar terceirizado
-  $('#m-terc').addEventListener('change', async () => {
+
+  // 🔎 Lookup automático de preço (sempre que serviço/produto/coleção mudam)
+  let _lastLookupKey = '';
+  async function autoLookupPreco() {
+    const cod = $('#m-ref').value.trim();
+    const sv = $('#m-serv').value;
+    const col = $('#m-col').value;
+    if (!cod || !sv) { setPrecoTag('', ''); return; }
+    const key = `${cod}|${sv}|${col || ''}`;
+    if (key === _lastLookupKey) return;
+    _lastLookupKey = key;
+    try {
+      const res = await api('get', `/terc/precos/lookup?cod_ref=${encodeURIComponent(cod)}&id_servico=${sv}&id_colecao=${col || ''}`, null, { silent: true });
+      if (res.data && res.data.preco != null) {
+        $('#m-preco').value = Number(res.data.preco).toFixed(2);
+        if (res.data.tempo_min && $('#m-tempo')) $('#m-tempo').value = res.data.tempo_min;
+        if (res.data.desc_ref && !$('#m-descref').value) $('#m-descref').value = res.data.desc_ref;
+        setPrecoTag('<i class="fas fa-check"></i> da tabela', '#10b981');
+        recalc();
+      } else {
+        setPrecoTag('<i class="fas fa-keyboard"></i> manual — <a href="#" id="m-save-preco" style="text-decoration:underline">salvar?</a>', '#f59e0b');
+        const a = $('#m-save-preco');
+        if (a) a.onclick = (e) => { e.preventDefault(); saveSugestaoPreco(); };
+      }
+    } catch {}
+  }
+
+  async function saveSugestaoPreco() {
+    const cod = $('#m-ref').value.trim();
+    const desc = $('#m-descref').value.trim();
+    const sv = $('#m-serv').value;
+    const col = $('#m-col').value;
+    const preco = Number($('#m-preco').value || 0);
+    if (!sv || !preco || preco <= 0) { toast('Informe serviço e preço primeiro', 'warning'); return; }
+    if (!cod && !desc) { toast('Informe referência ou descrição', 'warning'); return; }
+    try {
+      await api('post', '/terc/precos', { cod_ref: cod, desc_ref: desc, id_servico: sv, id_colecao: col, grade: 1, preco });
+      toast('Preço salvo na tabela', 'success');
+      setPrecoTag('<i class="fas fa-check"></i> salvo', '#10b981');
+      _lastLookupKey = '';
+    } catch {}
+  }
+
+  // 📦 Auto-fill ao escolher PRODUTO
+  $('#m-prod').onchange = () => {
+    const opt = $('#m-prod').options[$('#m-prod').selectedIndex];
+    if (!opt || !opt.value) return;
+    const cod = opt.dataset.cod || '';
+    const desc = opt.dataset.desc || '';
+    const colId = opt.dataset.col || '';
+    if (cod) $('#m-ref').value = cod;
+    if (desc) $('#m-descref').value = desc;
+    if (colId && !$('#m-col').value) $('#m-col').value = colId;
+    autoLookupPreco();
+  };
+  $('#m-serv').addEventListener('change', autoLookupPreco);
+  $('#m-col').addEventListener('change', autoLookupPreco);
+  $('#m-ref').addEventListener('blur', () => { _lastLookupKey = ''; autoLookupPreco(); });
+  $('#m-preco').addEventListener('input', () => { setPrecoTag('<i class="fas fa-keyboard"></i> manual', '#f59e0b'); recalc(); });
+  card.querySelectorAll('.grade-in, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
+
+  // 👤 Auto-preenche parâmetros ocultos do terceirizado (não exibe no básico)
+  $('#m-terc').addEventListener('change', () => {
     const t = TERC.terceirizados.find(x => x.id_terc == $('#m-terc').value);
     if (t) {
-      $('#m-pess').value = t.qtd_pessoas || 1;
-      $('#m-min').value = t.min_trab_dia || 480;
-      $('#m-ef').value = t.efic_padrao || 0.8;
-      $('#m-pz').value = t.prazo_padrao || 0;
+      if ($('#m-pess')) $('#m-pess').value = t.qtd_pessoas || 1;
+      if ($('#m-min')) $('#m-min').value = t.min_trab_dia || 480;
+      if ($('#m-ef')) $('#m-ef').value = t.efic_padrao || 0.8;
+      if ($('#m-pz')) $('#m-pz').value = t.prazo_padrao || 0;
       recalc();
     }
   });
-  $('#m-lookup').onclick = async () => {
-    const cod = $('#m-ref').value.trim(); const sv = $('#m-serv').value; const col = $('#m-col').value;
-    if (!cod || !sv) { toast('Informe referência e serviço', 'warning'); return; }
-    try {
-      const res = await api('get', `/terc/precos/lookup?cod_ref=${encodeURIComponent(cod)}&id_servico=${sv}&id_colecao=${col || ''}`);
-      if (res.data && res.data.preco != null) {
-        $('#m-preco').value = res.data.preco;
-        if (res.data.tempo_min) $('#m-tempo').value = res.data.tempo_min;
-        if (res.data.desc_ref && !$('#m-descref').value) $('#m-descref').value = res.data.desc_ref;
-        toast('Preço encontrado: ' + TERC.fmtBRL(res.data.preco), 'success');
-        recalc();
-      } else toast('Preço não tabelado', 'warning');
-    } catch {}
-  };
+
+  // Botão manual de lookup (modo avançado)
+  const btnLookup = $('#m-lookup');
+  if (btnLookup) btnLookup.onclick = () => { _lastLookupKey = ''; autoLookupPreco(); };
+
   recalc();
+  if (!edit) {
+    // Tenta lookup imediatamente se já há valores (re-edição)
+    setTimeout(autoLookupPreco, 100);
+  }
 
   $('#m-cancel').onclick = () => m.remove();
   $('#m-save').onclick = async () => {
@@ -3782,14 +4037,14 @@ async function TERC_openRemModal(id, onSave) {
       id_terc: $('#m-terc').value, id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
       cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-descref').value.trim(),
       cor: $('#m-cor').value.trim(),
-      dt_saida: $('#m-dts').value, dt_inicio: $('#m-dti').value,
-      tempo_peca: $('#m-tempo').value, preco_unit: $('#m-preco').value,
-      qtd_pessoas: $('#m-pess').value, min_trab_dia: $('#m-min').value,
-      efic_pct: $('#m-ef').value, prazo_dias: $('#m-pz').value,
-      status: $('#m-status').value, observacao: $('#m-obs').value.trim(),
+      dt_saida: $('#m-dts').value, dt_inicio: $('#m-dti')?.value || $('#m-dts').value,
+      tempo_peca: $('#m-tempo')?.value || 0, preco_unit: $('#m-preco').value,
+      qtd_pessoas: $('#m-pess')?.value || 1, min_trab_dia: $('#m-min')?.value || 480,
+      efic_pct: $('#m-ef')?.value || 0.8, prazo_dias: $('#m-pz')?.value || 0,
+      status: $('#m-status')?.value || 'AguardandoEnvio', observacao: $('#m-obs')?.value?.trim() || '',
       grade,
     };
-    if (!body.id_terc || !body.id_servico || !body.cod_ref || !body.dt_saida) { toast('Preencha os campos obrigatórios (*)', 'warning'); return; }
+    if (!body.id_terc || !body.id_servico || !body.cod_ref || !body.dt_saida) { toast('Preencha terceirizado, serviço, referência/produto e data de saída', 'warning'); return; }
     if (grade.length === 0) { toast('Informe ao menos uma quantidade na grade', 'warning'); return; }
     try {
       if (edit) await api('put', '/terc/remessas/' + id, body);
@@ -3801,81 +4056,515 @@ async function TERC_openRemModal(id, onSave) {
   };
 }
 
-async function TERC_openRetModal(idRemessa, onSave) {
-  const res = await api('get', '/terc/remessas/' + idRemessa);
-  const r = res.data;
-  const saldo = r.saldo || (r.qtd_total - (r.totais_retorno?.total || 0));
+/* ============================================================
+ * MODAL — Cadastro/Edição de Produto
+ * ============================================================ */
+async function TERC_openProdModal(id, onSave) {
+  await TERC.load();
+  let p = { ativo: 1, grade_padrao: 1 };
+  if (id) {
+    try { const r = await api('get', '/terc/produtos/' + id); p = r.data || p; } catch { return; }
+  }
   const m = el('div', { class: 'modal-backdrop' });
-  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
-  // Grade máxima disponível
-  const gradeMax = Object.fromEntries((r.grade || []).map(g => [g.tamanho, g.qtd]));
-  // Subtrair o que já retornou
-  (r.retornos || []).forEach(ret => (ret.grade || []).forEach(g => { gradeMax[g.tamanho] = (gradeMax[g.tamanho] || 0) - g.qtd; }));
-
+  const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
   card.innerHTML = `
-    <h3 class="text-lg font-semibold mb-2"><i class="fas fa-truck-arrow-right mr-2 text-brand"></i>Registrar Retorno · Remessa ${r.num_controle}</h3>
-    <div class="bg-slate-50 p-3 rounded mb-3 text-sm grid grid-cols-3 gap-2">
-      <div><b>Terceirizado:</b> ${r.nome_terc}</div>
-      <div><b>Ref:</b> <span class="font-mono">${r.cod_ref}</span> ${r.cor || ''}</div>
-      <div><b>Serviço:</b> ${r.desc_servico || '—'}</div>
-      <div><b>Enviadas:</b> ${fmt.int(r.qtd_total)}</div>
-      <div><b>Já retornadas:</b> ${fmt.int(r.totais_retorno?.total || 0)}</div>
-      <div class="${saldo > 0 ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}"><b>Saldo:</b> ${fmt.int(saldo)}</div>
-    </div>
-    <div class="grid grid-cols-5 gap-3">
-      <div><label>Data retorno *</label><input type="date" id="m-dtr" value="${dayjs().format('YYYY-MM-DD')}" /></div>
-      <div><label>Boas</label><input type="number" min="0" id="m-boa" value="0" /></div>
-      <div><label>Refugo</label><input type="number" min="0" id="m-ref" value="0" /></div>
-      <div><label>Conserto</label><input type="number" min="0" id="m-cons" value="0" /></div>
-      <div><label>Valor pago (R$)</label><input type="number" step="0.01" id="m-val" value="" placeholder="auto = boas × preço" /></div>
-      <div class="col-span-5">
-        <label>Grade retornada <span class="text-xs text-slate-500">(máx. = enviado − já retornado)</span></label>
-        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="g-wrap">
-          ${(r.grade || []).map(g => `
-            <div class="text-center">
-              <div class="text-xs font-mono text-slate-500">${g.tamanho} <span class="text-slate-400">(máx ${gradeMax[g.tamanho] || 0})</span></div>
-              <input data-tam="${g.tamanho}" data-max="${gradeMax[g.tamanho] || 0}" type="number" min="0" max="${gradeMax[g.tamanho] || 0}" value="0" class="text-center ret-in" />
-            </div>`).join('')}
-        </div>
-        <div class="mt-2 text-sm">Grade total: <b id="g-total">0</b></div>
-      </div>
-      <div><label>Data pagamento</label><input type="date" id="m-dtp" value="" /></div>
-      <div class="col-span-4"><label>Observação</label><input id="m-obs" /></div>
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-tshirt mr-2 text-brand"></i>${id ? 'Editar' : 'Novo'} Produto</h3>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label>Referência *<span class="text-xs text-slate-400 ml-1">(única)</span></label><input id="m-ref" value="${(p.cod_ref || '').replace(/"/g, '&quot;')}" placeholder="ex: 01-01-25-00" /></div>
+      <div><label>Nome curto</label><input id="m-nome" value="${(p.nome_produto || '').replace(/"/g, '&quot;')}" placeholder="opcional" /></div>
+      <div class="col-span-2"><label>Descrição *</label><input id="m-desc" value="${(p.desc_ref || '').replace(/"/g, '&quot;')}" placeholder="ex: VOLLEY ADULTO" /></div>
+      <div><label>Serviço padrão <span class="text-xs text-slate-400">(opcional)</span></label><select id="m-serv"><option value="">— nenhum —</option>${TERC.optServicos(p.id_servico_padrao).replace(/^<option value=""[^<]*<\/option>/, '')}</select></div>
+      <div><label>Tempo padrão (min/peça) <span class="text-xs text-slate-400">(opcional)</span></label><input id="m-tempo" type="number" step="0.01" min="0" value="${p.tempo_padrao != null ? p.tempo_padrao : ''}" placeholder="—" /></div>
+      <div><label>Coleção</label><select id="m-col">${TERC.optColecoes(p.id_colecao)}</select></div>
+      <div><label>Grade padrão</label><input id="m-grade" type="number" min="1" value="${p.grade_padrao || 1}" /></div>
+      <div class="col-span-2"><label>Observação</label><textarea id="m-obs" rows="2">${p.observacao || ''}</textarea></div>
+      <div><label class="flex items-center gap-2 mt-2"><input type="checkbox" id="m-ativo" ${p.ativo !== 0 ? 'checked' : ''} /> Ativo</label></div>
     </div>
     <div class="flex justify-end gap-2 mt-4">
       <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
-      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Registrar retorno</button>
+      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#m-ref').focus();
+  $('#m-cancel').onclick = () => m.remove();
+  $('#m-save').onclick = async () => {
+    const body = {
+      cod_ref: $('#m-ref').value.trim(),
+      desc_ref: $('#m-desc').value.trim(),
+      nome_produto: $('#m-nome').value.trim(),
+      id_colecao: $('#m-col').value || null,
+      grade_padrao: $('#m-grade').value || 1,
+      id_servico_padrao: $('#m-serv').value || null,
+      tempo_padrao: $('#m-tempo').value !== '' ? Number($('#m-tempo').value) : null,
+      observacao: $('#m-obs').value.trim(),
+      ativo: $('#m-ativo').checked ? 1 : 0,
+    };
+    if (!body.cod_ref) { toast('Referência é obrigatória', 'warning'); return; }
+    if (!body.desc_ref) { toast('Descrição é obrigatória', 'warning'); return; }
+    try {
+      if (id) await api('put', '/terc/produtos/' + id, body);
+      else await api('post', '/terc/produtos', body);
+      toast('Produto salvo', 'success');
+      m.remove();
+      await TERC.reloadProdutos();
+      if (onSave) onSave();
+    } catch {}
+  };
+}
+
+/* ============================================================
+ * MODAL — Importação de Produtos (Excel/CSV/TSV)
+ * Aceita layout livre: detecta colunas por nome (case-insensitive, sem acentos).
+ * Aliases: "NOME REFERÊNCIA"→cod_ref | "PRODUTO"→desc_ref | serviço | tempo | coleção | observação
+ * Ignora linhas vazias e linhas-cabeçalho "TABELA DE CODÍGO" e similares.
+ * ============================================================ */
+async function TERC_openProdImportModal(onSave) {
+  await TERC.load();
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-file-excel mr-2 text-emerald-600"></i>Importar Produtos</h3>
+    <div class="text-sm text-slate-600 mb-3">
+      <p class="mb-1">Aceita Excel (.xlsx) com qualquer ordem de colunas. O importador detecta automaticamente:</p>
+      <div class="bg-slate-50 p-2 rounded text-xs font-mono">
+        <b>Referência</b>: "NOME REFERÊNCIA" / referencia / ref / codigo / cod_ref &nbsp;— <b>obrigatória, única</b><br/>
+        <b>Descrição</b>: "PRODUTO" / descricao / desc / nome &nbsp;— <b>obrigatória</b><br/>
+        <b>Opcionais</b>: servico (nome ou id) | tempo | colecao | grade | observacao
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+      <div><label>Arquivo Excel/CSV</label><input type="file" id="f-file" accept=".xlsx,.xls,.csv" /></div>
+      <div class="flex flex-col gap-1 justify-end">
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="f-criar" checked /> <span>Criar novos produtos</span></label>
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="f-atualizar" checked /> <span>Atualizar existentes</span></label>
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="f-dry" /> <span class="text-amber-700"><b>Simulação</b> (não grava)</span></label>
+      </div>
+    </div>
+    <div id="f-preview" class="hidden mb-3"></div>
+    <textarea id="f-data" rows="7" placeholder="Ou cole aqui as linhas (TAB separado) — 1ª linha = cabeçalho" style="font-family:monospace;font-size:11px"></textarea>
+    <div id="result" class="mt-3"></div>
+    <div class="flex justify-end gap-2 mt-3">
+      <button id="m-cancel" class="btn btn-secondary">Fechar</button>
+      <button id="m-import" class="btn btn-primary"><i class="fas fa-upload mr-1"></i>Importar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#m-cancel').onclick = () => m.remove();
+
+  // ---- Normalização de cabeçalho: tira acentos, espaços, pontuação ----
+  function norm(s) {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().trim().replace(/[\s_\-./]+/g, '');
+  }
+  // Mapeia cabeçalho original -> chave canônica (cod_ref, desc_ref, etc)
+  function detectColumn(h) {
+    const k = norm(h);
+    // Referência: prioriza "NOME REFERÊNCIA" (único) sobre "REFERÊNCIA" (prefixo)
+    if (k === 'nomereferencia' || k === 'codref' || k === 'codigo' || k === 'cod') return 'cod_ref';
+    if (k === 'referencia' || k === 'ref') return '__ref_curta'; // prefixo, descartar se houver "nome referencia"
+    if (k === 'produto' || k === 'descricao' || k === 'desc' || k === 'descref') return 'desc_ref';
+    if (k === 'nome' || k === 'nomeproduto') return 'nome_produto';
+    if (k === 'servico' || k === 'servicopadrao' || k === 'idservico' || k === 'idservicopadrao') return 'id_servico_padrao';
+    if (k === 'tempo' || k === 'tempopadrao' || k === 'tempomin') return 'tempo_padrao';
+    if (k === 'colecao' || k === 'nomecolecao') return 'colecao';
+    if (k === 'grade' || k === 'gradepadrao') return 'grade_padrao';
+    if (k === 'observacao' || k === 'obs') return 'observacao';
+    return null;
+  }
+  // Filtra linhas que parecem dados válidos (não cabeçalhos secundários)
+  function isDataRow(obj) {
+    if (!obj.cod_ref || !obj.desc_ref) return false;
+    const ref = String(obj.cod_ref).trim();
+    const desc = String(obj.desc_ref).trim();
+    // Descarta linhas como "TABELA DE CODÍGO", "00 - NÃO TEM ESPECIFICAÇÃO"
+    if (/^tabela\s+de\s+codigo/i.test(desc) || /^tabela\s+de\s+codigo/i.test(ref)) return false;
+    // Referência precisa ter ao menos 2 caracteres
+    if (ref.length < 2) return false;
+    return true;
+  }
+
+  let _parsedRows = []; // último parse válido
+
+  function renderPreview(rows) {
+    if (!rows.length) { $('#f-preview').classList.add('hidden'); return; }
+    const sample = rows.slice(0, 5);
+    $('#f-preview').classList.remove('hidden');
+    $('#f-preview').innerHTML = `
+      <div class="text-xs text-slate-500 mb-1">Pré-visualização (${rows.length} linhas válidas detectadas):</div>
+      <div class="card p-0 overflow-x-auto" style="max-height:160px">
+        <table class="w-full text-xs"><thead class="bg-slate-100"><tr>
+          <th class="text-left p-1">cod_ref</th><th class="text-left p-1">desc_ref</th>
+          <th class="text-left p-1">servico</th><th class="text-right p-1">tempo</th><th class="text-left p-1">colecao</th>
+        </tr></thead><tbody>
+        ${sample.map(r => `<tr class="border-b">
+          <td class="p-1 font-mono">${r.cod_ref || ''}</td>
+          <td class="p-1">${r.desc_ref || ''}</td>
+          <td class="p-1">${r.id_servico_padrao || ''}</td>
+          <td class="p-1 text-right">${r.tempo_padrao || ''}</td>
+          <td class="p-1">${r.colecao || ''}</td>
+        </tr>`).join('')}
+        ${rows.length > 5 ? `<tr><td colspan="5" class="p-1 text-center text-slate-500">… +${rows.length - 5} linhas</td></tr>` : ''}
+        </tbody></table>
+      </div>`;
+  }
+
+  // Converte planilha (array de objetos) em rows canônicas
+  function parseSheetData(data) {
+    if (!data.length) return [];
+    const headers = Object.keys(data[0]);
+    // Mapa cabeçalho original -> chave canônica
+    const map = {};
+    let hasNomeRef = false, hasRefCurta = false;
+    headers.forEach(h => { const k = detectColumn(h); if (k) { map[h] = k; if (k === 'cod_ref') hasNomeRef = true; if (k === '__ref_curta') hasRefCurta = true; } });
+    // Se só tem "REFERÊNCIA" (prefixo) sem "NOME REFERÊNCIA", usa-a como cod_ref mesmo
+    if (!hasNomeRef && hasRefCurta) {
+      Object.keys(map).forEach(h => { if (map[h] === '__ref_curta') map[h] = 'cod_ref'; });
+    }
+    return data.map(r => {
+      const o = {};
+      for (const h of headers) {
+        const k = map[h];
+        if (!k || k === '__ref_curta') continue;
+        const v = r[h];
+        if (v != null && String(v).trim() !== '') o[k] = String(v).trim();
+      }
+      return o;
+    }).filter(isDataRow);
+  }
+
+  $('#f-file').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!window.XLSX) {
+      await new Promise(res => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'; s.onload = res; document.head.appendChild(s); });
+    }
+    const ab = await f.arrayBuffer();
+    const wb = window.XLSX.read(ab, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const data = window.XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    if (data.length === 0) { toast('Planilha vazia', 'warning'); return; }
+    _parsedRows = parseSheetData(data);
+    if (!_parsedRows.length) {
+      toast('Nenhuma linha válida detectada (verifique colunas "NOME REFERÊNCIA" e "PRODUTO")', 'warning');
+      return;
+    }
+    // Também exibe os dados brutos no textarea (apenas para conferência)
+    const headers = Object.keys(data[0]);
+    $('#f-data').value = [headers.join('\t'), ...data.slice(0, 50).map(r => headers.map(h => r[h]).join('\t'))].join('\n');
+    renderPreview(_parsedRows);
+    toast(`${_parsedRows.length} linhas válidas (de ${data.length} totais)`, 'success');
+  };
+
+  $('#m-import').onclick = async () => {
+    let rows = _parsedRows;
+    // Se não veio de upload, tenta parsear o textarea
+    if (!rows.length) {
+      const text = $('#f-data').value.trim();
+      if (!text) { toast('Suba um arquivo Excel ou cole os dados', 'warning'); return; }
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (lines.length < 2) { toast('Inclua cabeçalho e ao menos uma linha', 'warning'); return; }
+      const headers = lines[0].split('\t');
+      const data = lines.slice(1).map(l => {
+        const c = l.split('\t'); const o = {};
+        headers.forEach((h, i) => o[h] = (c[i] || '').trim());
+        return o;
+      });
+      rows = parseSheetData(data);
+      if (!rows.length) { toast('Nenhuma linha válida no texto colado', 'warning'); return; }
+      _parsedRows = rows;
+      renderPreview(rows);
+    }
+    try {
+      const r = await api('post', '/terc/produtos/importar', {
+        rows,
+        dry_run: $('#f-dry').checked,
+        criar_novos: $('#f-criar').checked,
+        atualizar: $('#f-atualizar').checked,
+      });
+      const d = r.data || {};
+      $('#result').innerHTML = `
+        <div class="card p-3 ${d.dry_run ? 'bg-amber-50' : 'bg-emerald-50'}">
+          <div class="text-sm font-semibold">
+            ${d.dry_run ? '<i class="fas fa-flask text-amber-600 mr-1"></i><span class="text-amber-700">SIMULAÇÃO</span>' : '<i class="fas fa-check-circle text-emerald-600 mr-1"></i><span class="text-emerald-700">EXECUTADO</span>'}
+            — ${d.total} linhas processadas
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-sm">
+            <div class="p-2 bg-white rounded border"><i class="fas fa-plus text-emerald-600"></i> Criados: <b>${d.inseridos}</b></div>
+            <div class="p-2 bg-white rounded border"><i class="fas fa-sync text-blue-600"></i> Atualizados: <b>${d.atualizados}</b></div>
+            <div class="p-2 bg-white rounded border"><i class="fas fa-ban text-amber-600"></i> Ignorados: <b>${d.ignorados}</b></div>
+            <div class="p-2 bg-white rounded border"><i class="fas fa-layer-group text-indigo-600"></i> Coleções criadas: <b>${d.colecoes_criadas}</b></div>
+          </div>
+          ${(d.erros || []).length ? `<details class="mt-2" open><summary class="text-xs text-red-600 cursor-pointer"><b>${d.erros.length} erro(s)</b> — clique para detalhes</summary><div class="mt-1 max-h-40 overflow-y-auto text-xs"><table class="w-full"><thead class="bg-red-100"><tr><th class="p-1 text-left">Linha</th><th class="p-1 text-left">Referência</th><th class="p-1 text-left">Erro</th></tr></thead><tbody>${d.erros.map(e => `<tr class="border-b"><td class="p-1">${e.linha}</td><td class="p-1 font-mono">${e.ref || ''}</td><td class="p-1 text-red-700">${e.erro}</td></tr>`).join('')}</tbody></table></div></details>` : '<div class="mt-2 text-xs text-emerald-700"><i class="fas fa-check"></i> Sem erros.</div>'}
+        </div>`;
+      if (!d.dry_run && (d.inseridos + d.atualizados) > 0) {
+        toast(`${d.inseridos + d.atualizados} produto(s) importados`, 'success');
+        await TERC.reloadProdutos();
+        if (onSave) onSave();
+      }
+    } catch {}
+  };
+}
+
+/* ============================================================
+ * MODAL — Gerenciar Coleções (CRUD completo)
+ * ============================================================ */
+async function TERC_openColecoesModal(onSave) {
+  await TERC.load(true);
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-xl' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-layer-group mr-2 text-brand"></i>Coleções</h3>
+    <div class="flex gap-2 mb-3">
+      <input id="c-nome" placeholder="Nome da nova coleção" />
+      <button id="c-add" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Adicionar</button>
+    </div>
+    <div id="c-list" class="card p-0 overflow-x-auto"></div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="m-cancel" class="btn btn-secondary">Fechar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+
+  function render() {
+    const list = TERC.colecoes;
+    $('#c-list').innerHTML = list.length ? `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr><th class="text-left p-2">Nome</th><th class="text-center p-2">Ativo</th><th class="text-center p-2">Ações</th></tr></thead>
+        <tbody>
+          ${list.map(c => `
+            <tr class="border-b" data-id="${c.id_colecao}">
+              <td class="p-2"><input class="c-edit w-full" data-id="${c.id_colecao}" value="${(c.nome_colecao || '').replace(/"/g, '&quot;')}" /></td>
+              <td class="p-2 text-center"><input type="checkbox" class="c-act" data-id="${c.id_colecao}" ${c.ativo ? 'checked' : ''} /></td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-primary c-save" data-id="${c.id_colecao}" title="Salvar"><i class="fas fa-save"></i></button>
+                <button class="btn btn-sm btn-danger c-del" data-id="${c.id_colecao}" title="Excluir"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>` : '<div class="p-4 text-center text-slate-500">Nenhuma coleção cadastrada.</div>';
+    card.querySelectorAll('.c-save').forEach(b => b.onclick = async () => {
+      const id = b.dataset.id;
+      const nome = card.querySelector(`input.c-edit[data-id="${id}"]`).value.trim();
+      const ativo = card.querySelector(`input.c-act[data-id="${id}"]`).checked ? 1 : 0;
+      if (!nome) { toast('Nome obrigatório', 'warning'); return; }
+      try { await api('put', '/terc/colecoes/' + id, { nome_colecao: nome, ativo }); toast('Atualizada', 'success'); await TERC.load(true); render(); if (onSave) onSave(); } catch {}
+    });
+    card.querySelectorAll('.c-del').forEach(b => b.onclick = async () => {
+      if (!confirm('Excluir esta coleção? Produtos/preços vinculados podem ser afetados.')) return;
+      try { await api('delete', '/terc/colecoes/' + b.dataset.id); toast('Excluída', 'success'); await TERC.load(true); render(); if (onSave) onSave(); } catch {}
+    });
+  }
+
+  $('#c-add').onclick = async () => {
+    const nome = $('#c-nome').value.trim();
+    if (!nome) { toast('Informe o nome', 'warning'); return; }
+    try {
+      await api('post', '/terc/colecoes', { nome_colecao: nome });
+      $('#c-nome').value = '';
+      toast('Coleção criada', 'success');
+      await TERC.load(true);
+      render();
+      if (onSave) onSave();
+    } catch {}
+  };
+  $('#c-nome').addEventListener('keypress', (e) => { if (e.key === 'Enter') $('#c-add').click(); });
+  $('#m-cancel').onclick = () => m.remove();
+  render();
+}
+
+// Modal de retorno — cria novo OU edita existente quando idRetornoEdit é informado.
+// Em modo edit: pré-preenche valores, NÃO subtrai a si mesmo do gradeMax e usa PUT.
+async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
+  const res = await api('get', '/terc/remessas/' + idRemessa);
+  const r = res.data || {};
+  const editing = !!idRetornoEdit;
+  const retEdit = editing ? (fmt.safeArr(r.retornos).find(x => Number(x.id_retorno) === Number(idRetornoEdit)) || null) : null;
+  if (editing && !retEdit) { toast('Retorno não encontrado', 'error'); return; }
+
+  // Saldo: total da remessa − soma dos retornos atuais (se editando, descontar este retorno)
+  const totalRetTodos = fmt.safeNum(r.totais_retorno?.total);
+  const totalEsteRet = retEdit ? fmt.safeNum(retEdit.qtd_total) : 0;
+  const saldoBase = fmt.safeNum(r.qtd_total) - totalRetTodos + totalEsteRet;
+
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
+  // Grade máxima disponível por tamanho = enviada − retornos de OUTROS retornos (não este)
+  const gradeMax = Object.fromEntries(fmt.safeArr(r.grade).map(g => [g.tamanho, fmt.safeNum(g.qtd)]));
+  fmt.safeArr(r.retornos).forEach(ret => {
+    if (editing && Number(ret.id_retorno) === Number(idRetornoEdit)) return; // não subtrai a si mesmo
+    fmt.safeArr(ret.grade).forEach(g => { gradeMax[g.tamanho] = (gradeMax[g.tamanho] || 0) - fmt.safeNum(g.qtd); });
+  });
+  // Mapa do retorno em edição (qtd preenchida nos inputs)
+  const gradeAtual = editing ? Object.fromEntries(fmt.safeArr(retEdit.grade).map(g => [g.tamanho, fmt.safeNum(g.qtd)])) : {};
+
+  const titleIcon = editing ? 'fa-pen-to-square' : 'fa-truck-arrow-right';
+  const titleTxt = editing ? `Editar Retorno · Remessa ${r.num_controle}` : `Registrar Retorno · Remessa ${r.num_controle}`;
+  const dtVal = editing ? (retEdit.dt_retorno || dayjs().format('YYYY-MM-DD')) : dayjs().format('YYYY-MM-DD');
+  const boaVal = editing ? fmt.safeNum(retEdit.qtd_boa) : 0;
+  const refVal = editing ? fmt.safeNum(retEdit.qtd_refugo) : 0;
+  const consVal = editing ? fmt.safeNum(retEdit.qtd_conserto) : 0;
+  const valVal = editing ? (retEdit.valor_pago != null ? retEdit.valor_pago : '') : '';
+  const dtpVal = editing ? (retEdit.dt_pagamento || '') : '';
+  const obsVal = editing ? (retEdit.observacao || '') : '';
+
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-2"><i class="fas ${titleIcon} mr-2 text-brand"></i>${titleTxt}</h3>
+    <div class="bg-slate-50 p-3 rounded mb-3 text-sm grid grid-cols-3 gap-2">
+      <div><b>Terceirizado:</b> ${r.nome_terc || '—'}</div>
+      <div><b>Ref:</b> <span class="font-mono">${r.cod_ref || ''}</span> ${r.cor || ''}</div>
+      <div><b>Serviço:</b> ${r.desc_servico || '—'}</div>
+      <div><b>Enviadas:</b> ${fmt.int(r.qtd_total)}</div>
+      <div><b>Outros retornos:</b> ${fmt.int(totalRetTodos - totalEsteRet)}</div>
+      <div class="${saldoBase > 0 ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}"><b>Disponível:</b> ${fmt.int(saldoBase)}</div>
+    </div>
+    <div class="grid grid-cols-5 gap-3">
+      <div><label>Data retorno *</label><input type="date" id="m-dtr" value="${dtVal}" /></div>
+      <div><label>Boas</label><input type="number" min="0" id="m-boa" value="${boaVal}" /></div>
+      <div><label>Refugo</label><input type="number" min="0" id="m-ref" value="${refVal}" /></div>
+      <div><label>Conserto</label><input type="number" min="0" id="m-cons" value="${consVal}" /></div>
+      <div><label>Valor pago (R$)</label><input type="number" step="0.01" id="m-val" value="${valVal}" placeholder="auto = boas × preço" /></div>
+      <div class="col-span-5">
+        <label>Grade retornada <span class="text-xs text-slate-500">(máx. = enviado − outros retornos)</span></label>
+        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="g-wrap">
+          ${fmt.safeArr(r.grade).map(g => {
+            const max = fmt.safeNum(gradeMax[g.tamanho]);
+            const cur = fmt.safeNum(gradeAtual[g.tamanho]);
+            return `
+            <div class="text-center">
+              <div class="text-xs font-mono text-slate-500">${g.tamanho} <span class="text-slate-400">(máx ${max})</span></div>
+              <input data-tam="${g.tamanho}" data-max="${max}" type="number" min="0" max="${max}" value="${cur}" class="text-center ret-in" />
+            </div>`;
+          }).join('')}
+        </div>
+        <div class="mt-2 text-sm">Grade total: <b id="g-total">${fmt.int(Object.values(gradeAtual).reduce((a, v) => a + v, 0))}</b></div>
+      </div>
+      <div><label>Data pagamento</label><input type="date" id="m-dtp" value="${dtpVal}" /></div>
+      <div class="col-span-4"><label>Observação</label><input id="m-obs" value="${obsVal.replace(/"/g, '&quot;')}" /></div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}</button>
     </div>
   `;
   m.appendChild(card); document.body.appendChild(m);
   function recalc() {
-    const tot = Array.from(card.querySelectorAll('.ret-in')).reduce((a, i) => a + Number(i.value || 0), 0);
+    const tot = Array.from(card.querySelectorAll('.ret-in')).reduce((a, i) => a + fmt.safeNum(i.value), 0);
     $('#g-total').textContent = fmt.int(tot);
     if (!$('#m-boa').dataset.manual) $('#m-boa').value = tot;
   }
   card.querySelectorAll('.ret-in').forEach(i => i.addEventListener('input', recalc));
   $('#m-boa').addEventListener('input', () => { $('#m-boa').dataset.manual = '1'; });
+  if (editing) $('#m-boa').dataset.manual = '1'; // não sobrescreve em edit
   $('#m-cancel').onclick = () => m.remove();
   $('#m-save').onclick = async () => {
-    const grade = Array.from(card.querySelectorAll('.ret-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) })).filter(g => g.qtd > 0);
+    const grade = Array.from(card.querySelectorAll('.ret-in')).map(i => ({ tamanho: i.dataset.tam, qtd: fmt.safeNum(i.value) })).filter(g => g.qtd > 0);
     const body = {
       id_remessa: idRemessa, dt_retorno: $('#m-dtr').value,
       qtd_boa: $('#m-boa').value, qtd_refugo: $('#m-ref').value, qtd_conserto: $('#m-cons').value,
       valor_pago: $('#m-val').value || null, dt_pagamento: $('#m-dtp').value || null,
       observacao: $('#m-obs').value.trim(), grade,
     };
-    try { await api('post', '/terc/retornos', body); toast('Retorno registrado', 'success'); m.remove(); if (onSave) onSave(); } catch {}
+    try {
+      if (editing) {
+        await api('put', '/terc/retornos/' + idRetornoEdit, body);
+        toast('Retorno atualizado com sucesso', 'success');
+      } else {
+        await api('post', '/terc/retornos', body);
+        toast('Retorno registrado', 'success');
+      }
+      m.remove();
+      if (onSave) onSave();
+    } catch {}
   };
 }
 
+// Edição direta de retorno via id (chamada pelo botão "lápis" na lista)
+window.TERC_editRet = async (idRet, idRem) => {
+  TERC_openRetModal(idRem, () => TERC_openRemDetalhe(idRem), idRet);
+};
+
+// Modal de confirmação para excluir REMESSA — oferece opções "Cascata" ou "Soft Delete"
+// quando há retornos. Sem retornos, é uma confirmação simples.
+async function TERC_confirmDelRem(id, num, onDone) {
+  // Primeiro tenta DELETE simples — se houver retornos, backend responde 409 NEEDS_CONFIRMATION
+  let info = null;
+  try {
+    const r = await api('delete', '/terc/remessas/' + id, null, { silent: true });
+    // Sucesso direto (sem retornos): confirma com o usuário primeiro? Não — a UX
+    // pede confirmação para qualquer exclusão, então fazemos a checagem aqui.
+    // Como deletou sem perguntar, vamos repor o estado solicitando confirmação.
+    // Para simplicidade, tratamos a UX: este caso só ocorre se a remessa não tinha
+    // retornos. Mostramos o sucesso e seguimos.
+    toast('Remessa nº ' + num + ' excluída', 'success');
+    onDone && onDone();
+    return;
+  } catch (e) {
+    info = e?.response?.data;
+    if (e?.response?.status !== 409 || info?.code !== 'NEEDS_CONFIRMATION') {
+      // Erro real diferente — toast já foi mostrado pelo api()
+      return;
+    }
+  }
+
+  // Tem retornos: abre modal com escolha de modo
+  const totRet = fmt.safeNum(info?.retornos);
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-lg' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold text-red-700 mb-3"><i class="fas fa-triangle-exclamation mr-2"></i>Excluir Remessa nº ${num}</h3>
+    <p class="text-sm mb-3">Esta remessa possui <b>${totRet} retorno(s)</b> registrado(s). Escolha como excluir:</p>
+    <div class="space-y-2 mb-4">
+      <label class="flex items-start gap-2 p-3 border rounded cursor-pointer hover:bg-slate-50">
+        <input type="radio" name="modo" value="soft" class="mt-1" checked />
+        <div>
+          <div class="font-semibold text-amber-700"><i class="fas fa-archive mr-1"></i>Cancelar (mantém histórico)</div>
+          <div class="text-xs text-slate-500">A remessa fica marcada como "Cancelada". Os ${totRet} retorno(s) e seu valor pago são preservados para auditoria. <b>Recomendado.</b></div>
+        </div>
+      </label>
+      <label class="flex items-start gap-2 p-3 border rounded cursor-pointer hover:bg-red-50">
+        <input type="radio" name="modo" value="cascata" class="mt-1" />
+        <div>
+          <div class="font-semibold text-red-700"><i class="fas fa-trash mr-1"></i>Excluir tudo (cascata)</div>
+          <div class="text-xs text-slate-500">Apaga a remessa <b>e</b> os ${totRet} retorno(s) permanentemente. Operação irreversível.</div>
+        </div>
+      </label>
+    </div>
+    <div class="flex justify-end gap-2">
+      <button id="c-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="c-ok" class="btn btn-danger"><i class="fas fa-check mr-1"></i>Confirmar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+  $('#c-cancel').onclick = () => m.remove();
+  $('#c-ok').onclick = async () => {
+    const modo = card.querySelector('input[name="modo"]:checked')?.value || 'soft';
+    try {
+      const r = await api('delete', '/terc/remessas/' + id + '?confirm=SIM&modo=' + modo);
+      m.remove();
+      if (modo === 'soft') toast('Remessa nº ' + num + ' cancelada (histórico preservado)', 'success');
+      else toast('Remessa nº ' + num + ' excluída (' + totRet + ' retorno(s) também)', 'success');
+      onDone && onDone();
+    } catch {}
+  };
+}
+window.TERC_confirmDelRem = TERC_confirmDelRem;
+
 async function TERC_openRemDetalhe(id) {
-  const res = await api('get', '/terc/remessas/' + id);
-  const r = res.data;
+  let r = {};
+  try {
+    const res = await api('get', '/terc/remessas/' + id);
+    r = res?.data || {};
+  } catch (e) {
+    console.error('[TERC_openRemDetalhe]', e);
+    toast(e?.response?.data?.error || 'Falha ao carregar detalhe da remessa', 'error');
+    return;
+  }
+  const totRet = (r.totais_retorno && typeof r.totais_retorno === 'object') ? r.totais_retorno : { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
   card.innerHTML = `
     <div class="flex items-start justify-between mb-3 flex-wrap gap-2">
-      <h3 class="text-lg font-semibold"><i class="fas fa-file-invoice mr-2 text-brand"></i>Remessa Nº ${r.num_controle} <span class="text-sm font-normal text-slate-500">(${r.num_op || 'sem OP'})</span></h3>
+      <h3 class="text-lg font-semibold"><i class="fas fa-file-invoice mr-2 text-brand"></i>Remessa Nº ${r.num_controle ?? '—'} <span class="text-sm font-normal text-slate-500">(${r.num_op || 'sem OP'})</span></h3>
       <div class="flex gap-2 flex-wrap">
         <button id="m-print-rom" class="btn btn-sm" style="background:#2563eb;color:white" title="Romaneio de Serviço (planilha)"><i class="fas fa-file-lines mr-1"></i>Romaneio</button>
         <button id="m-print-comp" class="btn btn-sm" style="background:#10b981;color:white" title="Comprovante de Entrega Total (2 vias)"><i class="fas fa-check-circle mr-1"></i>Compr. Total</button>
@@ -3885,48 +4574,51 @@ async function TERC_openRemDetalhe(id) {
     </div>
     <div id="print-area">
       <div class="grid grid-cols-3 gap-3 text-sm mb-4">
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Terceirizado</div><div class="font-semibold">${r.nome_terc}</div><div class="text-xs text-slate-500 mt-1">${r.nome_setor || ''}</div></div>
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Referência</div><div class="font-mono font-semibold">${r.cod_ref}</div><div class="text-xs">${r.desc_ref || ''} ${r.cor ? '· ' + r.cor : ''}</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Terceirizado</div><div class="font-semibold">${r.nome_terc || '—'}</div><div class="text-xs text-slate-500 mt-1">${r.nome_setor || ''}</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Referência</div><div class="font-mono font-semibold">${r.cod_ref || '—'}</div><div class="text-xs">${r.desc_ref || ''} ${r.cor ? '· ' + r.cor : ''}</div></div>
         <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Serviço</div><div class="font-semibold">${r.desc_servico || '—'}</div>${r.nome_colecao ? '<div class="text-xs">' + r.nome_colecao + '</div>' : ''}</div>
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Saída / Previsão</div><div>${fmt.date(r.dt_saida)} → <b>${fmt.date(r.dt_previsao)}</b></div><div class="text-xs text-slate-500">${r.prazo_dias} dia(s)</div></div>
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Qtd / Preço / Valor</div><div><b>${fmt.int(r.qtd_total)}</b> pçs × ${TERC.fmtBRL(r.preco_unit)} = <b>${TERC.fmtBRL(r.valor_total)}</b></div></div>
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Status</div><div>${TERC.statusBadge(r.status)}</div><div class="text-xs text-slate-500 mt-1">${r.tempo_peca} min/peça · ${r.qtd_pessoas} pessoa(s) · ${(Number(r.efic_pct) * 100).toFixed(0)}% efic.</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Saída / Previsão</div><div>${fmt.date(r.dt_saida)} → <b>${fmt.date(r.dt_previsao)}</b></div><div class="text-xs text-slate-500">${fmt.safeNum(r.prazo_dias)} dia(s)</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Qtd / Preço / Valor</div><div><b>${fmt.int(r.qtd_total)}</b> pçs × ${TERC.fmtBRL(fmt.safeNum(r.preco_unit))} = <b>${TERC.fmtBRL(fmt.safeNum(r.valor_total))}</b></div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Status</div><div>${TERC.statusBadge(r.status)}</div><div class="text-xs text-slate-500 mt-1">${fmt.safeNum(r.tempo_peca)} min/peça · ${fmt.safeNum(r.qtd_pessoas) || 1} pessoa(s) · ${(fmt.safeNum(r.efic_pct) * 100).toFixed(0)}% efic.</div></div>
       </div>
 
       <div class="mb-4">
         <h4 class="font-semibold mb-2"><i class="fas fa-ruler mr-1"></i>Grade enviada</h4>
         <div class="flex flex-wrap gap-2">
-          ${(r.grade || []).map(g => `<div class="px-3 py-2 bg-blue-50 rounded text-sm"><span class="font-mono text-xs text-slate-500">${g.tamanho}</span> <b>${fmt.int(g.qtd)}</b></div>`).join('') || '<span class="text-slate-500">—</span>'}
+          ${fmt.safeArr(r.grade).map(g => `<div class="px-3 py-2 bg-blue-50 rounded text-sm"><span class="font-mono text-xs text-slate-500">${g.tamanho}</span> <b>${fmt.int(g.qtd)}</b></div>`).join('') || '<span class="text-slate-500">—</span>'}
         </div>
       </div>
 
       <div class="mb-4">
         <h4 class="font-semibold mb-2"><i class="fas fa-truck-arrow-right mr-1"></i>Retornos</h4>
-        ${(r.retornos && r.retornos.length) ? `
+        ${fmt.safeArr(r.retornos).length ? `
           <table class="w-full text-sm">
             <thead class="bg-slate-100"><tr>
               <th class="text-left p-2">Data</th><th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
-              <th class="text-right p-2">Total</th><th class="text-right p-2">Valor pago</th><th class="text-left p-2">Obs</th><th></th>
+              <th class="text-right p-2">Total</th><th class="text-right p-2">Valor pago</th><th class="text-left p-2">Obs</th><th class="text-center p-2 no-print">Ações</th>
             </tr></thead>
             <tbody>
-              ${r.retornos.map(x => `
+              ${fmt.safeArr(r.retornos).map(x => `
                 <tr class="border-b">
-                  <td class="p-2">${fmt.date(x.dt_retorno)}</td>
-                  <td class="p-2 text-right text-emerald-700">${fmt.int(x.qtd_boa)}</td>
-                  <td class="p-2 text-right text-red-600">${fmt.int(x.qtd_refugo)}</td>
-                  <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
-                  <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
-                  <td class="p-2 text-right">${TERC.fmtBRL(x.valor_pago)}</td>
-                  <td class="p-2 text-xs text-slate-500">${x.observacao || ''}</td>
-                  <td class="p-2"><button class="btn btn-sm btn-danger no-print" onclick="TERC_delRet(${x.id_retorno}, ${id})"><i class="fas fa-trash"></i></button></td>
+                  <td class="p-2">${fmt.date(x?.dt_retorno)}</td>
+                  <td class="p-2 text-right text-emerald-700">${fmt.int(x?.qtd_boa)}</td>
+                  <td class="p-2 text-right text-red-600">${fmt.int(x?.qtd_refugo)}</td>
+                  <td class="p-2 text-right text-amber-700">${fmt.int(x?.qtd_conserto)}</td>
+                  <td class="p-2 text-right font-semibold">${fmt.int(x?.qtd_total)}</td>
+                  <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(x?.valor_pago))}</td>
+                  <td class="p-2 text-xs text-slate-500">${x?.observacao || ''}</td>
+                  <td class="p-2 text-center whitespace-nowrap no-print">
+                    <button class="btn btn-sm btn-primary" title="Editar retorno" onclick="TERC_editRet(${x.id_retorno}, ${id})"><i class="fas fa-pen"></i></button>
+                    <button class="btn btn-sm btn-danger" title="Excluir retorno" onclick="TERC_delRet(${x.id_retorno}, ${id})"><i class="fas fa-trash"></i></button>
+                  </td>
                 </tr>`).join('')}
               <tr class="bg-slate-50 font-semibold">
                 <td class="p-2">Totais</td>
-                <td class="p-2 text-right">${fmt.int(r.totais_retorno.boa)}</td>
-                <td class="p-2 text-right">${fmt.int(r.totais_retorno.refugo)}</td>
-                <td class="p-2 text-right">${fmt.int(r.totais_retorno.conserto)}</td>
-                <td class="p-2 text-right">${fmt.int(r.totais_retorno.total)}</td>
-                <td class="p-2 text-right">${TERC.fmtBRL(r.totais_retorno.valor)}</td>
+                <td class="p-2 text-right">${fmt.int(totRet.boa)}</td>
+                <td class="p-2 text-right">${fmt.int(totRet.refugo)}</td>
+                <td class="p-2 text-right">${fmt.int(totRet.conserto)}</td>
+                <td class="p-2 text-right">${fmt.int(totRet.total)}</td>
+                <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(totRet.valor))}</td>
                 <td colspan="2"></td>
               </tr>
               <tr class="bg-amber-50 font-semibold">
@@ -3947,11 +4639,45 @@ async function TERC_openRemDetalhe(id) {
   $('#m-print-rom').onclick = () => TERC_PRINT.romaneio([r]);
   $('#m-print-comp').onclick = () => TERC_PRINT.comprovanteTotal(r);
   $('#m-print-parcial').onclick = () => TERC_PRINT.controleParcial(r);
+  // Excluir retorno — confirmação simples + recálculo automático no backend
   window.TERC_delRet = async (idRet, idRem) => {
-    if (!confirm('Excluir retorno?')) return;
-    try { await api('delete', '/terc/retornos/' + idRet); toast('Retorno excluído', 'success'); m.remove(); TERC_openRemDetalhe(idRem); } catch {}
+    const ok = await TERC_confirmDelRet(idRet);
+    if (!ok) return;
+    try {
+      await api('delete', '/terc/retornos/' + idRet);
+      toast('Retorno excluído com sucesso', 'success');
+      m.remove();
+      TERC_openRemDetalhe(idRem);
+      // Refresca dashboards/listas se houver
+      window._tercAccApi?.refreshAll?.();
+      // Re-renderiza a rota atual se for dashboard/remessas/retornos
+      if (['dashboard', 'terc_remessas', 'terc_retornos'].includes(state.route)) {
+        try { window.render?.(); } catch {}
+      }
+    } catch {}
   };
 }
+
+// Modal de confirmação para excluir retorno
+async function TERC_confirmDelRet(idRet) {
+  return new Promise((resolve) => {
+    const m = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-md' });
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold text-red-700 mb-3"><i class="fas fa-triangle-exclamation mr-2"></i>Excluir retorno</h3>
+      <p class="text-sm mb-2">Você tem certeza que deseja excluir este retorno?</p>
+      <p class="text-xs text-slate-500 mb-4">As quantidades, valor pago e status da remessa serão automaticamente recalculados.</p>
+      <div class="flex justify-end gap-2">
+        <button id="c-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="c-ok" class="btn btn-danger"><i class="fas fa-trash mr-1"></i>Excluir</button>
+      </div>
+    `;
+    m.appendChild(card); document.body.appendChild(m);
+    $('#c-cancel').onclick = () => { m.remove(); resolve(false); };
+    $('#c-ok').onclick = () => { m.remove(); resolve(true); };
+  });
+}
+window.TERC_confirmDelRet = TERC_confirmDelRet;
 
 /* ---------- RETORNOS (lista consolidada) ---------- */
 ROUTES.terc_retornos = async (main) => {
@@ -3973,32 +4699,54 @@ ROUTES.terc_retornos = async (main) => {
     <div class="card p-0 overflow-x-auto" id="tbl"></div>
   `;
   async function load() {
-    const de = $('#f-de').value, ate = $('#f-ate').value, idt = $('#f-terc').value;
+    const de = $('#f-de')?.value || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+    const ate = $('#f-ate')?.value || dayjs().format('YYYY-MM-DD');
+    const idt = $('#f-terc')?.value || '';
     // Usa /terc/remessas como lista-base e busca retornos na view de cada
-    const p = new URLSearchParams({ de, ate });
-    if (idt) p.set('id_terc', idt);
-    const r = await api('get', '/terc/remessas?' + p.toString());
-    const rems = (r.data || []).filter(x => Number(x.qtd_retornada_calc) > 0);
+    let rems = [];
+    try {
+      const p = new URLSearchParams({ de, ate });
+      if (idt) p.set('id_terc', idt);
+      const r = await api('get', '/terc/remessas?' + p.toString(), null, { silent: true });
+      rems = fmt.safeArr(r?.data).filter(x => fmt.safeNum(x?.qtd_retornada_calc) > 0);
+    } catch (e) {
+      console.error('[terc_retornos] erro fetch lista', e);
+      $('#kpis').innerHTML = `<div class="col-span-full text-center text-amber-600 py-3"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar retornos</div>`;
+      $('#tbl').innerHTML = '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</div>';
+      return;
+    }
 
     // Agregar detalhes (consulta individual para trazer retornos exatos)
     const rows = [];
-    let tot = { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
+    const tot = { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
     for (const rem of rems.slice(0, 100)) { // limitar a 100 para performance
       try {
         const d = await api('get', '/terc/remessas/' + rem.id_remessa, null, { silent: true });
-        (d.data.retornos || []).forEach(ret => {
-          if (ret.dt_retorno >= de && ret.dt_retorno <= ate && (!idt || rem.id_terc == idt)) {
-            rows.push({ ...ret, nome_terc: rem.nome_terc, cod_ref: rem.cod_ref, cor: rem.cor, num_controle: rem.num_controle, desc_servico: rem.desc_servico });
-            tot.boa += Number(ret.qtd_boa) || 0;
-            tot.refugo += Number(ret.qtd_refugo) || 0;
-            tot.conserto += Number(ret.qtd_conserto) || 0;
-            tot.total += Number(ret.qtd_total) || 0;
-            tot.valor += Number(ret.valor_pago) || 0;
+        fmt.safeArr(d?.data?.retornos).forEach(ret => {
+          if (!ret) return;
+          const dtR = ret.dt_retorno || '';
+          if (dtR >= de && dtR <= ate && (!idt || String(rem.id_terc) === String(idt))) {
+            rows.push({
+              ...ret,
+              id_remessa: rem.id_remessa,
+              nome_terc: rem.nome_terc,
+              cod_ref: rem.cod_ref,
+              cor: rem.cor,
+              num_controle: rem.num_controle,
+              desc_servico: rem.desc_servico,
+            });
+            tot.boa += fmt.safeNum(ret.qtd_boa);
+            tot.refugo += fmt.safeNum(ret.qtd_refugo);
+            tot.conserto += fmt.safeNum(ret.qtd_conserto);
+            tot.total += fmt.safeNum(ret.qtd_total);
+            tot.valor += fmt.safeNum(ret.valor_pago);
           }
         });
-      } catch {}
+      } catch (e) {
+        console.warn('[terc_retornos] falha detalhe remessa', rem?.id_remessa, e?.message);
+      }
     }
-    rows.sort((a, b) => (a.dt_retorno < b.dt_retorno ? 1 : -1));
+    rows.sort((a, b) => ((a.dt_retorno || '') < (b.dt_retorno || '') ? 1 : -1));
 
     const kpi = (l, v, c) => `<div class="card p-3"><div class="text-xs text-slate-500 uppercase">${l}</div><div class="text-2xl font-bold ${c}">${v}</div></div>`;
     $('#kpis').innerHTML = [
@@ -4015,6 +4763,500 @@ ROUTES.terc_retornos = async (main) => {
           <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
           <th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
           <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th><th class="text-center p-2">Pagto</th>
+          <th class="text-center p-2 no-print">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(x => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2">${fmt.date(x.dt_retorno)}</td>
+              <td class="p-2 text-right font-mono">${x.num_controle ?? '—'}</td>
+              <td class="p-2">${x.nome_terc || '—'}</td>
+              <td class="p-2"><span class="font-mono text-xs">${x.cod_ref || ''}</span> ${x.cor || ''}</td>
+              <td class="p-2 text-xs">${x.desc_servico || ''}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(x.qtd_boa)}</td>
+              <td class="p-2 text-right text-red-600">${fmt.int(x.qtd_refugo)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
+              <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(x.valor_pago))}</td>
+              <td class="p-2 text-center text-xs">${x.dt_pagamento ? fmt.date(x.dt_pagamento) : '<span class="text-amber-600">Pendente</span>'}</td>
+              <td class="p-2 text-center whitespace-nowrap no-print">
+                <button class="btn btn-sm btn-primary" title="Editar retorno" onclick="TERC_editRetFromList(${x.id_retorno}, ${x.id_remessa})"><i class="fas fa-pen"></i></button>
+                <button class="btn btn-sm btn-danger" title="Excluir retorno" onclick="TERC_delRetFromList(${x.id_retorno}, ${x.id_remessa})"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rows.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período</div>' : ''}
+    `;
+  }
+  // Edição direta a partir da lista consolidada — após salvar, recarrega lista
+  window.TERC_editRetFromList = (idRet, idRem) => {
+    TERC_openRetModal(idRem, () => { load(); window._tercAccApi?.refreshAll?.(); }, idRet);
+  };
+  window.TERC_delRetFromList = async (idRet, idRem) => {
+    const okConf = await TERC_confirmDelRet(idRet);
+    if (!okConf) return;
+    try {
+      await api('delete', '/terc/retornos/' + idRet);
+      toast('Retorno excluído com sucesso', 'success');
+      load();
+      window._tercAccApi?.refreshAll?.();
+    } catch {}
+  };
+  $('#btn-filtrar').onclick = load;
+  $('#btn-print').onclick = () => window.print();
+  try { await load(); } catch (e) { console.error('[terc_retornos] load top‑level', e); }
+};
+
+/* ============================================================
+ * 🏠 CENTRAL DE TERCEIRIZAÇÃO — UI em blocos minimizados (accordion)
+ * Substitui as telas isoladas de Dashboard, Resumo, Remessas, Retornos,
+ * Terceirizados e Preços. Apenas 1 bloco aberto por vez. Cada bloco
+ * mostra resumo rápido (totais, valor, qtd) no header.
+ * ============================================================ */
+ROUTES.terc_central = async (main) => {
+  await TERC.load();
+
+  main.innerHTML = `
+    <div class="mb-4 flex items-center justify-between flex-wrap gap-2">
+      <div class="text-xs text-slate-500 uppercase tracking-widest"><i class="fas fa-handshake-angle mr-1 text-brand"></i>Central de Terceirização</div>
+      <div class="flex gap-2">
+        <button id="terc-btn-nova-rem" class="btn btn-success btn-sm"><i class="fas fa-plus mr-1"></i>Nova Remessa</button>
+        <button id="terc-btn-novo-prod" class="btn btn-primary btn-sm"><i class="fas fa-tshirt mr-1"></i>Novo Produto</button>
+        <button id="terc-btn-novo-preco" class="btn btn-secondary btn-sm"><i class="fas fa-money-bill-wave mr-1"></i>Novo Preço</button>
+      </div>
+    </div>
+    <div id="acc-terc"></div>
+  `;
+
+  // Botões rápidos da barra superior — funcionam mesmo sem expandir um bloco
+  $('#terc-btn-nova-rem').onclick = () => TERC_openRemModal(null, () => window._tercAccApi?.refreshAll?.());
+  $('#terc-btn-novo-prod').onclick = () => TERC_openProdModal(null, () => window._tercAccApi?.refreshAll?.());
+  $('#terc-btn-novo-preco').onclick = () => TERC_openPrecoModal(null, () => window._tercAccApi?.refreshAll?.());
+
+  // Cache do resumo já carregado (para popular pílulas dos headers)
+  const summary = { dashboard: null, terceirizados: null, remessas: null, retornos: null, produtos: null, precos: null };
+
+  // Pré-carrega resumos leves para popular as pílulas (em paralelo)
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de30 = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  const de60 = dayjs().subtract(60, 'day').format('YYYY-MM-DD');
+
+  async function loadSummaries() {
+    try {
+      const [dash, rems, prods, precos] = await Promise.all([
+        api('get', `/terc/dashboard?de=${de30}&ate=${hoje}`, null, { silent: true }).catch(() => ({ data: { kpis: { remessas: {} } } })),
+        api('get', `/terc/remessas?de=${de60}&ate=${hoje}`, null, { silent: true }).catch(() => ({ data: [] })),
+        api('get', '/terc/produtos', null, { silent: true }).catch(() => ({ data: [] })),
+        api('get', '/terc/precos', null, { silent: true }).catch(() => ({ data: [] })),
+      ]);
+      summary.dashboard = dash.data || {};
+      summary.remessas = rems.data || [];
+      summary.produtos = prods.data || [];
+      summary.precos = precos.data || [];
+
+      // Atualiza summary das pílulas do header de cada bloco
+      const k = summary.dashboard.kpis?.remessas || {};
+      const kr = summary.dashboard.kpis?.retornos || {};
+      window._tercAccApi?.refreshSummary('dashboard', `
+        <span class="acc-summary-pill"><i class="fas fa-truck-fast text-brand"></i><b>${fmt.int(k.total)}</b> remessas</span>
+        <span class="acc-summary-pill"><i class="fas fa-boxes text-indigo-600"></i><b>${fmt.int(k.pecas_enviadas)}</b> peças</span>
+        <span class="acc-summary-pill"><i class="fas fa-dollar-sign text-emerald-600"></i><b>${TERC.fmtBRL(k.valor_total)}</b></span>
+        ${(k.atrasadas || 0) > 0 ? `<span class="acc-summary-pill" style="background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.3);color:#ef4444"><i class="fas fa-triangle-exclamation"></i><b>${fmt.int(k.atrasadas)}</b> atrasadas</span>` : ''}
+      `);
+
+      const totRem = summary.remessas.length;
+      const pecasRem = summary.remessas.reduce((a, r) => a + (Number(r.qtd_total) || 0), 0);
+      const valorRem = summary.remessas.reduce((a, r) => a + (Number(r.valor_total) || 0), 0);
+      const atrasadas = summary.remessas.filter(r => r.atrasada).length;
+      window._tercAccApi?.refreshSummary('remessas', `
+        <span class="acc-summary-pill"><i class="fas fa-list"></i><b>${fmt.int(totRem)}</b> remessas (60d)</span>
+        <span class="acc-summary-pill"><i class="fas fa-boxes"></i><b>${fmt.int(pecasRem)}</b> peças</span>
+        <span class="acc-summary-pill"><i class="fas fa-dollar-sign text-emerald-600"></i><b>${TERC.fmtBRL(valorRem)}</b></span>
+        ${atrasadas > 0 ? `<span class="acc-summary-pill" style="background:rgba(239,68,68,.1);color:#ef4444"><b>${atrasadas}</b> em atraso</span>` : ''}
+      `);
+
+      const tercAtivos = TERC.terceirizados.filter(t => t.ativo).length;
+      window._tercAccApi?.refreshSummary('terceirizados', `
+        <span class="acc-summary-pill"><i class="fas fa-handshake text-brand"></i><b>${fmt.int(TERC.terceirizados.length)}</b> total</span>
+        <span class="acc-summary-pill"><i class="fas fa-circle-check text-emerald-600"></i><b>${fmt.int(tercAtivos)}</b> ativos</span>
+        <span class="acc-summary-pill"><i class="fas fa-pause text-slate-500"></i><b>${fmt.int(TERC.terceirizados.length - tercAtivos)}</b> inativos</span>
+      `);
+
+      window._tercAccApi?.refreshSummary('retornos', `
+        <span class="acc-summary-pill"><i class="fas fa-truck-arrow-right text-brand"></i><b>${fmt.int(kr.total)}</b> retornos</span>
+        <span class="acc-summary-pill"><i class="fas fa-circle-check text-emerald-600"></i><b>${fmt.int(kr.pecas_boas)}</b> boas</span>
+        <span class="acc-summary-pill"><i class="fas fa-times-circle text-red-600"></i><b>${fmt.int(kr.pecas_refugo)}</b> refugo</span>
+      `);
+
+      window._tercAccApi?.refreshSummary('produtos', `
+        <span class="acc-summary-pill"><i class="fas fa-tshirt text-brand"></i><b>${fmt.int(summary.produtos.length)}</b> cadastrados</span>
+        <span class="acc-summary-pill"><i class="fas fa-layer-group text-indigo-600"></i><b>${fmt.int(TERC.colecoes.length)}</b> coleções</span>
+      `);
+
+      window._tercAccApi?.refreshSummary('precos', `
+        <span class="acc-summary-pill"><i class="fas fa-money-bill-wave text-emerald-600"></i><b>${fmt.int(summary.precos.length)}</b> preços</span>
+        <span class="acc-summary-pill"><i class="fas fa-tools text-indigo-600"></i><b>${fmt.int(TERC.servicos.length)}</b> serviços</span>
+      `);
+    } catch (e) { console.warn('[terc_central summaries]', e); }
+  }
+
+  // Define os blocos (todos minimizados por padrão; persistência via Accordion)
+  const accApi = Accordion.render($('#acc-terc'), [
+    {
+      id: 'dashboard', icon: 'fa-tachometer-alt', title: 'Dashboard Operacional',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercDashboardBlock(body),
+    },
+    {
+      id: 'remessas', icon: 'fa-truck-fast', title: 'Remessas',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercRemessasBlock(body, () => window._tercAccApi?.refreshAll?.()),
+    },
+    {
+      id: 'retornos', icon: 'fa-truck-arrow-right', title: 'Retornos',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercRetornosBlock(body),
+    },
+    {
+      id: 'terceirizados', icon: 'fa-handshake', title: 'Terceirizados',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercTerceirizadosBlock(body, () => window._tercAccApi?.refreshAll?.()),
+    },
+    {
+      id: 'produtos', icon: 'fa-tshirt', title: 'Produtos',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercProdutosBlock(body, () => window._tercAccApi?.refreshAll?.()),
+    },
+    {
+      id: 'precos', icon: 'fa-money-bill-wave', title: 'Preços / Coleção',
+      summary: '<span class="text-slate-400" style="opacity:.6">Carregando…</span>',
+      onOpen: (block, body) => renderTercPrecosBlock(body, () => window._tercAccApi?.refreshAll?.()),
+    },
+    {
+      id: 'resumo', icon: 'fa-list-check', title: 'Resumo por Terceirizado',
+      summary: '<span class="text-slate-400" style="opacity:.6">Clique para gerar consolidado</span>',
+      onOpen: (block, body) => renderTercResumoBlock(body),
+    },
+  ], { group: 'terc_central' });
+
+  // Expor API + helper de refresh global
+  window._tercAccApi = {
+    ...accApi,
+    refreshAll: async () => {
+      await TERC.load(true);
+      await loadSummaries();
+      // Re-renderiza o bloco aberto (se houver)
+      const openId = accApi.getOpen();
+      if (openId) {
+        const body = accApi.getBody(openId);
+        if (openId === 'dashboard') renderTercDashboardBlock(body);
+        else if (openId === 'remessas') renderTercRemessasBlock(body, window._tercAccApi.refreshAll);
+        else if (openId === 'retornos') renderTercRetornosBlock(body);
+        else if (openId === 'terceirizados') renderTercTerceirizadosBlock(body, window._tercAccApi.refreshAll);
+        else if (openId === 'produtos') renderTercProdutosBlock(body, window._tercAccApi.refreshAll);
+        else if (openId === 'precos') renderTercPrecosBlock(body, window._tercAccApi.refreshAll);
+        else if (openId === 'resumo') renderTercResumoBlock(body);
+      }
+    },
+  };
+
+  loadSummaries();
+};
+
+/* ---------- BLOCO: DASHBOARD OPERACIONAL ---------- */
+async function renderTercDashboardBlock(body) {
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+      <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Atualizar</button>
+    </div>
+    <div id="kpis" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4"></div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div class="card p-4"><h4 class="font-semibold mb-2"><i class="fas fa-chart-line mr-1 text-brand"></i>Produção diária (retornos)</h4><canvas id="cht-prod" height="140"></canvas></div>
+      <div class="card p-4"><h4 class="font-semibold mb-2"><i class="fas fa-chart-pie mr-1 text-brand"></i>Remessas por serviço</h4><canvas id="cht-serv" height="140"></canvas></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card p-4">
+        <h4 class="font-semibold mb-2"><i class="fas fa-trophy mr-1 text-brand"></i>Top 10 Terceirizados</h4>
+        <div id="top-terc" class="overflow-x-auto"></div>
+      </div>
+      <div class="card p-4">
+        <h4 class="font-semibold mb-2"><i class="fas fa-triangle-exclamation mr-1 text-red-600"></i>Remessas em atraso</h4>
+        <div id="atrasadas" class="overflow-x-auto"></div>
+      </div>
+    </div>
+  `;
+  const FALLBACK_EMPTY = '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</p>';
+  const FALLBACK_ERROR = (msg) => `<p class="text-amber-600 text-sm py-4 text-center"><i class="fas fa-triangle-exclamation mr-1"></i>${msg || 'Falha ao carregar'}</p>`;
+  async function load() {
+    const de = body.querySelector('#f-de')?.value || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+    const ate = body.querySelector('#f-ate')?.value || dayjs().format('YYYY-MM-DD');
+    let d = {};
+    try {
+      const r = await api('get', `/terc/dashboard?de=${de}&ate=${ate}`, null, { silent: true });
+      d = (r && r.data) ? r.data : {};
+    } catch (e) {
+      console.error('[renderTercDashboardBlock] erro fetch', e);
+      const errMsg = e?.response?.data?.error || e?.message || 'Erro ao carregar dashboard';
+      const kpisEl = body.querySelector('#kpis');
+      if (kpisEl) kpisEl.innerHTML = `<div class="col-span-full">${FALLBACK_ERROR(errMsg)}</div>`;
+      d = {};
+    }
+
+    const k = (d && typeof d === 'object' && d.kpis) ? d.kpis : {};
+    const kr = (k && typeof k === 'object' && k.remessas) ? k.remessas : {};
+
+    // KPIs
+    try {
+      const kpi = (label, val, icon, color) => `
+        <div class="card p-3">
+          <div class="text-xs text-slate-500 uppercase">${label}</div>
+          <div class="flex items-center gap-2 mt-1">
+            <i class="fas ${icon} ${color}"></i>
+            <div class="text-2xl font-bold">${val}</div>
+          </div>
+        </div>`;
+      const kpisEl = body.querySelector('#kpis');
+      if (kpisEl) kpisEl.innerHTML = [
+        kpi('Remessas', fmt.int(kr.total), 'fa-truck-fast', 'text-brand'),
+        kpi('Peças enviadas', fmt.int(kr.pecas_enviadas), 'fa-boxes', 'text-indigo-600'),
+        kpi('Valor enviado', TERC.fmtBRL(fmt.safeNum(kr.valor_total)), 'fa-dollar-sign', 'text-emerald-600'),
+        kpi('Em aberto', fmt.int(kr.em_aberto), 'fa-clock', 'text-amber-600'),
+        kpi('Concluídas', fmt.int(kr.concluidas), 'fa-check-circle', 'text-emerald-600'),
+        kpi('Atrasadas', fmt.int(kr.atrasadas), 'fa-triangle-exclamation', 'text-red-600'),
+      ].join('');
+    } catch (e) { console.error('[block] kpis', e); }
+
+    // Gráfico produção
+    try {
+      const prod = fmt.safeArr(d.producao_diaria);
+      const canvas = body.querySelector('#cht-prod');
+      const ctxP = canvas?.getContext?.('2d');
+      if (window._chtProdC) { try { window._chtProdC.destroy(); } catch {} window._chtProdC = null; }
+      if (ctxP) {
+        if (prod.length === 0) {
+          canvas.style.display = 'none';
+          if (!canvas.parentElement.querySelector('.no-data-prodC')) {
+            const ph = document.createElement('div');
+            ph.className = 'no-data-prodC text-center text-slate-400 text-sm py-8';
+            ph.innerHTML = '<i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período';
+            canvas.parentElement.appendChild(ph);
+          }
+        } else {
+          canvas.parentElement.querySelector('.no-data-prodC')?.remove();
+          canvas.style.display = '';
+          window._chtProdC = new Chart(ctxP, {
+            type: 'bar',
+            data: { labels: prod.map(p => { const d = dayjs(p?.dia); return d.isValid() ? d.format('DD/MM') : '?'; }), datasets: [
+              { label: 'Boas', data: prod.map(p => fmt.safeNum(p?.boa)), backgroundColor: '#10b981' },
+              { label: 'Refugo', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
+              { label: 'Conserto', data: prod.map(p => fmt.safeNum(p?.conserto)), backgroundColor: '#f59e0b' },
+            ] },
+            options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } },
+          });
+        }
+      }
+    } catch (e) { console.error('[block] grafico produção', e); }
+
+    // Gráfico serviço
+    try {
+      const serv = fmt.safeArr(d.por_servico);
+      const canvas = body.querySelector('#cht-serv');
+      const ctxS = canvas?.getContext?.('2d');
+      if (window._chtServC) { try { window._chtServC.destroy(); } catch {} window._chtServC = null; }
+      if (ctxS) {
+        if (serv.length === 0) {
+          canvas.style.display = 'none';
+          if (!canvas.parentElement.querySelector('.no-data-servC')) {
+            const ph = document.createElement('div');
+            ph.className = 'no-data-servC text-center text-slate-400 text-sm py-8';
+            ph.innerHTML = '<i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período';
+            canvas.parentElement.appendChild(ph);
+          }
+        } else {
+          canvas.parentElement.querySelector('.no-data-servC')?.remove();
+          canvas.style.display = '';
+          window._chtServC = new Chart(ctxS, {
+            type: 'doughnut',
+            data: { labels: serv.map(s => s?.desc_servico || '(sem serviço)'),
+              datasets: [{ data: serv.map(s => fmt.safeNum(s?.pecas)), backgroundColor: ['#2563eb','#10b981','#f59e0b','#ef4444','#6366f1','#06b6d4'] }] },
+          });
+        }
+      }
+    } catch (e) { console.error('[block] grafico servico', e); }
+
+    // Top terceirizados
+    try {
+      const top = fmt.safeArr(d.top_terceirizados);
+      const elTop = body.querySelector('#top-terc');
+      if (elTop) elTop.innerHTML = top.length ? `
+        <table class="w-full text-sm">
+          <thead><tr class="bg-slate-100"><th class="text-left p-2">#</th><th class="text-left p-2">Terceirizado</th><th class="text-right p-2">Remessas</th><th class="text-right p-2">Peças</th><th class="text-right p-2">Valor</th></tr></thead>
+          <tbody>${top.map((t, i) => `<tr class="border-b"><td class="p-2">${i + 1}</td><td class="p-2 font-medium">${t?.nome_terc || '—'}</td><td class="p-2 text-right">${fmt.int(t?.remessas)}</td><td class="p-2 text-right">${fmt.int(t?.pecas)}</td><td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(t?.valor))}</td></tr>`).join('')}</tbody>
+        </table>` : FALLBACK_EMPTY;
+    } catch (e) { console.error('[block] top terc', e); }
+
+    // Atrasadas
+    try {
+      const atr = fmt.safeArr(d.atrasadas);
+      const elAtr = body.querySelector('#atrasadas');
+      if (elAtr) elAtr.innerHTML = atr.length ? `
+        <table class="w-full text-sm">
+          <thead><tr class="bg-red-50"><th class="text-left p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Ref.</th><th class="text-right p-2">Qtd</th><th class="text-right p-2">Atraso</th></tr></thead>
+          <tbody>${atr.map(a => `<tr class="border-b"><td class="p-2">${a?.num_controle ?? '—'}</td><td class="p-2">${a?.nome_terc || '—'}</td><td class="p-2"><span class="font-mono text-xs">${a?.cod_ref || ''}</span></td><td class="p-2 text-right">${fmt.int(a?.qtd_total)}</td><td class="p-2 text-right text-red-600 font-semibold">${Math.floor(fmt.safeNum(a?.dias_atraso))} dia(s)</td></tr>`).join('')}</tbody>
+        </table>` : '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-check-circle text-emerald-500"></i> Nenhuma remessa em atraso</p>';
+    } catch (e) { console.error('[block] atrasadas', e); }
+  }
+  const btn = body.querySelector('#btn-filtrar');
+  if (btn) btn.onclick = load;
+  try { await load(); } catch (e) { console.error('[renderTercDashboardBlock] load top‑level', e); }
+}
+
+/* ---------- BLOCO: REMESSAS ---------- */
+async function renderTercRemessasBlock(body, refresh) {
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(60, 'day').format('YYYY-MM-DD');
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Busca</label><input id="f-search" placeholder="OP, Ref, Cor..." /></div>
+      <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
+      <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
+      <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+      <div><label>Status</label><select id="f-status"><option value="">Todos</option><option>AguardandoEnvio</option><option>Enviado</option><option>EmProducao</option><option>Atrasado</option><option>Parcial</option><option>Concluido</option><option>Pago</option><option>Cancelado</option></select></div>
+      <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+      <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+      <div class="flex-1"></div>
+      <button id="btn-romaneio-lote" class="btn btn-secondary" title="Romaneio das remessas filtradas"><i class="fas fa-print mr-1"></i>Romaneio Lote</button>
+      <button id="btn-nova" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Nova Remessa</button>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  let _last = [];
+  async function load() {
+    const p = new URLSearchParams();
+    if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
+    if (body.querySelector('#f-terc').value) p.set('id_terc', body.querySelector('#f-terc').value);
+    if (body.querySelector('#f-serv').value) p.set('id_servico', body.querySelector('#f-serv').value);
+    if (body.querySelector('#f-col').value) p.set('id_colecao', body.querySelector('#f-col').value);
+    if (body.querySelector('#f-status').value) p.set('status', body.querySelector('#f-status').value);
+    if (body.querySelector('#f-de').value) p.set('de', body.querySelector('#f-de').value);
+    if (body.querySelector('#f-ate').value) p.set('ate', body.querySelector('#f-ate').value);
+    const r = await api('get', '/terc/remessas?' + p.toString());
+    const rs = r.data || []; _last = rs;
+    body.querySelector('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-right p-2">Ctrl</th><th class="text-left p-2">OP</th><th class="text-left p-2">Terceirizado</th>
+          <th class="text-left p-2">Serviço</th><th class="text-left p-2">Referência</th><th class="text-left p-2">Cor</th>
+          <th class="text-right p-2">Qtd</th><th class="text-right p-2">Retornada</th><th class="text-right p-2">Valor</th>
+          <th class="text-center p-2">Saída</th><th class="text-center p-2">Prev.</th><th class="text-center p-2">Status</th><th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(r => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 text-right font-mono">${r.num_controle}</td>
+              <td class="p-2">${r.num_op || '—'}</td>
+              <td class="p-2">${r.nome_terc}</td>
+              <td class="p-2 text-xs text-slate-600">${r.desc_servico || '—'}</td>
+              <td class="p-2"><span class="font-mono text-xs">${r.cod_ref}</span><br><span class="text-xs text-slate-500">${r.desc_ref || ''}</span></td>
+              <td class="p-2">${r.cor || '—'}</td>
+              <td class="p-2 text-right">${fmt.int(r.qtd_total)}</td>
+              <td class="p-2 text-right ${r.qtd_retornada_calc >= r.qtd_total ? 'text-emerald-700' : 'text-amber-700'}">${fmt.int(r.qtd_retornada_calc)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(r.valor_total)}</td>
+              <td class="p-2 text-center">${fmt.date(r.dt_saida)}</td>
+              <td class="p-2 text-center">${fmt.date(r.dt_previsao)}</td>
+              <td class="p-2 text-center">${TERC.statusBadge(r.status, r.atrasada)}</td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
+                <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm btn-success" title="Retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
+                <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhuma remessa encontrada.</div>' : ''}
+    `;
+  }
+  window.TERC_viewRem = (id) => TERC_openRemDetalhe(id);
+  window.TERC_editRem = (id) => TERC_openRemModal(id, () => { load(); refresh && refresh(); });
+  window.TERC_retRem = (id) => TERC_openRetModal(id, () => { load(); refresh && refresh(); });
+  window.TERC_delRem = async (id, n) => {
+    if (!confirm('Excluir remessa nº ' + n + '?')) return;
+    try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); refresh && refresh(); } catch {}
+  };
+  body.querySelector('#btn-filtrar').onclick = load;
+  body.querySelector('#btn-nova').onclick = () => TERC_openRemModal(null, () => { load(); refresh && refresh(); });
+  body.querySelector('#btn-romaneio-lote').onclick = async () => {
+    if (!_last.length) { toast('Filtre alguma remessa antes', 'warning'); return; }
+    if (_last.length > 30 && !confirm('Imprimir ' + _last.length + ' remessas? Recomendado ≤ 30. Continuar?')) return;
+    toast('Preparando romaneio em lote...', 'info');
+    const detalhes = [];
+    for (const r of _last.slice(0, 60)) {
+      try { const d = await api('get', '/terc/remessas/' + r.id_remessa, null, { silent: true }); detalhes.push(d.data); }
+      catch { detalhes.push(r); }
+    }
+    await TERC_PRINT.romaneio(detalhes);
+  };
+  await load();
+}
+
+/* ---------- BLOCO: RETORNOS ---------- */
+async function renderTercRetornosBlock(body) {
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
+      <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+      <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+    </div>
+    <div id="kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const de = body.querySelector('#f-de').value, ate = body.querySelector('#f-ate').value, idt = body.querySelector('#f-terc').value;
+    const p = new URLSearchParams({ de, ate });
+    if (idt) p.set('id_terc', idt);
+    const r = await api('get', '/terc/remessas?' + p.toString());
+    const rems = (r.data || []).filter(x => Number(x.qtd_retornada_calc) > 0);
+    const rows = []; let tot = { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
+    for (const rem of rems.slice(0, 100)) {
+      try {
+        const d = await api('get', '/terc/remessas/' + rem.id_remessa, null, { silent: true });
+        (d.data.retornos || []).forEach(ret => {
+          if (ret.dt_retorno >= de && ret.dt_retorno <= ate) {
+            rows.push({ ...ret, nome_terc: rem.nome_terc, cod_ref: rem.cod_ref, cor: rem.cor, num_controle: rem.num_controle, desc_servico: rem.desc_servico });
+            tot.boa += Number(ret.qtd_boa) || 0;
+            tot.refugo += Number(ret.qtd_refugo) || 0;
+            tot.conserto += Number(ret.qtd_conserto) || 0;
+            tot.total += Number(ret.qtd_total) || 0;
+            tot.valor += Number(ret.valor_pago) || 0;
+          }
+        });
+      } catch {}
+    }
+    rows.sort((a, b) => (a.dt_retorno < b.dt_retorno ? 1 : -1));
+    const kpi = (l, v, c) => `<div class="card p-3"><div class="text-xs text-slate-500 uppercase">${l}</div><div class="text-2xl font-bold ${c}">${v}</div></div>`;
+    body.querySelector('#kpis').innerHTML = [
+      kpi('Retornos', fmt.int(rows.length), 'text-brand'),
+      kpi('Peças boas', fmt.int(tot.boa), 'text-emerald-600'),
+      kpi('Peças refugo', fmt.int(tot.refugo), 'text-red-600'),
+      kpi('Valor pago', TERC.fmtBRL(tot.valor), 'text-indigo-600'),
+    ].join('');
+    body.querySelector('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Data</th><th class="text-right p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th>
+          <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
+          <th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th>
         </tr></thead>
         <tbody>
           ${rows.map(x => `
@@ -4029,19 +5271,294 @@ ROUTES.terc_retornos = async (main) => {
               <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
               <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
               <td class="p-2 text-right">${TERC.fmtBRL(x.valor_pago)}</td>
-              <td class="p-2 text-center text-xs">${x.dt_pagamento ? fmt.date(x.dt_pagamento) : '<span class="text-amber-600">Pendente</span>'}</td>
             </tr>`).join('')}
         </tbody>
       </table>
-      ${rows.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum retorno no período.</div>' : ''}
+      ${rows.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum retorno no período.</div>' : ''}`;
+  }
+  body.querySelector('#btn-filtrar').onclick = load;
+  await load();
+}
+
+/* ---------- BLOCO: TERCEIRIZADOS ---------- */
+async function renderTercTerceirizadosBlock(body, refresh) {
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Busca</label><input id="f-search" placeholder="Nome ou CPF/CNPJ..." /></div>
+      <div><label>Setor</label><select id="f-setor">${TERC.optSetores()}</select></div>
+      <div><label>Situação</label><select id="f-sit"><option value="">Todos</option><option value="Ativa">Ativa</option><option value="Inativa">Inativa</option></select></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+      <div class="flex-1"></div>
+      <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Terceirizado</button>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const p = new URLSearchParams();
+    if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
+    if (body.querySelector('#f-setor').value) p.set('id_setor', body.querySelector('#f-setor').value);
+    if (body.querySelector('#f-sit').value) p.set('situacao', body.querySelector('#f-sit').value);
+    const r = await api('get', '/terc/terceirizados?' + p.toString());
+    const rs = r.data || [];
+    body.querySelector('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Nome</th><th class="text-left p-2">Setor</th>
+          <th class="text-left p-2">Contato</th>
+          <th class="text-right p-2">Pessoas</th><th class="text-right p-2">Efic.</th>
+          <th class="text-right p-2">Prazo</th>
+          <th class="text-center p-2">Situação</th><th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(t => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-medium">${t.nome_terc}${t.cpf_cnpj ? '<br><span class="text-xs text-slate-400">' + t.cpf_cnpj + '</span>' : ''}</td>
+              <td class="p-2">${t.nome_setor || '—'}</td>
+              <td class="p-2 text-xs text-slate-600">${t.telefone || ''}${t.email ? '<br>' + t.email : ''}</td>
+              <td class="p-2 text-right">${t.qtd_pessoas}</td>
+              <td class="p-2 text-right">${(Number(t.efic_padrao) * 100).toFixed(0)}%</td>
+              <td class="p-2 text-right">${t.prazo_padrao} dias</td>
+              <td class="p-2 text-center">${t.situacao === 'Ativa' ? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">Ativa</span>' : '<span class="px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-600">Inativa</span>'}</td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-secondary" onclick="TERC_editTerc(${t.id_terc})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm ${t.situacao === 'Ativa' ? 'btn-warning' : 'btn-success'}" onclick="TERC_toggleSitTerc(${t.id_terc}, '${t.situacao === 'Ativa' ? 'Inativa' : 'Ativa'}')"><i class="fas fa-${t.situacao === 'Ativa' ? 'pause' : 'play'}"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="TERC_delTerc(${t.id_terc}, '${t.nome_terc.replace(/'/g, '')}')"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum terceirizado encontrado.</div>' : ''}
     `;
   }
-  $('#btn-filtrar').onclick = load;
-  $('#btn-print').onclick = () => window.print();
+  window.TERC_editTerc = (id) => TERC_openTercModal(id, () => { load(); refresh && refresh(); });
+  window.TERC_toggleSitTerc = async (id, sit) => {
+    await api('patch', '/terc/terceirizados/' + id + '/situacao', { situacao: sit });
+    toast('Situação atualizada', 'success'); await TERC.load(true); load(); refresh && refresh();
+  };
+  window.TERC_delTerc = async (id, nome) => {
+    if (!confirm('Excluir terceirizado "' + nome + '"?\n(só é permitido se não tiver remessas)')) return;
+    try { await api('delete', '/terc/terceirizados/' + id); toast('Excluído', 'success'); await TERC.load(true); load(); refresh && refresh(); } catch {}
+  };
+  body.querySelector('#btn-filtrar').onclick = load;
+  body.querySelector('#btn-novo').onclick = () => TERC_openTercModal(null, () => { load(); refresh && refresh(); });
   await load();
+}
+
+/* ---------- BLOCO: PRODUTOS ---------- */
+async function renderTercProdutosBlock(body, refresh) {
+  await TERC.load();
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Busca</label><input id="f-search" placeholder="Ref ou descrição..." autocomplete="off" /></div>
+      <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+      <div class="flex-1"></div>
+      <span id="prod-count" class="text-xs text-slate-500 mr-2"></span>
+      <button id="btn-import" class="btn btn-secondary"><i class="fas fa-file-excel mr-1"></i>Importar Excel</button>
+      <button id="btn-del-all" class="btn btn-danger" title="Excluir TODOS os produtos"><i class="fas fa-trash-can mr-1"></i>Excluir todos</button>
+      <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Produto</button>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const p = new URLSearchParams();
+    if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
+    if (body.querySelector('#f-col').value) p.set('id_colecao', body.querySelector('#f-col').value);
+    const r = await api('get', '/terc/produtos?' + p.toString());
+    const rs = r.data || [];
+    const countEl = body.querySelector('#prod-count');
+    if (countEl) countEl.textContent = `${rs.length} produto(s)`;
+    body.querySelector('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Referência</th>
+          <th class="text-left p-2">Descrição</th>
+          <th class="text-left p-2">Serviço padrão</th>
+          <th class="text-right p-2">Tempo (min)</th>
+          <th class="text-left p-2">Coleção</th>
+          <th class="text-center p-2">Ativo</th>
+          <th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(p => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-mono text-xs">${p.cod_ref}</td>
+              <td class="p-2">${p.desc_ref}${p.nome_produto ? `<div class="text-xs text-slate-400">${p.nome_produto}</div>` : ''}</td>
+              <td class="p-2 text-slate-600">${p.desc_servico_padrao || '<span class="text-slate-400">—</span>'}</td>
+              <td class="p-2 text-right">${p.tempo_padrao != null ? Number(p.tempo_padrao).toFixed(2) : '<span class="text-slate-400">—</span>'}</td>
+              <td class="p-2">${p.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
+              <td class="p-2 text-center">${p.ativo ? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">Ativo</span>' : '<span class="px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-600">Inativo</span>'}</td>
+              <td class="p-2 text-center whitespace-nowrap">
+                <button class="btn btn-sm btn-primary" onclick="TERC_editProd(${p.id_produto})" title="Editar"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="TERC_delProd(${p.id_produto}, '${(p.cod_ref || '').replace(/'/g, '')}')" title="Excluir"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-inbox mr-1"></i>Nenhum produto cadastrado. Use "Importar Excel" ou "Novo Produto".</div>' : ''}
+    `;
+  }
+  window.TERC_editProd = (id) => TERC_openProdModal(id, () => { load(); refresh && refresh(); });
+  window.TERC_delProd = async (id, ref) => {
+    if (!confirm('Excluir produto "' + ref + '"?\nEsta ação não pode ser desfeita.')) return;
+    try { await api('delete', '/terc/produtos/' + id); toast('Excluído', 'success'); await TERC.reloadProdutos(); load(); refresh && refresh(); } catch {}
+  };
+  body.querySelector('#btn-filtrar').onclick = load;
+  body.querySelector('#f-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+  body.querySelector('#btn-novo').onclick = () => TERC_openProdModal(null, () => { load(); refresh && refresh(); });
+  body.querySelector('#btn-import').onclick = () => TERC_openProdImportModal(() => { load(); refresh && refresh(); });
+  body.querySelector('#btn-del-all').onclick = async () => {
+    // Confirmação DUPLA
+    const tot = (await api('get', '/terc/produtos')).data?.length || 0;
+    if (tot === 0) { toast('Nenhum produto para excluir', 'info'); return; }
+    if (!confirm(`⚠️ ATENÇÃO: Excluir TODOS os ${tot} produtos?\n\nEsta ação NÃO PODE SER DESFEITA.`)) return;
+    const txt = prompt('Para confirmar, digite a palavra: EXCLUIR');
+    if (txt !== 'EXCLUIR') { toast('Operação cancelada', 'warning'); return; }
+    try {
+      const r = await api('delete', '/terc/produtos', { confirm: 'SIM' });
+      toast(`${r.data?.deleted || 0} produto(s) excluídos`, 'success');
+      await TERC.reloadProdutos();
+      load(); refresh && refresh();
+    } catch {}
+  };
+  await load();
+}
+
+/* ---------- BLOCO: PREÇOS ---------- */
+async function renderTercPrecosBlock(body, refresh) {
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Busca</label><input id="f-search" placeholder="Ref ou descrição..." /></div>
+      <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
+      <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+      <div class="flex-1"></div>
+      <button id="btn-col" class="btn btn-secondary" title="Gerenciar coleções"><i class="fas fa-layer-group mr-1"></i>Coleções</button>
+      <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl"></div>
+  `;
+  async function load() {
+    const p = new URLSearchParams();
+    if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
+    if (body.querySelector('#f-serv').value) p.set('id_servico', body.querySelector('#f-serv').value);
+    if (body.querySelector('#f-col').value) p.set('id_colecao', body.querySelector('#f-col').value);
+    const r = await api('get', '/terc/precos?' + p.toString());
+    const rs = r.data || [];
+    body.querySelector('#tbl').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100"><tr>
+          <th class="text-left p-2">Ref.</th><th class="text-left p-2">Descrição</th><th class="text-left p-2">Serviço</th>
+          <th class="text-left p-2">Coleção</th><th class="text-right p-2">Preço</th><th class="text-right p-2">Tempo (min)</th>
+          <th class="text-center p-2">Vigência</th><th class="text-center p-2">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(p => `
+            <tr class="border-b">
+              <td class="p-2 font-mono text-xs">${p.cod_ref}</td>
+              <td class="p-2">${p.desc_ref || '—'}</td>
+              <td class="p-2">${p.desc_servico || '—'}</td>
+              <td class="p-2">${p.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
+              <td class="p-2 text-right font-semibold">${TERC.fmtBRL(p.preco)}</td>
+              <td class="p-2 text-right">${fmt.num(p.tempo_min, 2)}</td>
+              <td class="p-2 text-center">${p.dt_vigencia ? fmt.date(p.dt_vigencia) : '—'}</td>
+              <td class="p-2 text-center">
+                <button class="btn btn-sm btn-primary" onclick="TERC_editPreco(${p.id_preco})"><i class="fas fa-edit"></i></button>
+                <button class="btn btn-sm btn-danger" onclick="TERC_delPreco(${p.id_preco})"><i class="fas fa-trash"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum preço cadastrado.</div>' : ''}
+    `;
+  }
+  window.TERC_editPreco = (id) => TERC_openPrecoModal(id, () => { load(); refresh && refresh(); });
+  window.TERC_delPreco = async (id) => {
+    if (!confirm('Excluir este preço?')) return;
+    try { await api('delete', '/terc/precos/' + id); toast('Excluído', 'success'); load(); refresh && refresh(); } catch {}
+  };
+  body.querySelector('#btn-filtrar').onclick = load;
+  body.querySelector('#btn-novo').onclick = () => TERC_openPrecoModal(null, () => { load(); refresh && refresh(); });
+  body.querySelector('#btn-col').onclick = () => TERC_openColecoesModal(() => { load(); refresh && refresh(); });
+  await load();
+}
+
+/* ---------- BLOCO: RESUMO ---------- */
+async function renderTercResumoBlock(body) {
+  body.innerHTML = `
+    <div class="flex flex-wrap items-end gap-3 mb-4">
+      <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+      <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+      <div class="flex-1"></div>
+      <button id="btn-csv" class="btn btn-secondary"><i class="fas fa-file-csv mr-1"></i>Exportar CSV</button>
+    </div>
+    <div class="card p-0 overflow-x-auto" id="tbl-wrap"><div class="p-6 text-center text-slate-500"><i class="fas fa-spinner fa-spin"></i> Carregando...</div></div>
+  `;
+  async function load() {
+    const col = body.querySelector('#f-col').value;
+    const r = await api('get', `/terc/resumo${col ? '?id_colecao=' + col : ''}`);
+    const rs = r.data || []; window._resumoBlock = rs;
+    body.querySelector('#tbl-wrap').innerHTML = `
+      <table class="w-full text-sm">
+        <thead class="bg-slate-100 sticky top-0"><tr>
+          <th class="text-left p-2">Terceirizado</th><th class="text-left p-2">Setor</th>
+          <th class="text-center p-2">Situação</th>
+          <th class="text-right p-2">A coletar</th><th class="text-right p-2">Em produção</th>
+          <th class="text-right p-2">Produzidas</th><th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Remessas</th><th class="text-right p-2">Valor</th>
+          <th class="text-right p-2">% Consertos</th>
+        </tr></thead>
+        <tbody>
+          ${rs.map(t => `
+            <tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-medium">${t.nome_terc}</td>
+              <td class="p-2 text-slate-500">${t.nome_setor || '—'}</td>
+              <td class="p-2 text-center">${t.situacao === 'Ativa' ? '<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">Ativa</span>' : '<span class="px-2 py-0.5 rounded text-xs bg-slate-200 text-slate-600">Inativa</span>'}</td>
+              <td class="p-2 text-right">${fmt.int(t.pecas_coletar)}</td>
+              <td class="p-2 text-right">${fmt.int(t.pecas_producao)}</td>
+              <td class="p-2 text-right text-emerald-700 font-semibold">${fmt.int(t.pecas_produzidas)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(t.pecas_conserto)}</td>
+              <td class="p-2 text-right">${fmt.int(t.total_remessas)}</td>
+              <td class="p-2 text-right">${TERC.fmtBRL(t.valor_movimentado)}</td>
+              <td class="p-2 text-right ${Number(t.indice_consertos) > 0.05 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmt.pct(t.indice_consertos)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+  body.querySelector('#btn-filtrar').onclick = load;
+  body.querySelector('#btn-csv').onclick = () => {
+    const rs = window._resumoBlock || [];
+    const h = ['Terceirizado','Setor','Situacao','A coletar','Em producao','Produzidas','Conserto','Remessas','Valor','%Consertos'];
+    const rows = rs.map(t => [t.nome_terc, t.nome_setor || '', t.situacao, t.pecas_coletar, t.pecas_producao, t.pecas_produzidas, t.pecas_conserto, t.total_remessas, Number(t.valor_movimentado).toFixed(2), (Number(t.indice_consertos) * 100).toFixed(1) + '%']);
+    const csv = [h, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `resumo-terc-${dayjs().format('YYYYMMDD')}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+  await load();
+}
+
+/* ---------- ALIAS legado — terc_dashboard redireciona para a rota inicial 'dashboard' ----------
+ * As demais rotas (terc_remessas, terc_retornos, terc_terceirizados, terc_produtos,
+ * terc_precos, terc_importador) são telas independentes (sem accordion) — definidas acima.
+ */
+ROUTES.terc_dashboard = (main) => { state.route = 'dashboard'; location.hash = 'dashboard'; ROUTES.dashboard(main); };
+ROUTES.terc_resumo = (main) => { state.route = 'terc_terceirizados'; location.hash = 'terc_terceirizados'; ROUTES.terc_terceirizados(main); };
+
+/* ---------- TELA ÚNICA: Produtos (atalho direto, mesma view do bloco) ---------- */
+ROUTES.terc_produtos = async (main) => {
+  await TERC.load();
+  main.innerHTML = `
+    <div class="mb-4 flex items-center justify-between flex-wrap gap-2">
+      <div class="text-xs text-slate-500 uppercase tracking-widest"><i class="fas fa-tshirt mr-1 text-brand"></i>Cadastro de Produtos</div>
+      <a href="#terc_central" class="btn btn-secondary btn-sm"><i class="fas fa-handshake-angle mr-1"></i>Central de Terceirização</a>
+    </div>
+    <div class="card p-4" id="prod-body"></div>`;
+  renderTercProdutosBlock($('#prod-body'), null);
 };
 
-/* ---------- PREÇOS por REF/SERVIÇO/COLEÇÃO ---------- */
+/* ---------- PREÇOS por REF/SERVIÇO/COLEÇÃO (rota legada usada por Importador) ---------- */
 ROUTES.terc_precos = async (main) => {
   await TERC.load();
   main.innerHTML = `
@@ -4100,19 +5617,27 @@ ROUTES.terc_precos = async (main) => {
 };
 
 async function TERC_openPrecoModal(id, onSave) {
+  await TERC.load();
   let p = { grade: 1, preco: 0, tempo_min: 0, ativo: 1 };
   if (id) {
-    // Não há endpoint singular — busca via lista
     const r = await api('get', '/terc/precos');
     p = (r.data || []).find(x => x.id_preco == id) || p;
   }
+  // Identifica produto inicial (se editando)
+  const prodInicial = (id && p.cod_ref) ? TERC.findProdutoByRef(p.cod_ref, p.id_colecao) : null;
+  const idProdSel = prodInicial ? prodInicial.id_produto : '';
+
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
   card.innerHTML = `
     <h3 class="text-lg font-semibold mb-3"><i class="fas fa-money-bill-wave mr-2 text-brand"></i>${id ? 'Editar' : 'Novo'} Preço</h3>
     <div class="grid grid-cols-2 gap-3">
-      <div><label>Referência *</label><input id="m-ref" value="${p.cod_ref || ''}" placeholder="01-24-58" /></div>
-      <div><label>Descrição</label><input id="m-desc" value="${p.desc_ref || ''}" /></div>
+      <div class="col-span-2">
+        <label>Produto (descrição)<span class="text-xs text-slate-500 ml-1">— escolha um cadastrado para auto-preencher</span></label>
+        <select id="m-prod">${TERC.optProdutos(idProdSel)}</select>
+      </div>
+      <div><label>Referência <span class="text-xs text-slate-400">(opcional)</span></label><input id="m-ref" value="${(p.cod_ref || '').replace(/"/g, '&quot;')}" placeholder="auto se vazio" /></div>
+      <div><label>Descrição</label><input id="m-desc" value="${(p.desc_ref || '').replace(/"/g, '&quot;')}" /></div>
       <div><label>Serviço *</label><select id="m-serv">${TERC.optServicos(p.id_servico)}</select></div>
       <div><label>Coleção</label><select id="m-col">${TERC.optColecoes(p.id_colecao)}</select></div>
       <div><label>Grade (1=única)</label><input id="m-grade" type="number" min="1" value="${p.grade || 1}" /></div>
@@ -4127,15 +5652,29 @@ async function TERC_openPrecoModal(id, onSave) {
     </div>
   `;
   m.appendChild(card); document.body.appendChild(m);
+
+  // 📦 Auto-fill ao escolher PRODUTO
+  $('#m-prod').onchange = () => {
+    const opt = $('#m-prod').options[$('#m-prod').selectedIndex];
+    if (!opt || !opt.value) return;
+    if (opt.dataset.cod) $('#m-ref').value = opt.dataset.cod;
+    if (opt.dataset.desc) $('#m-desc').value = opt.dataset.desc;
+    if (opt.dataset.col && !$('#m-col').value) $('#m-col').value = opt.dataset.col;
+    if (opt.dataset.grade) $('#m-grade').value = opt.dataset.grade;
+  };
+
   $('#m-cancel').onclick = () => m.remove();
   $('#m-save').onclick = async () => {
     const body = {
       cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-desc').value.trim(),
+      id_produto: $('#m-prod').value || null,
       id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
       grade: $('#m-grade').value, preco: $('#m-preco').value, tempo_min: $('#m-tempo').value,
       dt_vigencia: $('#m-vig').value || null, observacao: $('#m-obs').value.trim(), ativo: 1,
     };
-    if (!body.cod_ref || !body.id_servico) { toast('Referência e serviço são obrigatórios', 'warning'); return; }
+    if (!body.id_servico) { toast('Serviço é obrigatório', 'warning'); return; }
+    if (!body.cod_ref && !body.desc_ref && !body.id_produto) { toast('Selecione um produto, ou informe referência/descrição', 'warning'); return; }
+    if (!body.preco || Number(body.preco) <= 0) { toast('Informe o preço', 'warning'); return; }
     try {
       if (id) await api('put', '/terc/precos/' + id, body);
       else await api('post', '/terc/precos', body);

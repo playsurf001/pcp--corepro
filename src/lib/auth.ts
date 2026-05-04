@@ -131,3 +131,27 @@ export function requirePerfil(min: string) {
     return next();
   };
 }
+
+/**
+ * Bloqueia rotas para usuários comuns. Apenas perfil 'admin' pode acessar.
+ * Usado para isolar módulos de Gestão / Produção / Chão de Fábrica / Engenharia / Cadastros.
+ * Retorna 403 com código ADMIN_REQUIRED (consumido pelo SPA para redirecionar).
+ */
+export function requireAdmin() {
+  return async (c: Context, next: Next) => {
+    const user = c.get('user') as any;
+    if (!user) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Não autenticado.', code: 'AUTH_REQUIRED' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (user.perfil !== 'admin') {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Acesso restrito a administradores.', code: 'ADMIN_REQUIRED' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return next();
+  };
+}

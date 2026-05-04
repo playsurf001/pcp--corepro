@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import type { Bindings } from './lib/db';
-import { authMiddleware } from './lib/auth';
+import { authMiddleware, requireAdmin } from './lib/auth';
 
 import auth from './routes/auth';
 import cadastros from './routes/cadastros';
@@ -31,14 +31,50 @@ app.get('/api/health', (c) =>
 // Middleware de autenticação (protege /api/* exceto rotas públicas)
 app.use('/api/*', authMiddleware);
 
+// Auth e Terceirização: acessíveis a TODOS os usuários autenticados
 app.route('/api', auth);
+app.route('/api', terceirizacao);
+
+// Demais módulos: APENAS administradores
+// (Gestão, Produção, Chão de Fábrica, Engenharia, Cadastros, MES, Importador genérico)
+const adminOnly = requireAdmin();
+// Cadastros
+app.use('/api/clientes', adminOnly); app.use('/api/clientes/*', adminOnly);
+app.use('/api/referencias', adminOnly); app.use('/api/referencias/*', adminOnly);
+app.use('/api/maquinas', adminOnly); app.use('/api/maquinas/*', adminOnly);
+app.use('/api/aparelhos', adminOnly); app.use('/api/aparelhos/*', adminOnly);
+app.use('/api/operacoes', adminOnly); app.use('/api/operacoes/*', adminOnly);
+app.use('/api/cores', adminOnly); app.use('/api/cores/*', adminOnly);
+app.use('/api/tamanhos', adminOnly); app.use('/api/tamanhos/*', adminOnly);
+app.use('/api/parametros', adminOnly); app.use('/api/parametros/*', adminOnly);
+// Sequências
+app.use('/api/sequencias', adminOnly); app.use('/api/sequencias/*', adminOnly);
+// OPs
+app.use('/api/ops', adminOnly); app.use('/api/ops/*', adminOnly);
+// Produção / Apontamentos / Dashboard de fábrica
+app.use('/api/apontamentos', adminOnly); app.use('/api/apontamentos/*', adminOnly);
+app.use('/api/dashboard', adminOnly); app.use('/api/dashboard/*', adminOnly);
+app.use('/api/produtos/ranking', adminOnly);
+app.use('/api/auditoria', adminOnly); app.use('/api/auditoria/*', adminOnly);
+// MES / chão de fábrica
+app.use('/api/setores', adminOnly); app.use('/api/setores/*', adminOnly);
+app.use('/api/colaboradores', adminOnly); app.use('/api/colaboradores/*', adminOnly);
+app.use('/api/sessoes', adminOnly); app.use('/api/sessoes/*', adminOnly);
+app.use('/api/defeitos', adminOnly); app.use('/api/defeitos/*', adminOnly);
+app.use('/api/bonificacao', adminOnly); app.use('/api/bonificacao/*', adminOnly);
+app.use('/api/rastreabilidade', adminOnly); app.use('/api/rastreabilidade/*', adminOnly);
+app.use('/api/alertas', adminOnly); app.use('/api/alertas/*', adminOnly);
+// Relatórios
+app.use('/api/relatorios', adminOnly); app.use('/api/relatorios/*', adminOnly);
+// Importador genérico (NÃO o de terceirização, que tem prefixo /api/terc/importar/...)
+app.use('/api/importar', adminOnly); app.use('/api/importar/*', adminOnly);
+
 app.route('/api', cadastros);
 app.route('/api', sequencias);
 app.route('/api', ops);
 app.route('/api', producao);
 app.route('/api', importador);
 app.route('/api', relatorios);
-app.route('/api', terceirizacao);
 app.route('/api', mes);
 
 // SPA: uma única página, navegação por hash

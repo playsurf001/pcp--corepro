@@ -633,3 +633,156 @@ window.Modal = Modal;
 if (typeof window.debounce !== 'function' && typeof debounce === 'function') {
   window.debounce = debounce;
 }
+
+/* ============================================================
+ * ACCORDION — helper para blocos minimizados/expandíveis
+ * Comportamento: apenas 1 bloco aberto por vez (group accordion).
+ *
+ * Uso:
+ *   Accordion.render(container, [
+ *     { id, icon, title, summary: 'HTML pílulas', body: 'HTML do corpo',
+ *       open: false, onOpen: (block, body) => loadData() }
+ *   ], { group: 'terc' })
+ *
+ * - id: identificador único (persistido em localStorage por grupo)
+ * - icon: classe FontAwesome (ex: 'fa-truck-fast')
+ * - title: nome visível do bloco
+ * - summary: HTML curto exibido no header (ex: pílulas com totais)
+ * - body: HTML do corpo (renderizado já no DOM, mas com max-height:0)
+ * - open: se true, inicia expandido (default: false → todos minimizados)
+ * - onOpen: callback chamado na 1ª expansão (lazy load). Recebe (blockEl, bodyEl).
+ * ============================================================ */
+const Accordion = {
+  /**
+   * Renderiza um conjunto de blocos no container.
+   * Retorna API: { open(id), close(id), refreshSummary(id, html), getOpen() }
+   */
+  render(container, blocks, opts = {}) {
+    if (!container) return null;
+    const group = opts.group || 'default';
+    const storageKey = 'corepro_acc_' + group;
+
+    container.innerHTML = blocks.map(b => `
+      <section class="acc-block ${b.open ? 'open' : ''}" data-acc-id="${b.id}">
+        <header class="acc-header" data-acc-toggle>
+          <span class="acc-icon"><i class="fas ${b.icon || 'fa-cube'}"></i></span>
+          <div class="acc-title">
+            <div class="acc-title-row">
+              <h3>${b.title || ''}</h3>
+            </div>
+            <div class="acc-summary" data-acc-summary>${b.summary || '<span class="text-slate-400" style="opacity:.6">Clique para expandir…</span>'}</div>
+          </div>
+          <span class="acc-chev"><i class="fas fa-chevron-down"></i></span>
+        </header>
+        <div class="acc-body" data-acc-body>
+          <div data-acc-content>${b.body || ''}</div>
+        </div>
+      </section>
+    `).join('');
+
+    const _loaded = {};
+
+    function expand(id) {
+      const blocks = container.querySelectorAll('.acc-block');
+      blocks.forEach(b => {
+        if (b.dataset.accId === String(id)) {
+          if (!b.classList.contains('open')) {
+            b.classList.add('open');
+            const meta = (opts.blocks || []).concat([]);
+            // dispara callback uma vez (lazy)
+            const cfg = (opts._byId || {})[id];
+            if (cfg && typeof cfg.onOpen === 'function' && !_loaded[id]) {
+              _loaded[id] = true;
+              try {
+                const bodyEl = b.querySelector('[data-acc-content]');
+                cfg.onOpen(b, bodyEl);
+              } catch (e) { console.error('[Accordion onOpen]', e); }
+            }
+          }
+        } else {
+          b.classList.remove('open');
+        }
+      });
+      try { localStorage.setItem(storageKey, String(id)); } catch (e) {}
+    }
+
+    function close(id) {
+      const b = container.querySelector(`.acc-block[data-acc-id="${id}"]`);
+      if (b) b.classList.remove('open');
+      try { localStorage.setItem(storageKey, ''); } catch (e) {}
+    }
+
+    function toggle(id) {
+      const b = container.querySelector(`.acc-block[data-acc-id="${id}"]`);
+      if (!b) return;
+      if (b.classList.contains('open')) close(id);
+      else expand(id);
+    }
+
+    // Mapeia config para acesso rápido nos handlers
+    opts._byId = {};
+    blocks.forEach(b => { opts._byId[b.id] = b; });
+
+    // Bind clique no header (e no título também)
+    container.querySelectorAll('[data-acc-toggle]').forEach(h => {
+      h.addEventListener('click', (e) => {
+        // Se clicou em botão dentro do header, ignora (deixa o handler do botão)
+        if (e.target.closest('button:not([data-acc-toggle])')) return;
+        const block = h.closest('.acc-block');
+        toggle(block.dataset.accId);
+      });
+    });
+
+    // Restaurar último aberto OU bloco inicial open=true
+    let initial = blocks.find(b => b.open)?.id;
+    if (!initial && opts.persist !== false) {
+      try {
+        const saved = localStorage.getItem(storageKey);
+        if (saved && blocks.find(b => String(b.id) === saved)) initial = saved;
+      } catch (e) {}
+    }
+    if (initial) {
+      // Se estava marcado open inicial, dispara onOpen ainda assim
+      if (!_loaded[initial]) {
+        _loaded[initial] = true;
+        const cfg = opts._byId[initial];
+        if (cfg && typeof cfg.onOpen === 'function') {
+          setTimeout(() => {
+            const block = container.querySelector(`.acc-block[data-acc-id="${initial}"]`);
+            if (block) {
+              block.classList.add('open');
+              try { cfg.onOpen(block, block.querySelector('[data-acc-content]')); } catch (e) { console.error(e); }
+            }
+          }, 50);
+        }
+      } else {
+        expand(initial);
+      }
+    }
+
+    return {
+      open: expand,
+      close,
+      toggle,
+      refreshSummary(id, html) {
+        const el = container.querySelector(`.acc-block[data-acc-id="${id}"] [data-acc-summary]`);
+        if (el) el.innerHTML = html;
+      },
+      refreshBody(id, html) {
+        const el = container.querySelector(`.acc-block[data-acc-id="${id}"] [data-acc-content]`);
+        if (el) el.innerHTML = html;
+      },
+      getOpen() {
+        const b = container.querySelector('.acc-block.open');
+        return b ? b.dataset.accId : null;
+      },
+      getBlock(id) {
+        return container.querySelector(`.acc-block[data-acc-id="${id}"]`);
+      },
+      getBody(id) {
+        return container.querySelector(`.acc-block[data-acc-id="${id}"] [data-acc-content]`);
+      },
+    };
+  },
+};
+window.Accordion = Accordion;
