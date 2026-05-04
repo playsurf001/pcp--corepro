@@ -502,18 +502,23 @@ app.patch('/terc/terceirizados/:id/situacao', async (c) => {
 app.get('/terc/precos', async (c) => {
   const q = c.req.query();
   const where: string[] = ['p.ativo=1']; const binds: any[] = [];
-  if (q.cod_ref) { where.push('p.cod_ref=?'); binds.push(q.cod_ref); }
+  if (q.cod_ref)    { where.push('p.cod_ref=?');    binds.push(q.cod_ref); }
   if (q.id_servico) { where.push('p.id_servico=?'); binds.push(toInt(q.id_servico)); }
   if (q.id_colecao) { where.push('p.id_colecao=?'); binds.push(toInt(q.id_colecao)); }
-  if (q.search) { where.push('(p.cod_ref LIKE ? OR p.desc_ref LIKE ?)'); binds.push(`%${q.search}%`, `%${q.search}%`); }
+  if (q.cor != null && q.cor !== '')         { where.push('p.cor=?');     binds.push(q.cor); }
+  if (q.tamanho != null && q.tamanho !== '') { where.push('p.tamanho=?'); binds.push(q.tamanho); }
+  if (q.search) {
+    where.push('(p.cod_ref LIKE ? OR p.desc_ref LIKE ? OR p.cor LIKE ? OR p.tamanho LIKE ?)');
+    const s = `%${q.search}%`; binds.push(s, s, s, s);
+  }
   const rs = await c.env.DB.prepare(`
     SELECT p.*, s.desc_servico, co.nome_colecao
     FROM terc_precos p
     LEFT JOIN terc_servicos s ON s.id_servico=p.id_servico
     LEFT JOIN terc_colecoes co ON co.id_colecao=p.id_colecao
     WHERE ${where.join(' AND ')}
-    ORDER BY p.cod_ref, p.id_servico
-    LIMIT 500`).bind(...binds).all();
+    ORDER BY p.cod_ref, p.cor, p.tamanho, p.id_servico
+    LIMIT 1000`).bind(...binds).all();
   return c.json(ok(rs.results));
 });
 
@@ -528,38 +533,55 @@ app.post('/terc/precos', async (c) => {
       if (!b.id_colecao) b.id_colecao = p.id_colecao;
     }
   }
-  // Referência agora é OPCIONAL (pode ser auto-gerada a partir do desc_ref se ausente)
   if (!b.id_servico) return fail('Serviço é obrigatório');
   if (!b.cod_ref && !b.desc_ref) return fail('Informe a referência ou descrição do produto');
-  // Auto-gera cod_ref a partir do desc_ref se não fornecido
   if (!b.cod_ref) {
     b.cod_ref = String(b.desc_ref).toUpperCase().replace(/[^A-Z0-9]/g, '-').replace(/-+/g, '-').slice(0, 30);
   }
+  const cor     = String(b.cor ?? '').trim();
+  const tamanho = String(b.tamanho ?? '').trim();
   try {
     const r = await c.env.DB.prepare(`
-      INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, preco, tempo_min, id_colecao, dt_vigencia, observacao, ativo)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+      INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, tamanho, preco, tempo_min, id_colecao, dt_vigencia, observacao, ativo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
       .bind(b.cod_ref, b.desc_ref || null, toInt(b.id_servico), toInt(b.grade, 1),
+        cor, tamanho,
         toNum(b.preco), toNum(b.tempo_min), toInt(b.id_colecao) || null,
         b.dt_vigencia || null, b.observacao || null).run();
     await audit(c, MOD, 'INS', `preco:${r.meta.last_row_id}`, 'preco', '', String(b.preco));
     return c.json(ok({ id: r.meta.last_row_id }));
   } catch (e: any) {
-    if (String(e).includes('UNIQUE')) return fail('Já existe preço para (ref + serviço + grade + coleção)', 409);
+    if (String(e).includes('UNIQUE')) {
+      return fail(`Já existe preço cadastrado para esta combinação (Produto + Cor + Grade + Serviço${b.id_colecao ? ' + Coleção' : ''}).`, 409);
+    }
     return fail(String(e));
   }
 });
 
 app.put('/terc/precos/:id', async (c) => {
   const id = toInt(c.req.param('id')); const b = await c.req.json();
-  await c.env.DB.prepare(`
-    UPDATE terc_precos SET cod_ref=?, desc_ref=?, id_servico=?, grade=?, preco=?, tempo_min=?, id_colecao=?, dt_vigencia=?, observacao=?, ativo=?
-    WHERE id_preco=?`)
-    .bind(b.cod_ref, b.desc_ref || null, toInt(b.id_servico), toInt(b.grade, 1),
-      toNum(b.preco), toNum(b.tempo_min), toInt(b.id_colecao) || null,
-      b.dt_vigencia || null, b.observacao || null, b.ativo ? 1 : 0, id).run();
-  await audit(c, MOD, 'UPD', `preco:${id}`);
-  return c.json(ok({ id }));
+  const cor     = String(b.cor ?? '').trim();
+  const tamanho = String(b.tamanho ?? '').trim();
+  try {
+    await c.env.DB.prepare(`
+      UPDATE terc_precos
+         SET cod_ref=?, desc_ref=?, id_servico=?, grade=?, cor=?, tamanho=?,
+             preco=?, tempo_min=?, id_colecao=?, dt_vigencia=?, observacao=?, ativo=?,
+             dt_alteracao=datetime('now'), alterado_por=?
+       WHERE id_preco=?`)
+      .bind(b.cod_ref, b.desc_ref || null, toInt(b.id_servico), toInt(b.grade, 1),
+        cor, tamanho,
+        toNum(b.preco), toNum(b.tempo_min), toInt(b.id_colecao) || null,
+        b.dt_vigencia || null, b.observacao || null, b.ativo ? 1 : 0,
+        getUser(c), id).run();
+    await audit(c, MOD, 'UPD', `preco:${id}`);
+    return c.json(ok({ id }));
+  } catch (e: any) {
+    if (String(e).includes('UNIQUE')) {
+      return fail('Já existe outro preço com a mesma combinação (Produto + Cor + Grade + Serviço).', 409);
+    }
+    return fail(String(e));
+  }
 });
 
 app.delete('/terc/precos/:id', async (c) => {
@@ -569,19 +591,293 @@ app.delete('/terc/precos/:id', async (c) => {
   return c.json(ok({ id, deleted: true }));
 });
 
-// Busca de preço tabelado (autofill nas remessas)
+// 🚨 Excluir TODOS os preços com confirmação dupla
+app.delete('/terc/precos', async (c) => {
+  const q = c.req.query();
+  let body: any = {};
+  try { body = await c.req.json(); } catch {}
+  const c1 = String(q.confirm1 || body.confirm1 || '');
+  const c2 = String(q.confirm2 || body.confirm2 || '');
+  if (c1 !== 'SIM' || c2 !== 'EXCLUIR-TODOS') {
+    return fail('Confirmação dupla obrigatória: confirm1=SIM e confirm2=EXCLUIR-TODOS', 400);
+  }
+  const cnt = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM terc_precos').first<any>();
+  await c.env.DB.prepare('DELETE FROM terc_precos').run();
+  await audit(c, MOD, 'DEL_ALL', 'precos', 'total', String(cnt?.n || 0), '0');
+  return c.json(ok({ deleted: Number(cnt?.n) || 0 }));
+});
+
+// Busca de preço tabelado (autofill nas remessas) — agora considera COR + TAMANHO
+// Prioridade:
+//   1) Produto + Cor + Tamanho + Serviço (mais específico)
+//   2) Produto + Cor + Serviço
+//   3) Produto + Serviço
+//   4) Serviço padrão (qualquer produto cod_ref='*')
 app.get('/terc/precos/lookup', async (c) => {
   const q = c.req.query();
-  const r = await c.env.DB.prepare(`
-    SELECT p.preco, p.tempo_min, p.desc_ref
-    FROM terc_precos p
-    WHERE p.cod_ref=? AND p.id_servico=? AND p.grade=? AND p.ativo=1
-      AND (p.id_colecao=? OR p.id_colecao IS NULL)
-    ORDER BY CASE WHEN p.id_colecao=? THEN 0 ELSE 1 END
-    LIMIT 1`)
-    .bind(q.cod_ref, toInt(q.id_servico), toInt(q.grade, 1), toInt(q.id_colecao) || null, toInt(q.id_colecao) || null)
-    .first<any>();
+  const cod = String(q.cod_ref || '').trim();
+  const idsv = toInt(q.id_servico);
+  const cor = String(q.cor || '').trim();
+  const tam = String(q.tamanho || '').trim();
+  const grd = toInt(q.grade, 1);
+  const idcol = toInt(q.id_colecao) || null;
+  if (!cod || !idsv) return fail('cod_ref e id_servico são obrigatórios');
+
+  // Helper de busca pré-ordenada
+  const tryQ = async (sql: string, ...binds: any[]) =>
+    c.env.DB.prepare(sql).bind(...binds).first<any>();
+
+  // Nível 1: Produto+Cor+Tamanho+Serviço (com ou sem coleção)
+  let r = null as any;
+  if (cor && tam) {
+    r = await tryQ(`
+      SELECT preco, tempo_min, desc_ref, cor, tamanho, id_preco,
+             'produto+cor+grade+servico' AS match_level
+      FROM terc_precos
+      WHERE cod_ref=? AND id_servico=? AND cor=? AND tamanho=? AND ativo=1
+        AND (id_colecao=? OR id_colecao IS NULL)
+      ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END
+      LIMIT 1`, cod, idsv, cor, tam, idcol, idcol);
+  }
+  // Nível 2: Produto+Cor+Serviço
+  if (!r && cor) {
+    r = await tryQ(`
+      SELECT preco, tempo_min, desc_ref, cor, tamanho, id_preco,
+             'produto+cor+servico' AS match_level
+      FROM terc_precos
+      WHERE cod_ref=? AND id_servico=? AND cor=? AND (tamanho='' OR tamanho IS NULL) AND ativo=1
+        AND (id_colecao=? OR id_colecao IS NULL)
+      ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END
+      LIMIT 1`, cod, idsv, cor, idcol, idcol);
+  }
+  // Nível 3: Produto+Serviço (sem cor, sem tamanho)
+  if (!r) {
+    r = await tryQ(`
+      SELECT preco, tempo_min, desc_ref, cor, tamanho, id_preco,
+             'produto+servico' AS match_level
+      FROM terc_precos
+      WHERE cod_ref=? AND id_servico=? AND (cor='' OR cor IS NULL) AND (tamanho='' OR tamanho IS NULL) AND ativo=1
+        AND (id_colecao=? OR id_colecao IS NULL)
+      ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END
+      LIMIT 1`, cod, idsv, idcol, idcol);
+  }
+  // Nível 4: Serviço padrão (qualquer produto), grade=grd
+  if (!r) {
+    r = await tryQ(`
+      SELECT preco, tempo_min, desc_ref, cor, tamanho, id_preco,
+             'servico_padrao' AS match_level
+      FROM terc_precos
+      WHERE cod_ref='*' AND id_servico=? AND ativo=1
+      LIMIT 1`, idsv);
+  }
+  // Compatibilidade: ainda inclui campo grade legado se existir match
   return c.json(ok(r || null));
+});
+
+/* =================================================================
+ * VARIAÇÕES DE PRODUTO (cor + grade) — CRUD por produto
+ * ================================================================= */
+
+// Lista variações de um produto
+app.get('/terc/produtos/:id/variacoes', async (c) => {
+  const idProd = toInt(c.req.param('id'));
+  const rs = await c.env.DB.prepare(
+    'SELECT * FROM terc_produto_variacoes WHERE id_produto=? AND ativo=1 ORDER BY cor, tamanho'
+  ).bind(idProd).all();
+  return c.json(ok(rs.results));
+});
+
+// Cria variação (id_produto, cor, tamanho)
+app.post('/terc/produtos/:id/variacoes', async (c) => {
+  const idProd = toInt(c.req.param('id'));
+  const b = await c.req.json();
+  const cor = String(b.cor ?? '').trim();
+  const tam = String(b.tamanho ?? '').trim();
+  if (!cor && !tam) return fail('Informe ao menos cor ou tamanho');
+  try {
+    const r = await c.env.DB.prepare(
+      'INSERT INTO terc_produto_variacoes (id_produto, cor, tamanho) VALUES (?, ?, ?)'
+    ).bind(idProd, cor, tam).run();
+    await audit(c, MOD, 'INS', `variacao:${r.meta.last_row_id}`, 'cor+tam', '', `${cor}|${tam}`);
+    return c.json(ok({ id: r.meta.last_row_id, cor, tamanho: tam }));
+  } catch (e: any) {
+    if (String(e).includes('UNIQUE')) return fail('Esta variação (cor + tamanho) já existe para este produto.', 409);
+    return fail(String(e));
+  }
+});
+
+// Inserção em LOTE: cores[] × tamanhos[] (gera todas as combinações)
+app.post('/terc/produtos/:id/variacoes/lote', async (c) => {
+  const idProd = toInt(c.req.param('id'));
+  const b = await c.req.json();
+  const cores: string[] = Array.isArray(b.cores) ? b.cores.map((x: any) => String(x).trim()).filter(Boolean) : [];
+  const tams:  string[] = Array.isArray(b.tamanhos) ? b.tamanhos.map((x: any) => String(x).trim()).filter(Boolean) : [];
+  if (cores.length === 0 && tams.length === 0) return fail('Informe ao menos uma cor ou um tamanho');
+
+  const combos: { cor: string; tam: string }[] = [];
+  if (cores.length && tams.length) {
+    for (const c1 of cores) for (const t1 of tams) combos.push({ cor: c1, tam: t1 });
+  } else if (cores.length) {
+    for (const c1 of cores) combos.push({ cor: c1, tam: '' });
+  } else {
+    for (const t1 of tams) combos.push({ cor: '', tam: t1 });
+  }
+
+  let criados = 0, ignorados = 0;
+  for (const x of combos) {
+    try {
+      await c.env.DB.prepare(
+        'INSERT INTO terc_produto_variacoes (id_produto, cor, tamanho) VALUES (?, ?, ?)'
+      ).bind(idProd, x.cor, x.tam).run();
+      criados++;
+    } catch { ignorados++; }
+  }
+  await audit(c, MOD, 'INS_LOTE', `produto:${idProd}`, 'variacoes', '', `+${criados} (${ignorados} já existiam)`);
+  return c.json(ok({ criados, ignorados, total: combos.length }));
+});
+
+app.delete('/terc/produtos/:id/variacoes/:idv', async (c) => {
+  const idv = toInt(c.req.param('idv'));
+  await c.env.DB.prepare('DELETE FROM terc_produto_variacoes WHERE id_var=?').bind(idv).run();
+  await audit(c, MOD, 'DEL', `variacao:${idv}`);
+  return c.json(ok({ id: idv, deleted: true }));
+});
+
+/* =================================================================
+ * CATÁLOGO DE CORES (reutilizável)
+ * ================================================================= */
+
+app.get('/terc/cores', async (c) => {
+  const rs = await c.env.DB.prepare(
+    'SELECT id_cor, nome_cor, hex, ativo FROM terc_cores WHERE ativo=1 ORDER BY nome_cor'
+  ).all();
+  return c.json(ok(rs.results));
+});
+
+app.post('/terc/cores', async (c) => {
+  const b = await c.req.json();
+  const nome = String(b.nome_cor ?? '').trim();
+  if (!nome) return fail('Nome da cor obrigatório');
+  try {
+    const r = await c.env.DB.prepare(
+      'INSERT INTO terc_cores (nome_cor, hex) VALUES (?, ?)'
+    ).bind(nome, b.hex || null).run();
+    await audit(c, MOD, 'INS', `cor:${r.meta.last_row_id}`, 'nome', '', nome);
+    return c.json(ok({ id: r.meta.last_row_id, nome_cor: nome }));
+  } catch (e: any) {
+    if (String(e).includes('UNIQUE')) return fail('Esta cor já existe', 409);
+    return fail(String(e));
+  }
+});
+
+app.delete('/terc/cores/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  await c.env.DB.prepare('UPDATE terc_cores SET ativo=0 WHERE id_cor=?').bind(id).run();
+  await audit(c, MOD, 'DEL', `cor:${id}`);
+  return c.json(ok({ id, deleted: true }));
+});
+
+/* =================================================================
+ * IMPORTAÇÃO DE PLANILHA (Cor + Preço + Grade)
+ *   Recebe: { rows: [{cod_ref, desc_ref, cor, tamanho, servico, preco, tempo}, ...],
+ *             modo: 'criar' | 'atualizar' | 'simular',
+ *             id_colecao: number | null }
+ *   Retorna: { criados, atualizados, ignorados, erros: [], simulado: bool }
+ * ================================================================= */
+app.post('/terc/precos/importar', async (c) => {
+  const b = await c.req.json();
+  const rows: any[] = Array.isArray(b.rows) ? b.rows : [];
+  const modo = String(b.modo || 'atualizar').toLowerCase(); // criar|atualizar|simular
+  const idColecao = toInt(b.id_colecao) || null;
+  if (rows.length === 0) return fail('Nenhuma linha para importar');
+
+  // Pré-carrega serviços para mapear nome → id
+  const svRows = await c.env.DB.prepare('SELECT id_servico, desc_servico FROM terc_servicos').all();
+  const svMap = new Map<string, number>();
+  for (const sv of (svRows.results as any[])) {
+    svMap.set(String(sv.desc_servico || '').toLowerCase().trim(), Number(sv.id_servico));
+  }
+
+  let criados = 0, atualizados = 0, ignorados = 0;
+  const erros: { linha: number; motivo: string }[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || {};
+    const lineNo = i + 1;
+    try {
+      const cod_ref  = String(row.cod_ref ?? row.referencia ?? row.ref ?? '').trim();
+      const desc_ref = String(row.desc_ref ?? row.descricao ?? '').trim();
+      const cor      = String(row.cor ?? '').trim();
+      const tamanho  = String(row.tamanho ?? row.grade ?? '').trim();
+      const svRaw    = String(row.servico ?? row.desc_servico ?? '').trim();
+      const preco    = toNum(row.preco);
+      const tempo    = toNum(row.tempo ?? row.tempo_min);
+
+      if (!cod_ref) { erros.push({ linha: lineNo, motivo: 'Referência vazia' }); ignorados++; continue; }
+      if (!svRaw)   { erros.push({ linha: lineNo, motivo: 'Serviço vazio' });   ignorados++; continue; }
+      const idSv = svMap.get(svRaw.toLowerCase());
+      if (!idSv)    { erros.push({ linha: lineNo, motivo: `Serviço "${svRaw}" não cadastrado` }); ignorados++; continue; }
+
+      // Procura preço existente pela chave de negócio
+      const existing = await c.env.DB.prepare(`
+        SELECT id_preco FROM terc_precos
+        WHERE cod_ref=? AND id_servico=? AND COALESCE(cor,'')=? AND COALESCE(tamanho,'')=?
+          AND COALESCE(id_colecao,0)=COALESCE(?,0)
+        LIMIT 1`)
+        .bind(cod_ref, idSv, cor, tamanho, idColecao).first<any>();
+
+      if (modo === 'simular') {
+        if (existing) atualizados++; else criados++;
+        continue;
+      }
+
+      if (existing && (modo === 'atualizar' || modo === 'criar')) {
+        if (modo === 'criar') { ignorados++; continue; } // modo criar: pula existentes
+        await c.env.DB.prepare(`
+          UPDATE terc_precos SET desc_ref=COALESCE(NULLIF(?, ''), desc_ref),
+                                  preco=?, tempo_min=?, ativo=1,
+                                  dt_alteracao=datetime('now'), alterado_por=?
+           WHERE id_preco=?`)
+          .bind(desc_ref, preco, tempo, getUser(c), existing.id_preco).run();
+        atualizados++;
+      } else {
+        // Não existe → cria (mesmo no modo 'atualizar' criamos os faltantes)
+        await c.env.DB.prepare(`
+          INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, tamanho,
+                                   preco, tempo_min, id_colecao, ativo)
+          VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 1)`)
+          .bind(cod_ref, desc_ref || null, idSv, cor, tamanho, preco, tempo, idColecao).run();
+        criados++;
+
+        // Garantir produto e variação correspondente
+        await c.env.DB.prepare(`
+          INSERT OR IGNORE INTO terc_produtos (cod_ref, desc_ref, id_colecao, ativo)
+          VALUES (?, ?, ?, 1)`)
+          .bind(cod_ref, desc_ref || cod_ref, idColecao).run();
+        const prod = await c.env.DB.prepare(
+          'SELECT id_produto FROM terc_produtos WHERE cod_ref=? AND COALESCE(id_colecao,0)=COALESCE(?,0) LIMIT 1'
+        ).bind(cod_ref, idColecao).first<any>();
+        if (prod && (cor || tamanho)) {
+          await c.env.DB.prepare(
+            'INSERT OR IGNORE INTO terc_produto_variacoes (id_produto, cor, tamanho) VALUES (?, ?, ?)'
+          ).bind(prod.id_produto, cor, tamanho).run().catch(() => {});
+        }
+      }
+    } catch (e: any) {
+      erros.push({ linha: lineNo, motivo: String(e?.message || e) });
+      ignorados++;
+    }
+  }
+
+  await audit(c, MOD, 'IMPORT_PRECOS', 'precos', 'totais', '',
+    `criados:${criados} atualizados:${atualizados} ignorados:${ignorados} modo:${modo}`);
+  return c.json(ok({
+    criados, atualizados, ignorados,
+    erros: erros.slice(0, 50),
+    total_erros: erros.length,
+    simulado: modo === 'simular',
+    modo,
+  }));
 });
 
 /* =================================================================
@@ -859,7 +1155,7 @@ app.delete('/terc/remessas/:id', async (c) => {
     return c.json({
       ok: false,
       code: 'NEEDS_CONFIRMATION',
-      error: `Remessa nº ${rem.num_controle} possui ${totalRet} retorno(s). Confirme a exclusão.`,
+      error: `Esta remessa possui ${totalRet} retorno(s) vinculado(s). Escolha uma opção.`,
       retornos: totalRet,
       num_controle: rem.num_controle,
     }, 409);

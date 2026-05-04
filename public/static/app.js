@@ -2812,21 +2812,23 @@ function openUsuarioForm(row, onSaved) {
 
 /* ---------- Cache de cadastros auxiliares ---------- */
 const TERC = {
-  setores: [], servicos: [], colecoes: [], terceirizados: [], produtos: [],
+  setores: [], servicos: [], colecoes: [], terceirizados: [], produtos: [], cores: [],
   async load(force = false) {
     if (!force && this.terceirizados.length) return;
-    const [rs1, rs2, rs3, rs4, rs5] = await Promise.all([
+    const [rs1, rs2, rs3, rs4, rs5, rs6] = await Promise.all([
       api('get', '/terc/setores'),
       api('get', '/terc/servicos'),
       api('get', '/terc/colecoes'),
       api('get', '/terc/terceirizados'),
       api('get', '/terc/produtos', null, { silent: true }).catch(() => ({ data: [] })),
+      api('get', '/terc/cores', null, { silent: true }).catch(() => ({ data: [] })),
     ]);
     this.setores = rs1.data || [];
     this.servicos = rs2.data || [];
     this.colecoes = rs3.data || [];
     this.terceirizados = rs4.data || [];
     this.produtos = rs5.data || [];
+    this.cores = rs6.data || [];
   },
   async reloadProdutos() {
     try { const r = await api('get', '/terc/produtos', null, { silent: true }); this.produtos = r.data || []; } catch {}
@@ -3871,7 +3873,11 @@ async function TERC_openRemModal(id, onSave) {
 
       <div class="col-span-2"><label>Referência</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="auto-preenchido" /></div>
       <div class="col-span-2"><label>Descrição</label><input id="m-descref" value="${r.desc_ref || ''}" /></div>
-      <div class="col-span-2"><label>Cor</label><input id="m-cor" value="${r.cor || ''}" /></div>
+      <div class="col-span-2">
+        <label>Cor</label>
+        <input id="m-cor" value="${(r.cor || '').replace(/"/g, '&quot;')}" list="rem-cor-dl" placeholder="auto-carregado do produto" />
+        <datalist id="rem-cor-dl"></datalist>
+      </div>
 
       <div class="col-span-2"><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
       <div class="col-span-2"><label>Preço unit. (R$) <span id="m-preco-tag" class="text-xs ml-1"></span></label><input type="number" step="0.01" id="m-preco" value="${r.preco_unit || 0}" /></div>
@@ -3947,26 +3953,76 @@ async function TERC_openRemModal(id, onSave) {
     } else $('#m-prev').textContent = '—';
   }
 
-  // 🔎 Lookup automático de preço (sempre que serviço/produto/coleção mudam)
+  // 🎨 Carrega cores cadastradas para o produto selecionado (datalist dinâmico)
+  async function loadCoresDoProduto() {
+    const dl = $('#rem-cor-dl');
+    if (!dl) return;
+    const cod = $('#m-ref').value.trim();
+    let nomes = new Set();
+    // 1) Cores cadastradas em variações do produto (id_produto)
+    const idProd = $('#m-prod').value;
+    if (idProd) {
+      try {
+        const r = await api('get', '/terc/produtos/' + idProd + '/variacoes', null, { silent: true });
+        fmt.safeArr(r?.data).forEach(v => { if (v.cor) nomes.add(v.cor); });
+      } catch {}
+    }
+    // 2) Cores presentes na tabela de preços para esse cod_ref
+    if (cod) {
+      try {
+        const r = await api('get', '/terc/precos?cod_ref=' + encodeURIComponent(cod), null, { silent: true });
+        fmt.safeArr(r?.data).forEach(p => { if (p.cor) nomes.add(p.cor); });
+      } catch {}
+    }
+    // 3) Catálogo geral (fallback)
+    if (nomes.size === 0) fmt.safeArr(window.TERC?.cores).forEach(c => nomes.add(c.nome_cor));
+    dl.innerHTML = Array.from(nomes).sort().map(n => `<option value="${n}">`).join('');
+  }
+
+  // 🔎 Lookup automático de preço (Produto + Cor + Tamanho + Serviço, com fallback)
+  // Prioridade enviada ao backend:
+  //   1) Produto + Cor + Tamanho + Serviço → match_level='produto+cor+grade+servico'
+  //   2) Produto + Cor + Serviço            → match_level='produto+cor+servico'
+  //   3) Produto + Serviço                  → match_level='produto+servico'
+  //   4) Serviço padrão                     → match_level='servico_padrao'
   let _lastLookupKey = '';
   async function autoLookupPreco() {
     const cod = $('#m-ref').value.trim();
-    const sv = $('#m-serv').value;
+    const sv  = $('#m-serv').value;
     const col = $('#m-col').value;
+    const cor = $('#m-cor').value.trim();
+    // Tamanho dominante = aquele com mais peças na grade (ou primeiro >0)
+    const grade = Array.from(card.querySelectorAll('.grade-in'))
+      .map(i => ({ tam: i.dataset.tam, qtd: Number(i.value || 0) }))
+      .filter(g => g.qtd > 0)
+      .sort((a, b) => b.qtd - a.qtd);
+    const tam = grade[0]?.tam || '';
     if (!cod || !sv) { setPrecoTag('', ''); return; }
-    const key = `${cod}|${sv}|${col || ''}`;
+    const key = `${cod}|${sv}|${col || ''}|${cor}|${tam}`;
     if (key === _lastLookupKey) return;
     _lastLookupKey = key;
     try {
-      const res = await api('get', `/terc/precos/lookup?cod_ref=${encodeURIComponent(cod)}&id_servico=${sv}&id_colecao=${col || ''}`, null, { silent: true });
+      const params = new URLSearchParams({ cod_ref: cod, id_servico: sv });
+      if (col) params.set('id_colecao', col);
+      if (cor) params.set('cor', cor);
+      if (tam) params.set('tamanho', tam);
+      const res = await api('get', '/terc/precos/lookup?' + params.toString(), null, { silent: true });
       if (res.data && res.data.preco != null) {
         $('#m-preco').value = Number(res.data.preco).toFixed(2);
         if (res.data.tempo_min && $('#m-tempo')) $('#m-tempo').value = res.data.tempo_min;
         if (res.data.desc_ref && !$('#m-descref').value) $('#m-descref').value = res.data.desc_ref;
-        setPrecoTag('<i class="fas fa-check"></i> da tabela', '#10b981');
+        const lvl = res.data.match_level || '';
+        const labelMap = {
+          'produto+cor+grade+servico': '<i class="fas fa-bullseye"></i> aplicado: produto+cor+grade+serviço',
+          'produto+cor+servico':       '<i class="fas fa-circle-check"></i> aplicado: produto+cor+serviço',
+          'produto+servico':            '<i class="fas fa-circle-check"></i> aplicado: produto+serviço',
+          'servico_padrao':             '<i class="fas fa-circle-info"></i> aplicado: serviço padrão',
+        };
+        setPrecoTag(labelMap[lvl] || '<i class="fas fa-check"></i> da tabela', '#10b981');
+        toast('Preço aplicado automaticamente', 'success');
         recalc();
       } else {
-        setPrecoTag('<i class="fas fa-keyboard"></i> manual — <a href="#" id="m-save-preco" style="text-decoration:underline">salvar?</a>', '#f59e0b');
+        setPrecoTag('<i class="fas fa-triangle-exclamation"></i> Preço não encontrado para esta combinação — <a href="#" id="m-save-preco" style="text-decoration:underline">salvar?</a>', '#f59e0b');
         const a = $('#m-save-preco');
         if (a) a.onclick = (e) => { e.preventDefault(); saveSugestaoPreco(); };
       }
@@ -3990,7 +4046,7 @@ async function TERC_openRemModal(id, onSave) {
   }
 
   // 📦 Auto-fill ao escolher PRODUTO
-  $('#m-prod').onchange = () => {
+  $('#m-prod').onchange = async () => {
     const opt = $('#m-prod').options[$('#m-prod').selectedIndex];
     if (!opt || !opt.value) return;
     const cod = opt.dataset.cod || '';
@@ -3999,13 +4055,21 @@ async function TERC_openRemModal(id, onSave) {
     if (cod) $('#m-ref').value = cod;
     if (desc) $('#m-descref').value = desc;
     if (colId && !$('#m-col').value) $('#m-col').value = colId;
+    await loadCoresDoProduto();
+    toast('Produto atualizado', 'success');
     autoLookupPreco();
   };
   $('#m-serv').addEventListener('change', autoLookupPreco);
   $('#m-col').addEventListener('change', autoLookupPreco);
-  $('#m-ref').addEventListener('blur', () => { _lastLookupKey = ''; autoLookupPreco(); });
+  $('#m-ref').addEventListener('blur', () => { _lastLookupKey = ''; loadCoresDoProduto(); autoLookupPreco(); });
+  $('#m-cor').addEventListener('change', () => { _lastLookupKey = ''; autoLookupPreco(); });
+  $('#m-cor').addEventListener('blur',   () => { _lastLookupKey = ''; autoLookupPreco(); });
   $('#m-preco').addEventListener('input', () => { setPrecoTag('<i class="fas fa-keyboard"></i> manual', '#f59e0b'); recalc(); });
   card.querySelectorAll('.grade-in, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
+  // Recarrega cores e dispara lookup quando a grade muda (tamanho dominante pode mudar)
+  card.querySelectorAll('.grade-in').forEach(i => i.addEventListener('change', () => { _lastLookupKey = ''; autoLookupPreco(); }));
+  // Inicializa datalist de cores e tenta lookup com valores iniciais
+  loadCoresDoProduto();
 
   // 👤 Auto-preenche parâmetros ocultos do terceirizado (não exibe no básico)
   $('#m-terc').addEventListener('change', () => {
@@ -4511,26 +4575,26 @@ async function TERC_confirmDelRem(id, num, onDone) {
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-lg' });
   card.innerHTML = `
-    <h3 class="text-lg font-semibold text-red-700 mb-3"><i class="fas fa-triangle-exclamation mr-2"></i>Excluir Remessa nº ${num}</h3>
-    <p class="text-sm mb-3">Esta remessa possui <b>${totRet} retorno(s)</b> registrado(s). Escolha como excluir:</p>
+    <h3 class="text-lg font-semibold mb-2"><i class="fas fa-triangle-exclamation mr-2 text-amber-500"></i>Remessa nº ${num}</h3>
+    <p class="text-sm text-slate-600 mb-4">Esta remessa possui <b>${totRet} retorno(s)</b> vinculado(s). O que deseja fazer?</p>
     <div class="space-y-2 mb-4">
-      <label class="flex items-start gap-2 p-3 border rounded cursor-pointer hover:bg-slate-50">
+      <label class="flex items-start gap-2 p-3 border-2 border-amber-300 bg-amber-50 rounded cursor-pointer hover:bg-amber-100 transition">
         <input type="radio" name="modo" value="soft" class="mt-1" checked />
         <div>
-          <div class="font-semibold text-amber-700"><i class="fas fa-archive mr-1"></i>Cancelar (mantém histórico)</div>
-          <div class="text-xs text-slate-500">A remessa fica marcada como "Cancelada". Os ${totRet} retorno(s) e seu valor pago são preservados para auditoria. <b>Recomendado.</b></div>
+          <div class="font-semibold text-amber-800"><i class="fas fa-archive mr-1"></i>Cancelar remessa (mantém histórico)</div>
+          <div class="text-xs text-slate-600 mt-1">Status muda para "Cancelada". Os ${totRet} retorno(s) e valores pagos ficam preservados para auditoria. <b>Recomendado.</b></div>
         </div>
       </label>
-      <label class="flex items-start gap-2 p-3 border rounded cursor-pointer hover:bg-red-50">
+      <label class="flex items-start gap-2 p-3 border-2 border-red-300 bg-red-50 rounded cursor-pointer hover:bg-red-100 transition">
         <input type="radio" name="modo" value="cascata" class="mt-1" />
         <div>
-          <div class="font-semibold text-red-700"><i class="fas fa-trash mr-1"></i>Excluir tudo (cascata)</div>
-          <div class="text-xs text-slate-500">Apaga a remessa <b>e</b> os ${totRet} retorno(s) permanentemente. Operação irreversível.</div>
+          <div class="font-semibold text-red-700"><i class="fas fa-trash-can mr-1"></i>Excluir tudo (remessa + retornos)</div>
+          <div class="text-xs text-slate-600 mt-1">Apaga permanentemente a remessa e os ${totRet} retorno(s) vinculado(s). Operação irreversível.</div>
         </div>
       </label>
     </div>
     <div class="flex justify-end gap-2">
-      <button id="c-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="c-cancel" class="btn btn-secondary"><i class="fas fa-xmark mr-1"></i>Cancelar ação</button>
       <button id="c-ok" class="btn btn-danger"><i class="fas fa-check mr-1"></i>Confirmar</button>
     </div>
   `;
@@ -5186,10 +5250,7 @@ async function renderTercRemessasBlock(body, refresh) {
   window.TERC_viewRem = (id) => TERC_openRemDetalhe(id);
   window.TERC_editRem = (id) => TERC_openRemModal(id, () => { load(); refresh && refresh(); });
   window.TERC_retRem = (id) => TERC_openRetModal(id, () => { load(); refresh && refresh(); });
-  window.TERC_delRem = async (id, n) => {
-    if (!confirm('Excluir remessa nº ' + n + '?')) return;
-    try { await api('delete', '/terc/remessas/' + id); toast('Excluída', 'success'); load(); refresh && refresh(); } catch {}
-  };
+  window.TERC_delRem = (id, n) => TERC_confirmDelRem(id, n, () => { load(); refresh && refresh(); });
   body.querySelector('#btn-filtrar').onclick = load;
   body.querySelector('#btn-nova').onclick = () => TERC_openRemModal(null, () => { load(); refresh && refresh(); });
   body.querySelector('#btn-romaneio-lote').onclick = async () => {
@@ -5428,60 +5489,235 @@ async function renderTercProdutosBlock(body, refresh) {
 async function renderTercPrecosBlock(body, refresh) {
   body.innerHTML = `
     <div class="flex flex-wrap items-end gap-3 mb-4">
-      <div><label>Busca</label><input id="f-search" placeholder="Ref ou descrição..." /></div>
+      <div><label>Busca</label><input id="f-search" placeholder="Ref, descrição, cor, tamanho..." /></div>
       <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
       <div><label>Coleção</label><select id="f-col">${TERC.optColecoes()}</select></div>
+      <div><label>Cor</label><input id="f-cor" placeholder="Ex: Azul" list="cores-dl" /></div>
+      <div><label>Tamanho</label><input id="f-tam" placeholder="Ex: M" list="tams-dl" /></div>
+      <datalist id="cores-dl">${(window.TERC?.cores || []).map(c => `<option value="${c.nome_cor}">`).join('')}</datalist>
+      <datalist id="tams-dl">${['PP','P','M','G','GG','XGG','EG','SG'].map(t => `<option value="${t}">`).join('')}</datalist>
       <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
       <div class="flex-1"></div>
+      <button id="btn-importar" class="btn btn-secondary" title="Importar planilha de cor/preço"><i class="fas fa-file-excel mr-1"></i>Importar</button>
       <button id="btn-col" class="btn btn-secondary" title="Gerenciar coleções"><i class="fas fa-layer-group mr-1"></i>Coleções</button>
       <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
+      <button id="btn-del-all" class="btn btn-danger" title="Excluir TODOS os preços (confirmação dupla)"><i class="fas fa-trash-can mr-1"></i>Excluir todos</button>
     </div>
+    <div class="text-xs text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>A combinação <b>Produto + Cor + Grade + Serviço</b> deve ser única. Linhas sem cor/tamanho são preços genéricos do produto (fallback).</div>
     <div class="card p-0 overflow-x-auto" id="tbl"></div>
   `;
   async function load() {
-    const p = new URLSearchParams();
-    if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
-    if (body.querySelector('#f-serv').value) p.set('id_servico', body.querySelector('#f-serv').value);
-    if (body.querySelector('#f-col').value) p.set('id_colecao', body.querySelector('#f-col').value);
-    const r = await api('get', '/terc/precos?' + p.toString());
-    const rs = r.data || [];
-    body.querySelector('#tbl').innerHTML = `
-      <table class="w-full text-sm">
-        <thead class="bg-slate-100"><tr>
-          <th class="text-left p-2">Ref.</th><th class="text-left p-2">Descrição</th><th class="text-left p-2">Serviço</th>
-          <th class="text-left p-2">Coleção</th><th class="text-right p-2">Preço</th><th class="text-right p-2">Tempo (min)</th>
-          <th class="text-center p-2">Vigência</th><th class="text-center p-2">Ações</th>
-        </tr></thead>
-        <tbody>
-          ${rs.map(p => `
-            <tr class="border-b">
-              <td class="p-2 font-mono text-xs">${p.cod_ref}</td>
-              <td class="p-2">${p.desc_ref || '—'}</td>
-              <td class="p-2">${p.desc_servico || '—'}</td>
-              <td class="p-2">${p.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
-              <td class="p-2 text-right font-semibold">${TERC.fmtBRL(p.preco)}</td>
-              <td class="p-2 text-right">${fmt.num(p.tempo_min, 2)}</td>
-              <td class="p-2 text-center">${p.dt_vigencia ? fmt.date(p.dt_vigencia) : '—'}</td>
-              <td class="p-2 text-center">
-                <button class="btn btn-sm btn-primary" onclick="TERC_editPreco(${p.id_preco})"><i class="fas fa-edit"></i></button>
-                <button class="btn btn-sm btn-danger" onclick="TERC_delPreco(${p.id_preco})"><i class="fas fa-trash"></i></button>
-              </td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum preço cadastrado.</div>' : ''}
-    `;
+    try {
+      const p = new URLSearchParams();
+      if (body.querySelector('#f-search').value) p.set('search', body.querySelector('#f-search').value);
+      if (body.querySelector('#f-serv').value)   p.set('id_servico', body.querySelector('#f-serv').value);
+      if (body.querySelector('#f-col').value)    p.set('id_colecao', body.querySelector('#f-col').value);
+      if (body.querySelector('#f-cor').value)    p.set('cor', body.querySelector('#f-cor').value);
+      if (body.querySelector('#f-tam').value)    p.set('tamanho', body.querySelector('#f-tam').value);
+      const r = await api('get', '/terc/precos?' + p.toString(), null, { silent: true });
+      const rs = fmt.safeArr(r?.data);
+      body.querySelector('#tbl').innerHTML = `
+        <table class="w-full text-sm">
+          <thead class="bg-slate-100"><tr>
+            <th class="text-left p-2">Ref.</th>
+            <th class="text-left p-2">Descrição</th>
+            <th class="text-left p-2">Cor</th>
+            <th class="text-center p-2">Grade</th>
+            <th class="text-left p-2">Serviço</th>
+            <th class="text-left p-2">Coleção</th>
+            <th class="text-right p-2">Preço</th>
+            <th class="text-right p-2">Tempo (min)</th>
+            <th class="text-center p-2">Ações</th>
+          </tr></thead>
+          <tbody>
+            ${rs.map(x => `
+              <tr class="border-b hover:bg-slate-50">
+                <td class="p-2 font-mono text-xs">${x.cod_ref || '—'}</td>
+                <td class="p-2">${x.desc_ref || '<span class="text-slate-400">—</span>'}</td>
+                <td class="p-2">${x.cor ? `<span class="px-2 py-0.5 rounded text-xs bg-slate-100">${x.cor}</span>` : '<span class="text-slate-400">—</span>'}</td>
+                <td class="p-2 text-center">${x.tamanho ? `<span class="px-2 py-0.5 rounded text-xs bg-blue-50 text-blue-700 font-mono">${x.tamanho}</span>` : '<span class="text-slate-400">—</span>'}</td>
+                <td class="p-2">${x.desc_servico || '—'}</td>
+                <td class="p-2">${x.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
+                <td class="p-2 text-right font-semibold text-emerald-700">${TERC.fmtBRL(fmt.safeNum(x.preco))}</td>
+                <td class="p-2 text-right">${fmt.num(fmt.safeNum(x.tempo_min), 2)}</td>
+                <td class="p-2 text-center whitespace-nowrap">
+                  <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editPreco(${x.id_preco})"><i class="fas fa-pen"></i></button>
+                  <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delPreco(${x.id_preco})"><i class="fas fa-trash"></i></button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+        ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis. Cadastre um preço ou importe uma planilha.</div>' : `<div class="p-2 text-xs text-slate-500 text-right">${rs.length} variação(ões) listada(s)</div>`}
+      `;
+    } catch (e) {
+      console.error('[renderTercPrecosBlock] load', e);
+      body.querySelector('#tbl').innerHTML = '<div class="p-6 text-center text-amber-600"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar a tabela de preços</div>';
+    }
   }
   window.TERC_editPreco = (id) => TERC_openPrecoModal(id, () => { load(); refresh && refresh(); });
   window.TERC_delPreco = async (id) => {
-    if (!confirm('Excluir este preço?')) return;
-    try { await api('delete', '/terc/precos/' + id); toast('Excluído', 'success'); load(); refresh && refresh(); } catch {}
+    const okConf = await TERC_confirmDelPreco();
+    if (!okConf) return;
+    try { await api('delete', '/terc/precos/' + id); toast('Preço excluído', 'success'); load(); refresh && refresh(); } catch {}
   };
   body.querySelector('#btn-filtrar').onclick = load;
   body.querySelector('#btn-novo').onclick = () => TERC_openPrecoModal(null, () => { load(); refresh && refresh(); });
   body.querySelector('#btn-col').onclick = () => TERC_openColecoesModal(() => { load(); refresh && refresh(); });
+  body.querySelector('#btn-importar').onclick = () => TERC_openImportPrecosModal(() => { load(); refresh && refresh(); });
+  body.querySelector('#btn-del-all').onclick = () => TERC_confirmDelAllPrecos(() => { load(); refresh && refresh(); });
   await load();
 }
+
+// Confirma exclusão de UM preço
+function TERC_confirmDelPreco() {
+  return new Promise((resolve) => {
+    const m = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-md' });
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-3"><i class="fas fa-triangle-exclamation mr-2 text-amber-500"></i>Excluir preço</h3>
+      <p class="text-sm mb-4">Esta variação de preço será removida. Deseja continuar?</p>
+      <div class="flex justify-end gap-2">
+        <button id="c-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="c-ok" class="btn btn-danger"><i class="fas fa-trash mr-1"></i>Excluir</button>
+      </div>`;
+    m.appendChild(card); document.body.appendChild(m);
+    $('#c-cancel').onclick = () => { m.remove(); resolve(false); };
+    $('#c-ok').onclick     = () => { m.remove(); resolve(true);  };
+  });
+}
+
+// Confirma exclusão de TODOS os preços (confirmação dupla)
+function TERC_confirmDelAllPrecos(onDone) {
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-md' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold text-red-700 mb-3"><i class="fas fa-triangle-exclamation mr-2"></i>EXCLUIR TODOS OS PREÇOS</h3>
+    <p class="text-sm mb-2">Esta ação <b>apaga permanentemente</b> todas as variações de preço cadastradas. Os produtos e cores não serão afetados.</p>
+    <p class="text-sm mb-3">Para confirmar, digite exatamente: <code class="px-1 bg-slate-100 rounded">EXCLUIR-TODOS</code></p>
+    <input id="c-typed" placeholder="Digite EXCLUIR-TODOS" />
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="c-cancel" class="btn btn-secondary">Cancelar</button>
+      <button id="c-ok" class="btn btn-danger" disabled><i class="fas fa-trash-can mr-1"></i>Confirmar exclusão</button>
+    </div>`;
+  m.appendChild(card); document.body.appendChild(m);
+  const typedEl = $('#c-typed'), okEl = $('#c-ok');
+  typedEl.oninput = () => { okEl.disabled = typedEl.value.trim() !== 'EXCLUIR-TODOS'; };
+  $('#c-cancel').onclick = () => m.remove();
+  okEl.onclick = async () => {
+    try {
+      const r = await api('delete', '/terc/precos?confirm1=SIM&confirm2=EXCLUIR-TODOS');
+      const n = r?.data?.deleted ?? 0;
+      m.remove();
+      toast(`${n} preço(s) excluído(s)`, 'success');
+      onDone && onDone();
+    } catch {}
+  };
+}
+
+// Modal de importação de planilha de cor/preço (XLSX)
+function TERC_openImportPrecosModal(onDone) {
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-file-excel mr-2 text-emerald-600"></i>Importar Planilha de Preços (Cor + Grade)</h3>
+    <div class="bg-slate-50 p-3 rounded text-xs mb-3">
+      <b>Colunas esperadas:</b> Referência · Descrição · Cor · Grade · Serviço · Preço · Tempo
+      <br/><span class="text-slate-500">Linhas com mesma combinação <b>Ref + Cor + Grade + Serviço</b> são tratadas como atualização (não duplica).</span>
+    </div>
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div>
+        <label>Arquivo Excel (.xlsx)</label>
+        <input type="file" id="i-file" accept=".xlsx,.xls,.csv" />
+      </div>
+      <div>
+        <label>Coleção (opcional)</label>
+        <select id="i-col">${TERC.optColecoes()}</select>
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-4 mb-3 text-sm">
+      <label class="flex items-center gap-2"><input type="radio" name="i-modo" value="atualizar" checked /> Atualizar existentes (cria os faltantes)</label>
+      <label class="flex items-center gap-2"><input type="radio" name="i-modo" value="criar" /> Apenas criar novos (não toca nos existentes)</label>
+      <label class="flex items-center gap-2"><input type="radio" name="i-modo" value="simular" /> Simulação (não grava)</label>
+    </div>
+    <div id="i-preview" class="text-xs text-slate-600 mb-3"></div>
+    <div id="i-result" class="text-sm mb-3"></div>
+    <div class="flex justify-end gap-2">
+      <button id="i-cancel" class="btn btn-secondary">Fechar</button>
+      <button id="i-go" class="btn btn-primary" disabled><i class="fas fa-upload mr-1"></i>Importar</button>
+    </div>`;
+  m.appendChild(card); document.body.appendChild(m);
+
+  let parsedRows = [];
+  $('#i-cancel').onclick = () => m.remove();
+
+  $('#i-file').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!window.XLSX) {
+      await new Promise(res => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+        s.onload = res; document.head.appendChild(s);
+      });
+    }
+    try {
+      const ab = await f.arrayBuffer();
+      const wb = window.XLSX.read(ab, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const arr = window.XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+      // Normaliza chaves (case-insensitive, sem acento)
+      const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+      parsedRows = arr.map(row => {
+        const out = {};
+        for (const [k, v] of Object.entries(row)) {
+          const nk = norm(k);
+          if (nk === 'ref' || nk === 'referencia' || nk === 'cod_ref' || nk === 'codigo')           out.cod_ref = String(v || '').trim();
+          else if (nk === 'descricao' || nk === 'desc_ref' || nk === 'descricao da referencia')      out.desc_ref = String(v || '').trim();
+          else if (nk === 'cor')                                                                     out.cor = String(v || '').trim();
+          else if (nk === 'grade' || nk === 'tamanho' || nk === 'tam')                               out.tamanho = String(v || '').trim();
+          else if (nk === 'servico' || nk === 'desc_servico' || nk === 'descricao do servico')        out.servico = String(v || '').trim();
+          else if (nk === 'preco' || nk === 'valor')                                                  out.preco = parseFloat(String(v).replace(',', '.')) || 0;
+          else if (nk === 'tempo' || nk === 'tempo_min' || nk === 'tempo (min)' || nk === 'tempo da peca') out.tempo = parseFloat(String(v).replace(',', '.')) || 0;
+        }
+        return out;
+      }).filter(r => r.cod_ref || r.desc_ref);
+      $('#i-preview').innerHTML = `<i class="fas fa-circle-check text-emerald-600 mr-1"></i><b>${parsedRows.length}</b> linha(s) detectada(s). Primeiras 3: <code class="text-xs">${JSON.stringify(parsedRows.slice(0, 3))}</code>`;
+      $('#i-go').disabled = parsedRows.length === 0;
+    } catch (err) {
+      $('#i-preview').innerHTML = `<span class="text-red-600"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao ler o arquivo: ${err.message}</span>`;
+      parsedRows = [];
+      $('#i-go').disabled = true;
+    }
+  };
+
+  $('#i-go').onclick = async () => {
+    const modo = card.querySelector('input[name="i-modo"]:checked')?.value || 'atualizar';
+    const idCol = $('#i-col').value || null;
+    $('#i-go').disabled = true;
+    $('#i-result').innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Processando...';
+    try {
+      const r = await api('post', '/terc/precos/importar', { rows: parsedRows, modo, id_colecao: idCol });
+      const d = r?.data || {};
+      const erros = fmt.safeArr(d.erros);
+      $('#i-result').innerHTML = `
+        <div class="bg-emerald-50 border border-emerald-200 rounded p-3">
+          <div class="font-semibold mb-1">${d.simulado ? '🧪 Simulação concluída' : '✅ Importação concluída'} (modo: ${d.modo})</div>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-emerald-700">${fmt.int(d.criados)}</div><div class="text-xs">Criados</div></div>
+            <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-blue-700">${fmt.int(d.atualizados)}</div><div class="text-xs">Atualizados</div></div>
+            <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-amber-700">${fmt.int(d.ignorados)}</div><div class="text-xs">Ignorados</div></div>
+          </div>
+          ${erros.length ? `<details class="mt-2 text-xs"><summary class="cursor-pointer text-amber-700">${erros.length} erro(s) — ver detalhes</summary><ul class="ml-4 mt-1">${erros.map(e => `<li>Linha ${e.linha}: ${e.motivo}</li>`).join('')}</ul></details>` : ''}
+        </div>`;
+      if (!d.simulado) toast(`Importação: +${d.criados} criados, ${d.atualizados} atualizados`, 'success');
+      onDone && onDone();
+    } catch (e) {
+      $('#i-result').innerHTML = `<div class="text-red-600 p-3 bg-red-50 rounded"><i class="fas fa-triangle-exclamation mr-1"></i>${e?.response?.data?.error || 'Falha na importação'}</div>`;
+    } finally {
+      $('#i-go').disabled = false;
+    }
+  };
+}
+window.TERC_openImportPrecosModal = TERC_openImportPrecosModal;
 
 /* ---------- BLOCO: RESUMO ---------- */
 async function renderTercResumoBlock(body) {
@@ -5558,94 +5794,62 @@ ROUTES.terc_produtos = async (main) => {
   renderTercProdutosBlock($('#prod-body'), null);
 };
 
-/* ---------- PREÇOS por REF/SERVIÇO/COLEÇÃO (rota legada usada por Importador) ---------- */
+/* ---------- PREÇOS / VARIAÇÕES (rota standalone — usa o mesmo bloco) ---------- */
 ROUTES.terc_precos = async (main) => {
   await TERC.load();
   main.innerHTML = `
-    <div class="card p-4 mb-4">
-      <div class="flex flex-wrap items-end gap-3">
-        <div><label>Busca</label><input id="f-search" placeholder="Ref ou descrição..." /></div>
-        <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
-        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
-        <div class="flex-1"></div>
-        <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
-      </div>
+    <div class="mb-4 flex items-center justify-between flex-wrap gap-2">
+      <div class="text-xs text-slate-500 uppercase tracking-widest"><i class="fas fa-money-bill-wave mr-1 text-brand"></i>Tabela de Preços / Variações (Cor + Grade)</div>
+      <a href="#terc_central" class="btn btn-secondary btn-sm"><i class="fas fa-handshake-angle mr-1"></i>Central de Terceirização</a>
     </div>
-    <div class="card p-0 overflow-x-auto" id="tbl"></div>
-  `;
-  async function load() {
-    const p = new URLSearchParams();
-    if ($('#f-search').value) p.set('search', $('#f-search').value);
-    if ($('#f-serv').value) p.set('id_servico', $('#f-serv').value);
-    const r = await api('get', '/terc/precos?' + p.toString());
-    const rs = r.data || [];
-    $('#tbl').innerHTML = `
-      <table class="w-full text-sm">
-        <thead class="bg-slate-100"><tr>
-          <th class="text-left p-2">Ref.</th><th class="text-left p-2">Descrição</th><th class="text-left p-2">Serviço</th>
-          <th class="text-left p-2">Coleção</th><th class="text-right p-2">Preço</th><th class="text-right p-2">Tempo (min)</th>
-          <th class="text-center p-2">Vigência</th><th class="text-center p-2">Ações</th>
-        </tr></thead>
-        <tbody>
-          ${rs.map(p => `
-            <tr class="border-b">
-              <td class="p-2 font-mono">${p.cod_ref}</td>
-              <td class="p-2">${p.desc_ref || '—'}</td>
-              <td class="p-2">${p.desc_servico || '—'}</td>
-              <td class="p-2">${p.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
-              <td class="p-2 text-right font-semibold">${TERC.fmtBRL(p.preco)}</td>
-              <td class="p-2 text-right">${fmt.num(p.tempo_min, 2)}</td>
-              <td class="p-2 text-center">${p.dt_vigencia ? fmt.date(p.dt_vigencia) : '—'}</td>
-              <td class="p-2 text-center">
-                <button class="btn btn-sm btn-primary" onclick="TERC_editPreco(${p.id_preco})"><i class="fas fa-edit"></i></button>
-                <button class="btn btn-sm btn-danger" onclick="TERC_delPreco(${p.id_preco})"><i class="fas fa-trash"></i></button>
-              </td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500">Nenhum preço cadastrado.</div>' : ''}
-    `;
-  }
-  window.TERC_editPreco = (id) => TERC_openPrecoModal(id, rs => load());
-  window.TERC_delPreco = async (id) => {
-    if (!confirm('Excluir este preço?')) return;
-    try { await api('delete', '/terc/precos/' + id); toast('Excluído', 'success'); load(); } catch {}
-  };
-  $('#btn-filtrar').onclick = load;
-  $('#btn-novo').onclick = () => TERC_openPrecoModal(null, load);
-  await load();
+    <div class="card p-4" id="prec-body"></div>`;
+  await renderTercPrecosBlock($('#prec-body'), null);
 };
 
 async function TERC_openPrecoModal(id, onSave) {
   await TERC.load();
-  let p = { grade: 1, preco: 0, tempo_min: 0, ativo: 1 };
+  let p = { grade: 1, preco: 0, tempo_min: 0, ativo: 1, cor: '', tamanho: '' };
   if (id) {
-    const r = await api('get', '/terc/precos');
-    p = (r.data || []).find(x => x.id_preco == id) || p;
+    try {
+      const r = await api('get', '/terc/precos', null, { silent: true });
+      p = fmt.safeArr(r?.data).find(x => Number(x.id_preco) === Number(id)) || p;
+    } catch {}
   }
-  // Identifica produto inicial (se editando)
   const prodInicial = (id && p.cod_ref) ? TERC.findProdutoByRef(p.cod_ref, p.id_colecao) : null;
   const idProdSel = prodInicial ? prodInicial.id_produto : '';
+  const cores = fmt.safeArr(window.TERC?.cores);
+  const tamsPadrao = ['PP','P','M','G','GG','XGG','EG','SG'];
 
   const m = el('div', { class: 'modal-backdrop' });
   const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
   card.innerHTML = `
-    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-money-bill-wave mr-2 text-brand"></i>${id ? 'Editar' : 'Novo'} Preço</h3>
+    <h3 class="text-lg font-semibold mb-3"><i class="fas fa-money-bill-wave mr-2 text-brand"></i>${id ? 'Editar' : 'Nova'} Variação de Preço</h3>
     <div class="grid grid-cols-2 gap-3">
       <div class="col-span-2">
-        <label>Produto (descrição)<span class="text-xs text-slate-500 ml-1">— escolha um cadastrado para auto-preencher</span></label>
+        <label>Produto<span class="text-xs text-slate-500 ml-1">— escolha um cadastrado para auto-preencher</span></label>
         <select id="m-prod">${TERC.optProdutos(idProdSel)}</select>
       </div>
       <div><label>Referência <span class="text-xs text-slate-400">(opcional)</span></label><input id="m-ref" value="${(p.cod_ref || '').replace(/"/g, '&quot;')}" placeholder="auto se vazio" /></div>
       <div><label>Descrição</label><input id="m-desc" value="${(p.desc_ref || '').replace(/"/g, '&quot;')}" /></div>
+      <div>
+        <label>Cor <span class="text-xs text-slate-400">(opcional)</span></label>
+        <input id="m-cor" value="${(p.cor || '').replace(/"/g, '&quot;')}" list="m-cor-dl" placeholder="Ex: Azul (vazio = todas as cores)" />
+        <datalist id="m-cor-dl">${cores.map(c => `<option value="${c.nome_cor}">`).join('')}</datalist>
+      </div>
+      <div>
+        <label>Tamanho / Grade <span class="text-xs text-slate-400">(opcional)</span></label>
+        <input id="m-tam" value="${(p.tamanho || '').replace(/"/g, '&quot;')}" list="m-tam-dl" placeholder="Ex: M (vazio = todos)" />
+        <datalist id="m-tam-dl">${tamsPadrao.map(t => `<option value="${t}">`).join('')}</datalist>
+      </div>
       <div><label>Serviço *</label><select id="m-serv">${TERC.optServicos(p.id_servico)}</select></div>
       <div><label>Coleção</label><select id="m-col">${TERC.optColecoes(p.id_colecao)}</select></div>
-      <div><label>Grade (1=única)</label><input id="m-grade" type="number" min="1" value="${p.grade || 1}" /></div>
+      <div><label>Grade num. (1=única)</label><input id="m-grade" type="number" min="1" value="${p.grade || 1}" /></div>
       <div><label>Preço (R$) *</label><input id="m-preco" type="number" step="0.01" value="${p.preco || 0}" /></div>
       <div><label>Tempo (min/peça)</label><input id="m-tempo" type="number" step="0.01" value="${p.tempo_min || 0}" /></div>
       <div><label>Vigência</label><input id="m-vig" type="date" value="${p.dt_vigencia || ''}" /></div>
-      <div class="col-span-2"><label>Observação</label><input id="m-obs" value="${p.observacao || ''}" /></div>
+      <div class="col-span-2"><label>Observação</label><input id="m-obs" value="${(p.observacao || '').replace(/"/g, '&quot;')}" /></div>
     </div>
+    <div class="text-xs text-slate-500 mt-2"><i class="fas fa-circle-info mr-1"></i>A combinação <b>Produto + Cor + Tamanho + Serviço</b> deve ser única. Deixe Cor/Tamanho vazios para preço genérico (fallback).</div>
     <div class="flex justify-end gap-2 mt-4">
       <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
       <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
@@ -5657,8 +5861,8 @@ async function TERC_openPrecoModal(id, onSave) {
   $('#m-prod').onchange = () => {
     const opt = $('#m-prod').options[$('#m-prod').selectedIndex];
     if (!opt || !opt.value) return;
-    if (opt.dataset.cod) $('#m-ref').value = opt.dataset.cod;
-    if (opt.dataset.desc) $('#m-desc').value = opt.dataset.desc;
+    if (opt.dataset.cod)   $('#m-ref').value  = opt.dataset.cod;
+    if (opt.dataset.desc)  $('#m-desc').value = opt.dataset.desc;
     if (opt.dataset.col && !$('#m-col').value) $('#m-col').value = opt.dataset.col;
     if (opt.dataset.grade) $('#m-grade').value = opt.dataset.grade;
   };
@@ -5666,19 +5870,28 @@ async function TERC_openPrecoModal(id, onSave) {
   $('#m-cancel').onclick = () => m.remove();
   $('#m-save').onclick = async () => {
     const body = {
-      cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-desc').value.trim(),
+      cod_ref:    $('#m-ref').value.trim(),
+      desc_ref:   $('#m-desc').value.trim(),
       id_produto: $('#m-prod').value || null,
-      id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
-      grade: $('#m-grade').value, preco: $('#m-preco').value, tempo_min: $('#m-tempo').value,
-      dt_vigencia: $('#m-vig').value || null, observacao: $('#m-obs').value.trim(), ativo: 1,
+      id_servico: $('#m-serv').value,
+      id_colecao: $('#m-col').value,
+      cor:        $('#m-cor').value.trim(),
+      tamanho:    $('#m-tam').value.trim(),
+      grade:      $('#m-grade').value,
+      preco:      $('#m-preco').value,
+      tempo_min:  $('#m-tempo').value,
+      dt_vigencia: $('#m-vig').value || null,
+      observacao: $('#m-obs').value.trim(),
+      ativo: 1,
     };
     if (!body.id_servico) { toast('Serviço é obrigatório', 'warning'); return; }
     if (!body.cod_ref && !body.desc_ref && !body.id_produto) { toast('Selecione um produto, ou informe referência/descrição', 'warning'); return; }
     if (!body.preco || Number(body.preco) <= 0) { toast('Informe o preço', 'warning'); return; }
     try {
       if (id) await api('put', '/terc/precos/' + id, body);
-      else await api('post', '/terc/precos', body);
-      toast('Salvo', 'success'); m.remove(); if (onSave) onSave();
+      else    await api('post', '/terc/precos', body);
+      toast(id ? 'Variação atualizada' : 'Variação criada', 'success');
+      m.remove(); if (onSave) onSave();
     } catch {}
   };
 }
