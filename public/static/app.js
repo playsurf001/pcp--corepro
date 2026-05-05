@@ -3118,6 +3118,70 @@ const TERC_PRINT = {
     return ORDEM.map(t => `<td class="col-grade center">${g[t] ? fmt.int(g[t]) : ''}</td>`).join('');
   },
 
+  // 🆕 Células de grade a partir de UM ITEM (remessa multi-itens)
+  // O item pode trazer grade como array [{tamanho,qtd}] ou como objeto {TAM:qtd}
+  _gradeCellsFromItem(item) {
+    const ORDEM = ['P', 'M', 'G', 'GG', 'EG', 'SG', '46', '48', '50', '52'];
+    let g = {};
+    if (Array.isArray(item.grade)) {
+      g = Object.fromEntries(item.grade.map(x => [x.tamanho, x.qtd]));
+    } else if (item.grade && typeof item.grade === 'object') {
+      g = item.grade;
+    }
+    return ORDEM.map(t => `<td class="col-grade center">${g[t] ? fmt.int(g[t]) : ''}</td>`).join('');
+  },
+
+  // 🆕 "Achata" um array de remessas em um array de LINHAS (cada linha = 1 item).
+  // Se a remessa tem `itens[]` (multi-itens), gera 1 linha por item.
+  // Se não tem (legado), gera 1 linha com a grade do cabeçalho.
+  _flattenRemessasParaLinhas(remessas) {
+    const linhas = [];
+    for (const r of remessas) {
+      const itens = Array.isArray(r.itens) ? r.itens.filter(i => i && (i.ativo == null || i.ativo === 1 || i.ativo === true)) : [];
+      if (itens.length > 0) {
+        for (const it of itens) {
+          // Calcula qtd_total e valor_total do item (defensivo)
+          let qtdItem = 0;
+          if (Array.isArray(it.grade)) qtdItem = it.grade.reduce((a, g) => a + (Number(g.qtd) || 0), 0);
+          else if (it.grade && typeof it.grade === 'object') qtdItem = Object.values(it.grade).reduce((a, q) => a + (Number(q) || 0), 0);
+          if (!qtdItem) qtdItem = Number(it.qtd_total) || 0;
+          const precoItem = Number(it.preco_unit) || 0;
+          const valorItem = Number(it.valor_total) || (qtdItem * precoItem);
+
+          linhas.push({
+            num_controle: r.num_controle,
+            num_op: r.num_op,
+            cod_ref: it.cod_ref || r.cod_ref,
+            desc_ref: it.desc_ref || r.desc_ref,
+            desc_servico: it.desc_servico || r.desc_servico,
+            cor: it.cor || '',
+            grade: it.grade,
+            qtd_total: qtdItem,
+            preco_unit: precoItem,
+            valor_total: valorItem,
+            _isItem: true,
+          });
+        }
+      } else {
+        // Legado: 1 linha por remessa
+        linhas.push({
+          num_controle: r.num_controle,
+          num_op: r.num_op,
+          cod_ref: r.cod_ref,
+          desc_ref: r.desc_ref,
+          desc_servico: r.desc_servico,
+          cor: r.cor || '',
+          grade: r.grade,
+          qtd_total: Number(r.qtd_total) || 0,
+          preco_unit: Number(r.preco_unit) || 0,
+          valor_total: Number(r.valor_total) || 0,
+          _isItem: false,
+        });
+      }
+    }
+    return linhas;
+  },
+
   /* ================================================================
    * 1) ROMANEIO DE SERVIÇO (tela "Romaneio de Serviço - Aparador")
    * Tabela: Nº Ctrl | Nº OP | Ref | Desc Ref | Desc Serviço | Cor | Grade | Qtd | Preço | Valor
@@ -3143,32 +3207,36 @@ const TERC_PRINT = {
       <div><b>Previsão:</b> ${dtPrev || '—'}</div>
     `;
 
-    // Totais (defensivos)
-    const tot = remessas.reduce((a, r) => ({
-      qtd: a.qtd + (Number(r.qtd_total) || 0),
-      valor: a.valor + (Number(r.valor_total) || 0),
+    // 🆕 MULTI-ITENS: achata cada remessa em N linhas (1 por item).
+    // Mantém UM ÚNICO cabeçalho, UMA ÚNICA tabela e UM ÚNICO total geral.
+    const linhasItens = this._flattenRemessasParaLinhas(remessas);
+
+    // Totais (somatório das linhas — funciona p/ multi-itens e legado)
+    const tot = linhasItens.reduce((a, l) => ({
+      qtd: a.qtd + (Number(l.qtd_total) || 0),
+      valor: a.valor + (Number(l.valor_total) || 0),
     }), { qtd: 0, valor: 0 });
 
-    // Linhas da tabela — quantidade dinâmica, sem preencher com vazias exageradas
-    const linhas = remessas.map((r, i) => `
+    // Renderiza UMA LINHA POR ITEM (não cria página/romaneio nova)
+    const linhas = linhasItens.map((l, i) => `
       <tr${i % 2 === 1 ? ' class="zebra"' : ''}>
-        <td class="col-ctrl center"><b>${r.num_controle || ''}</b></td>
-        <td class="col-op center">${r.num_op || '—'}</td>
-        <td class="col-ref left"><b>${r.cod_ref || ''}</b></td>
-        <td class="col-desc left">${r.desc_ref || ''}</td>
-        <td class="col-serv left">${r.desc_servico || ''}</td>
-        <td class="col-cor center">${r.cor || '—'}</td>
-        ${this._gradeCellsFromRem(r)}
-        <td class="col-qtd right"><b>${fmt.int(r.qtd_total || 0)}</b></td>
-        <td class="col-preco right">${fmt.num(r.preco_unit || 0, 2)}</td>
-        <td class="col-valor right"><b>${fmt.num(r.valor_total || 0, 2)}</b></td>
+        <td class="col-ctrl center"><b>${l.num_controle || ''}</b></td>
+        <td class="col-op center">${l.num_op || '—'}</td>
+        <td class="col-ref left"><b>${l.cod_ref || ''}</b></td>
+        <td class="col-desc left">${l.desc_ref || ''}</td>
+        <td class="col-serv left">${l.desc_servico || ''}</td>
+        <td class="col-cor center">${l.cor || '—'}</td>
+        ${this._gradeCellsFromItem(l)}
+        <td class="col-qtd right"><b>${fmt.int(l.qtd_total || 0)}</b></td>
+        <td class="col-preco right">${fmt.num(l.preco_unit || 0, 2)}</td>
+        <td class="col-valor right"><b>${fmt.num(l.valor_total || 0, 2)}</b></td>
       </tr>
     `).join('');
 
     // Linhas vazias mínimas para "preencher" tabela curta sem inflar
     // Em layout de 2 vias (A4 dividido em 2), no máx ~5 linhas em branco por via
     const minLinhas = 5;
-    const vazias = Math.max(0, minLinhas - remessas.length);
+    const vazias = Math.max(0, minLinhas - linhasItens.length);
     const linhasVazias = Array(vazias).fill(0).map(() => `
       <tr class="empty">
         <td class="col-ctrl">&nbsp;</td>
