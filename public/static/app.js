@@ -3999,365 +3999,245 @@ ROUTES.terc_remessas = async (main) => {
   await load();
 };
 
+/* =================================================================
+ * 🎨 Helper: hex de cor a partir do nome (mapa PT-BR + hash fallback)
+ * ================================================================= */
+function TERC_corHex(nome) {
+  if (!nome) return '#cbd5e1';
+  const n = String(nome).toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const map = {
+    'amarelo':'#facc15','areia':'#d6c79e','azul':'#2563eb','azul claro':'#60a5fa',
+    'azul marinho':'#1e3a8a','marinho':'#1e3a8a','bege':'#e7d4b5','branco':'#ffffff',
+    'caqui':'#a08d5f','cereja':'#b91c1c','chumbo':'#475569','cinza':'#94a3b8',
+    'creme':'#fef3c7','dourado':'#d4a017','gelo':'#f1f5f9','goiaba':'#f87171',
+    'indigo':'#4f46e5','laranja':'#f97316','lodo':'#65733d','marrom':'#78350f',
+    'mostarda':'#ca8a04','off white':'#faf7ec','petroleo':'#0f766e',
+    'pink':'#ec4899','preto':'#0a0a0a','rosa':'#fb7185','roxo':'#7c3aed',
+    'salmao':'#fb923c','verde':'#16a34a','verde claro':'#86efac',
+    'verde musgo':'#4d6b32','vermelho':'#dc2626','vinho':'#7f1d1d',
+  };
+  if (map[n]) return map[n];
+  let h = 0; for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(h) % 360} 65% 55%)`;
+}
+function TERC_normCorPt(s) {
+  const t = String(s ?? '').trim().replace(/\s+/g, ' ');
+  if (!t) return '';
+  return t.toLocaleLowerCase('pt-BR').replace(/(^|\s|-|\/)(\p{L})/gu,
+    (_m, sep, ch) => sep + ch.toLocaleUpperCase('pt-BR'));
+}
+
+/* =================================================================
+ * MODAL — NOVA/EDIÇÃO REMESSA — MULTI-PRODUTOS + MULTI-CORES
+ *
+ * Estrutura de estado local (array de itens):
+ *   itens = [{ uid, cod_ref, desc_ref, id_servico, cor, preco_unit, tempo_peca, grade:{TAM:qtd,...} }, ...]
+ *
+ * Ações:
+ *   - Adicionar Produto (item novo)
+ *   - Adicionar Cor (clona o item duplicando produto, mas cor vazia + grade zerada)
+ *   - Remover item
+ *
+ * Cálculo:
+ *   - total_item = soma(grade) * preco_unit
+ *   - total_remessa = soma(total_item)  (rodapé fixo)
+ *
+ * Edição: ao abrir uma remessa existente, carrega itens[] do GET /terc/remessas/:id
+ * ================================================================= */
+/* =================================================================
+ * MODAL — NOVA/EDIÇÃO REMESSA — MULTI-PRODUTOS + MULTI-CORES
+ *
+ * Estrutura local:
+ *   itens = [
+ *     { uid, id_item, id_produto, cod_ref, desc_ref, id_servico, cor,
+ *       preco_unit, tempo_peca, grade:{TAM:qtd,...}, _qtdRetornada }
+ *   ]
+ *   - 1 produto + 1 cor = 1 item (cada cor é uma linha separada).
+ *   - Grade independente por item.
+ *   - Total por item = soma(grade) * preco_unit.
+ *   - Total da remessa = soma(total_item) — exibido fixo no rodapé.
+ *
+ * Ações: + Adicionar Produto · + Adicionar Cor · Remover item.
+ * Render simples (sem framework), 1 POST/PUT em lote ao salvar.
+ * ================================================================= */
 async function TERC_openRemModal(id, onSave) {
   const edit = !!id;
   await TERC.load();
-  let r = { dt_saida: dayjs().format('YYYY-MM-DD'), status: 'AguardandoEnvio', tempo_peca: 0, efic_pct: 0.8, qtd_pessoas: 1, min_trab_dia: 480, prazo_dias: 0, preco_unit: 0, grade: [] };
   const TAMANHOS = ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'];
+
+  // ---- Carrega dados da remessa (edição) ou usa defaults (nova) ----
+  let r = {
+    dt_saida: dayjs().format('YYYY-MM-DD'),
+    status: 'AguardandoEnvio',
+    efic_pct: 0.8, qtd_pessoas: 1, min_trab_dia: 480, prazo_dias: 0,
+    itens: [],
+  };
   if (edit) {
-    const res = await api('get', '/terc/remessas/' + id); r = res.data;
-    r.grade = r.grade || [];
+    try {
+      const res = await api('get', '/terc/remessas/' + id);
+      r = res.data || r;
+      r.itens = Array.isArray(r.itens) ? r.itens : [];
+    } catch { return; }
   }
+
   let num_controle = r.num_controle || 0;
   if (!edit) {
-    const n = await api('get', '/terc/remessas/next-num'); num_controle = n.data?.num_controle;
+    try {
+      const n = await api('get', '/terc/remessas/next-num');
+      num_controle = n.data?.num_controle || 0;
+    } catch {}
   }
 
+  // ---- Cache global de cores (1 fetch para o modal todo) ----
+  let _coresCache = [];
+  try {
+    const rc = await api('get', '/terc/cores/distinct', null, { silent: true });
+    _coresCache = fmt.safeArr(rc?.data);
+  } catch {}
+  if (_coresCache.length === 0) {
+    _coresCache = fmt.safeArr(window.TERC?.cores).map(c => ({ nome_cor: c.nome_cor, hex: c.hex, uso: 0 }));
+  }
+
+  // ---- Estado local: itens ----
+  let _uid = 1;
+  function newItem(over = {}) {
+    const grade = {};
+    if (over.grade && Array.isArray(over.grade)) {
+      over.grade.forEach(x => { grade[x.tamanho] = Number(x.qtd || 0); });
+    } else if (over.grade && typeof over.grade === 'object') {
+      Object.assign(grade, over.grade);
+    }
+    return {
+      uid: _uid++,
+      id_item: over.id_item || null,
+      id_produto: over.id_produto || '',
+      cod_ref: over.cod_ref || '',
+      desc_ref: over.desc_ref || '',
+      id_servico: over.id_servico || '',
+      cor: over.cor || '',
+      preco_unit: Number(over.preco_unit || 0),
+      tempo_peca: Number(over.tempo_peca || 0),
+      grade,
+      _qtdRetornada: Number(over._qtdRetornada || 0),
+      _precoTag: '',
+    };
+  }
+
+  let itens = [];
+  if (edit && Array.isArray(r.itens) && r.itens.length > 0) {
+    itens = r.itens.map(it => newItem(it));
+  } else if (edit) {
+    // Remessa antiga sem itens — converte cabeçalho em 1 item
+    const g = {};
+    (r.grade || []).forEach(x => { g[x.tamanho] = Number(x.qtd || 0); });
+    itens.push(newItem({
+      cod_ref: r.cod_ref, desc_ref: r.desc_ref, id_servico: r.id_servico,
+      cor: r.cor, preco_unit: r.preco_unit, tempo_peca: r.tempo_peca, grade: g,
+    }));
+  } else {
+    itens.push(newItem());
+  }
+
+  // ---- Modal shell ----
   const m = el('div', { class: 'modal-backdrop' });
-  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
-  const gradeMap = Object.fromEntries(r.grade.map(g => [g.tamanho, g.qtd]));
-  // Encontra produto inicial (se editando, faz match por cod_ref+coleção)
-  const prodInicial = edit ? TERC.findProdutoByRef(r.cod_ref, r.id_colecao) : null;
-  const idProdSel = prodInicial ? prodInicial.id_produto : '';
+  const card = el('div', {
+    class: 'modal p-5 w-full max-w-6xl',
+    style: 'max-height:94vh;display:flex;flex-direction:column;gap:8px',
+  });
 
   card.innerHTML = `
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="text-lg font-semibold"><i class="fas fa-truck-fast mr-2 text-brand"></i>${edit ? 'Editar' : 'Nova'} Remessa · Nº <span class="font-mono text-brand">${num_controle}</span></h3>
-      <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="m-adv" /> Modo avançado</label>
+    <div class="flex items-center justify-between">
+      <h3 class="text-lg font-semibold">
+        <i class="fas fa-truck-fast mr-2 text-brand"></i>
+        ${edit ? 'Editar' : 'Nova'} Remessa · Nº
+        <span class="font-mono text-brand">${num_controle}</span>
+      </h3>
+      <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+        <input type="checkbox" id="m-adv" /> Modo avançado
+      </label>
     </div>
 
-    <!-- Bloco BÁSICO (campos mínimos) -->
+    <!-- Cabeçalho da remessa -->
     <div class="grid grid-cols-6 gap-3">
-      <div class="col-span-3"><label>Terceirizado *</label><select id="m-terc">${TERC.optTerc(r.id_terc, true)}</select></div>
-      <div class="col-span-3"><label>Serviço *</label><select id="m-serv">${TERC.optServicos(r.id_servico)}</select></div>
-
-      <div class="col-span-4">
-        <label>Produto (descrição) *<span class="text-xs text-slate-500 ml-1">— selecione um cadastrado ou digite uma referência manual</span></label>
-        <select id="m-prod">${TERC.optProdutos(idProdSel, r.id_colecao)}</select>
-      </div>
-      <div class="col-span-2"><label>Coleção</label><select id="m-col">${TERC.optColecoes(r.id_colecao)}</select></div>
-
-      <div class="col-span-2"><label>Referência</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="auto-preenchido" /></div>
-      <div class="col-span-2"><label>Descrição</label><input id="m-descref" value="${r.desc_ref || ''}" /></div>
-      <div class="col-span-2">
-        <label>Cor <span id="m-cor-badge" class="ml-1 align-middle"></span></label>
-        <div class="cor-picker-wrap" style="position:relative">
-          <input id="m-cor" value="${(r.cor || '').replace(/"/g, '&quot;')}" placeholder="Selecione ou digite uma cor" autocomplete="off" />
-          <button id="m-cor-toggle" type="button" tabindex="-1" title="Abrir lista de cores"
-                  style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;cursor:pointer;color:#64748b;padding:4px">
-            <i class="fas fa-palette"></i>
-          </button>
-          <div id="m-cor-dropdown" class="hidden"
-               style="position:absolute;z-index:50;top:calc(100% + 4px);left:0;right:0;max-height:240px;overflow-y:auto;background:#fff;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.08)"></div>
-        </div>
-      </div>
-
-      <div class="col-span-2"><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
-      <div class="col-span-2"><label>Preço unit. (R$) <span id="m-preco-tag" class="text-xs ml-1"></span></label><input type="number" step="0.01" id="m-preco" value="${r.preco_unit || 0}" /></div>
-      <div class="col-span-2"><label>Nº OP</label><input id="m-op" value="${r.num_op || ''}" placeholder="opcional" /></div>
-
-      <div class="col-span-6">
-        <label class="font-semibold">Grade de tamanhos *</label>
-        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="m-grade">
-          ${TAMANHOS.map(t => `
-            <div class="text-center">
-              <div class="text-xs font-mono text-slate-500">${t}</div>
-              <input data-tam="${t}" type="number" min="0" value="${gradeMap[t] || 0}" class="text-center grade-in" />
-            </div>`).join('')}
-        </div>
-        <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
-          <span>Total: <b id="m-total">0</b> peças</span>
-          <span>Valor: <b id="m-valor">${TERC.fmtBRL(0)}</b></span>
-          <span class="text-slate-500">Previsão: <b id="m-prev">—</b></span>
-        </div>
-      </div>
+      <div class="col-span-3"><label>Terceirizado *</label>
+        <select id="m-terc">${TERC.optTerc(r.id_terc, true)}</select></div>
+      <div class="col-span-2"><label>Coleção</label>
+        <select id="m-col">${TERC.optColecoes(r.id_colecao)}</select></div>
+      <div class="col-span-1"><label>Data saída *</label>
+        <input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
+      <div class="col-span-2"><label>Nº OP</label>
+        <input id="m-op" value="${r.num_op || ''}" placeholder="opcional" /></div>
     </div>
 
-    <!-- Bloco AVANÇADO (oculto por padrão — campos opcionais) -->
-    <div id="m-advanced" class="hidden mt-4 pt-4 border-t border-dashed">
-      <div class="text-xs text-slate-500 mb-2"><i class="fas fa-circle-info mr-1"></i>Estes campos vêm automaticamente do cadastro do terceirizado e da tabela de preços. Edite apenas se precisar sobrepor.</div>
+    <!-- Bloco AVANÇADO (oculto por padrão) -->
+    <div id="m-advanced" class="hidden pt-2 mt-1 border-t border-dashed">
+      <div class="text-xs text-slate-500 mb-2">
+        <i class="fas fa-circle-info mr-1"></i>Sobreposições manuais — vêm do terceirizado por padrão.
+      </div>
       <div class="grid grid-cols-6 gap-3">
-        <div><label>Data início</label><input type="date" id="m-dti" value="${r.dt_inicio || r.dt_saida || ''}" /></div>
-        <div><label>Tempo/peça (min)</label><input type="number" step="0.01" id="m-tempo" value="${r.tempo_peca || 0}" /></div>
-        <div><label>Qtd pessoas</label><input type="number" min="1" id="m-pess" value="${r.qtd_pessoas || 1}" /></div>
-        <div><label>Min trab/dia</label><input type="number" min="60" id="m-min" value="${r.min_trab_dia || 480}" /></div>
-        <div><label>Eficiência (0-1)</label><input type="number" step="0.01" min="0.1" max="1" id="m-ef" value="${r.efic_pct || 0.8}" /></div>
-        <div><label>Prazo fixo (dias)</label><input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
-        <div class="col-span-3"><label>Status</label><select id="m-status"><option value="AguardandoEnvio" ${r.status === 'AguardandoEnvio' ? 'selected' : ''}>Aguardando envio</option><option value="Enviado" ${r.status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="EmProducao" ${r.status === 'EmProducao' ? 'selected' : ''}>Em produção</option><option value="Parcial" ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option><option value="Concluido" ${r.status === 'Concluido' ? 'selected' : ''}>Concluído</option><option value="Cancelado" ${r.status === 'Cancelado' ? 'selected' : ''}>Cancelado</option></select></div>
-        <div class="col-span-3"><label>&nbsp;</label><button id="m-lookup" class="btn btn-secondary w-full" type="button"><i class="fas fa-search-dollar mr-1"></i>Buscar preço da tabela</button></div>
-        <div class="col-span-6"><label>Observação</label><textarea id="m-obs" rows="2">${r.observacao || ''}</textarea></div>
+        <div><label>Data início</label>
+          <input type="date" id="m-dti" value="${r.dt_inicio || r.dt_saida || ''}" /></div>
+        <div><label>Qtd pessoas</label>
+          <input type="number" min="1" id="m-pess" value="${r.qtd_pessoas || 1}" /></div>
+        <div><label>Min trab/dia</label>
+          <input type="number" min="60" id="m-min" value="${r.min_trab_dia || 480}" /></div>
+        <div><label>Eficiência (0-1)</label>
+          <input type="number" step="0.01" min="0.1" max="1" id="m-ef" value="${r.efic_pct || 0.8}" /></div>
+        <div><label>Prazo fixo (dias)</label>
+          <input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
+        <div><label>Status</label>
+          <select id="m-status">
+            <option value="AguardandoEnvio" ${r.status === 'AguardandoEnvio' ? 'selected' : ''}>Aguardando envio</option>
+            <option value="Enviado" ${r.status === 'Enviado' ? 'selected' : ''}>Enviado</option>
+            <option value="EmProducao" ${r.status === 'EmProducao' ? 'selected' : ''}>Em produção</option>
+            <option value="Parcial" ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option>
+            <option value="Concluido" ${r.status === 'Concluido' ? 'selected' : ''}>Concluído</option>
+            <option value="Cancelado" ${r.status === 'Cancelado' ? 'selected' : ''}>Cancelado</option>
+          </select>
+        </div>
+        <div class="col-span-6"><label>Observação</label>
+          <textarea id="m-obs" rows="2">${r.observacao || ''}</textarea></div>
       </div>
     </div>
 
-    <div class="flex justify-end gap-2 mt-4">
-      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
-      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar remessa</button>
+    <!-- Botoeira de itens -->
+    <div class="flex items-center justify-between mt-1">
+      <div class="text-sm font-semibold text-slate-700">
+        <i class="fas fa-boxes-stacked mr-1 text-brand"></i>Produtos da remessa
+      </div>
+      <div class="flex gap-2">
+        <button id="btn-add-prod" type="button" class="btn btn-primary btn-sm">
+          <i class="fas fa-plus mr-1"></i>Adicionar Produto
+        </button>
+      </div>
+    </div>
+
+    <!-- Container de cards (scroll interno) -->
+    <div id="itens-wrap" style="flex:1;overflow-y:auto;padding-right:4px;display:flex;flex-direction:column;gap:10px"></div>
+
+    <!-- Rodapé fixo: totais + ações -->
+    <div class="border-t pt-3 mt-1 flex items-center justify-between gap-3" style="flex-shrink:0">
+      <div class="flex flex-wrap items-center gap-4 text-sm">
+        <span>Itens: <b id="tot-itens">0</b></span>
+        <span>Peças: <b id="tot-pcs">0</b></span>
+        <span>Total: <b id="tot-valor" class="text-emerald-700">R$ 0,00</b></span>
+        <span class="text-slate-500">Previsão: <b id="tot-prev">—</b></span>
+      </div>
+      <div class="flex gap-2">
+        <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="m-save" class="btn btn-primary">
+          <i class="fas fa-save mr-1"></i>Salvar remessa
+        </button>
+      </div>
     </div>
   `;
-  m.appendChild(card); document.body.appendChild(m);
+  m.appendChild(card);
+  document.body.appendChild(m);
 
-  // Toggle modo avançado
+  // ---- Toggle modo avançado ----
   $('#m-adv').onchange = (e) => $('#m-advanced').classList.toggle('hidden', !e.target.checked);
 
-  function setPrecoTag(txt, color) {
-    const el = $('#m-preco-tag');
-    if (!el) return;
-    el.innerHTML = txt ? `<span style="color:${color}">${txt}</span>` : '';
-  }
-
-  function recalc() {
-    const grade = Array.from(card.querySelectorAll('.grade-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) }));
-    const total = grade.reduce((a, g) => a + g.qtd, 0);
-    const preco = Number($('#m-preco').value || 0);
-    $('#m-total').textContent = fmt.int(total);
-    $('#m-valor').textContent = TERC.fmtBRL(total * preco);
-    const tempo = Number($('#m-tempo')?.value || 0);
-    const pess = Number($('#m-pess')?.value || 1);
-    const min = Number($('#m-min')?.value || 480);
-    const ef = Number($('#m-ef')?.value || 0.8);
-    const pz = Number($('#m-pz')?.value || 0);
-    const dts = $('#m-dts').value;
-    if (total > 0 && dts) {
-      let dias = pz > 0 ? pz : (tempo > 0 ? Math.max(1, Math.ceil((total * tempo) / (Math.max(1, pess) * Math.max(1, min) * Math.max(0.1, ef)))) : 0);
-      if (dias > 0) {
-        const d = dayjs(dts).add(dias, 'day').format('DD/MM/YYYY');
-        $('#m-prev').textContent = d + ' (' + dias + ' dia' + (dias > 1 ? 's' : '') + ')';
-      } else $('#m-prev').textContent = 'auto';
-    } else $('#m-prev').textContent = '—';
-  }
-
-  // 🎨 Cache de cores carregadas (com hex) — repovoado a cada mudança de produto
-  let _coresList = []; // [{nome_cor, hex, uso}]
-
-  // Mapa de cores PT-BR → hex aproximado (fallback quando não há hex no catálogo)
-  function corHex(nome) {
-    if (!nome) return '#cbd5e1';
-    const n = String(nome).toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
-    const map = {
-      'amarelo': '#facc15', 'areia': '#d6c79e', 'azul': '#2563eb', 'azul claro': '#60a5fa',
-      'azul marinho': '#1e3a8a', 'marinho': '#1e3a8a', 'bege': '#e7d4b5', 'branco': '#ffffff',
-      'caqui': '#a08d5f', 'cereja': '#b91c1c', 'chumbo': '#475569', 'cinza': '#94a3b8',
-      'creme': '#fef3c7', 'dourado': '#d4a017', 'gelo': '#f1f5f9', 'goiaba': '#f87171',
-      'indigo': '#4f46e5', 'laranja': '#f97316', 'lodo': '#65733d', 'marrom': '#78350f',
-      'mostarda': '#ca8a04', 'off white': '#faf7ec', 'petroleo': '#0f766e',
-      'pink': '#ec4899', 'preto': '#0a0a0a', 'rosa': '#fb7185', 'roxo': '#7c3aed',
-      'salmao': '#fb923c', 'verde': '#16a34a', 'verde claro': '#86efac',
-      'verde musgo': '#4d6b32', 'vermelho': '#dc2626', 'vinho': '#7f1d1d',
-    };
-    if (map[n]) return map[n];
-    // Hash simples → cor consistente para nomes desconhecidos
-    let h = 0; for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) | 0;
-    const hue = Math.abs(h) % 360;
-    return `hsl(${hue} 65% 55%)`;
-  }
-
-  // Renderiza o badge da cor selecionada ao lado do label
-  function renderCorBadge() {
-    const el = $('#m-cor-badge');
-    if (!el) return;
-    const nome = $('#m-cor').value.trim();
-    if (!nome) { el.innerHTML = ''; return; }
-    const hex = corHex(nome);
-    const isLight = ['#ffffff','#fef3c7','#faf7ec','#f1f5f9','#e7d4b5','#86efac'].includes(hex);
-    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;background:${hex};color:${isLight?'#0f172a':'#fff'};padding:1px 8px;border-radius:999px;border:1px solid rgba(0,0,0,.1)">
-      <span style="width:6px;height:6px;border-radius:50%;background:${isLight?'#0f172a':'#fff'};opacity:.6"></span>${nome}
-    </span>`;
-  }
-
-  // Normaliza cor (Title Case) ao perder foco — alinha com importador
-  function normCorPt(s) {
-    const t = String(s ?? '').trim().replace(/\s+/g, ' ');
-    if (!t) return '';
-    return t.toLocaleLowerCase('pt-BR').replace(/(^|\s|-|\/)(\p{L})/gu, (_m, sep, ch) => sep + ch.toLocaleUpperCase('pt-BR'));
-  }
-
-  // Renderiza o dropdown filtrando pelo termo digitado
-  function renderCorDropdown(filter = '') {
-    const dd = $('#m-cor-dropdown');
-    if (!dd) return;
-    const q = filter.trim().toLocaleLowerCase('pt-BR');
-    const items = _coresList.filter(c => !q || c.nome_cor.toLocaleLowerCase('pt-BR').includes(q));
-    let html = '';
-    if (items.length === 0 && q) {
-      html += `<div class="cor-opt cor-new" data-novo="${q}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #e2e8f0;background:#fef9c3">
-        <i class="fas fa-plus text-amber-600"></i>
-        <span>Nova cor: <b>${normCorPt(filter)}</b></span>
-      </div>`;
-    }
-    html += items.slice(0, 50).map(c => {
-      const hex = c.hex || corHex(c.nome_cor);
-      return `<div class="cor-opt" data-cor="${c.nome_cor.replace(/"/g,'&quot;')}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #f1f5f9">
-        <span style="width:14px;height:14px;border-radius:50%;background:${hex};border:1px solid rgba(0,0,0,.15);flex-shrink:0"></span>
-        <span style="flex:1">${c.nome_cor}</span>
-        ${c.uso > 0 ? `<span style="font-size:10px;color:#64748b">${c.uso} preço(s)</span>` : ''}
-      </div>`;
-    }).join('');
-    if (!html) html = '<div style="padding:8px 10px;color:#94a3b8;font-size:12px">Sem cores cadastradas. Digite uma nova.</div>';
-    dd.innerHTML = html;
-    // Bind clicks
-    dd.querySelectorAll('.cor-opt').forEach(opt => {
-      opt.addEventListener('click', () => {
-        const novo = opt.dataset.novo;
-        const cor = opt.dataset.cor || normCorPt(novo || '');
-        $('#m-cor').value = cor;
-        dd.classList.add('hidden');
-        renderCorBadge();
-        _lastLookupKey = '';
-        autoLookupPreco();
-      });
-      opt.addEventListener('mouseenter', () => { opt.style.background = '#f1f5f9'; });
-      opt.addEventListener('mouseleave', () => { opt.style.background = ''; });
-    });
-  }
-
-  // 🎨 Carrega cores: prioridade = produto específico, fallback = todas as cores cadastradas
-  async function loadCoresDoProduto() {
-    const cod = $('#m-ref').value.trim();
-    let lista = [];
-    // 1) Endpoint distinct filtrado pelo produto
-    if (cod) {
-      try {
-        const r = await api('get', '/terc/cores/distinct?cod_ref=' + encodeURIComponent(cod), null, { silent: true });
-        lista = fmt.safeArr(r?.data);
-      } catch {}
-    }
-    // 2) Fallback: todas as cores do sistema (catálogo + uso global)
-    if (lista.length === 0) {
-      try {
-        const r = await api('get', '/terc/cores/distinct', null, { silent: true });
-        lista = fmt.safeArr(r?.data);
-      } catch {}
-    }
-    // 3) Último fallback: catálogo TERC.cores em memória
-    if (lista.length === 0) {
-      lista = fmt.safeArr(window.TERC?.cores).map(c => ({ nome_cor: c.nome_cor, hex: c.hex, uso: 0 }));
-    }
-    _coresList = lista;
-    renderCorDropdown('');
-    renderCorBadge();
-  }
-
-  // 🔎 Lookup automático de preço (Produto + Cor + Tamanho + Serviço, com fallback)
-  // Prioridade enviada ao backend:
-  //   1) Produto + Cor + Tamanho + Serviço → match_level='produto+cor+grade+servico'
-  //   2) Produto + Cor + Serviço            → match_level='produto+cor+servico'
-  //   3) Produto + Serviço                  → match_level='produto+servico'
-  //   4) Serviço padrão                     → match_level='servico_padrao'
-  let _lastLookupKey = '';
-  async function autoLookupPreco() {
-    const cod = $('#m-ref').value.trim();
-    const sv  = $('#m-serv').value;
-    const col = $('#m-col').value;
-    const cor = $('#m-cor').value.trim();
-    // Tamanho dominante = aquele com mais peças na grade (ou primeiro >0)
-    const grade = Array.from(card.querySelectorAll('.grade-in'))
-      .map(i => ({ tam: i.dataset.tam, qtd: Number(i.value || 0) }))
-      .filter(g => g.qtd > 0)
-      .sort((a, b) => b.qtd - a.qtd);
-    const tam = grade[0]?.tam || '';
-    if (!cod || !sv) { setPrecoTag('', ''); return; }
-    const key = `${cod}|${sv}|${col || ''}|${cor}|${tam}`;
-    if (key === _lastLookupKey) return;
-    _lastLookupKey = key;
-    try {
-      const params = new URLSearchParams({ cod_ref: cod, id_servico: sv });
-      if (col) params.set('id_colecao', col);
-      if (cor) params.set('cor', cor);
-      if (tam) params.set('tamanho', tam);
-      const res = await api('get', '/terc/precos/lookup?' + params.toString(), null, { silent: true });
-      if (res.data && res.data.preco != null) {
-        $('#m-preco').value = Number(res.data.preco).toFixed(2);
-        if (res.data.tempo_min && $('#m-tempo')) $('#m-tempo').value = res.data.tempo_min;
-        if (res.data.desc_ref && !$('#m-descref').value) $('#m-descref').value = res.data.desc_ref;
-        const lvl = res.data.match_level || '';
-        const labelMap = {
-          'produto+cor+grade+servico': '<i class="fas fa-bullseye"></i> aplicado: produto+cor+grade+serviço',
-          'produto+cor+servico':       '<i class="fas fa-circle-check"></i> aplicado: produto+cor+serviço',
-          'produto+servico':            '<i class="fas fa-circle-check"></i> aplicado: produto+serviço',
-          'servico_padrao':             '<i class="fas fa-circle-info"></i> aplicado: serviço padrão',
-        };
-        setPrecoTag(labelMap[lvl] || '<i class="fas fa-check"></i> da tabela', '#10b981');
-        toast('Preço aplicado automaticamente', 'success');
-        recalc();
-      } else {
-        setPrecoTag('<i class="fas fa-triangle-exclamation"></i> Preço não encontrado para esta combinação — <a href="#" id="m-save-preco" style="text-decoration:underline">salvar?</a>', '#f59e0b');
-        const a = $('#m-save-preco');
-        if (a) a.onclick = (e) => { e.preventDefault(); saveSugestaoPreco(); };
-      }
-    } catch {}
-  }
-
-  async function saveSugestaoPreco() {
-    const cod = $('#m-ref').value.trim();
-    const desc = $('#m-descref').value.trim();
-    const sv = $('#m-serv').value;
-    const col = $('#m-col').value;
-    const preco = Number($('#m-preco').value || 0);
-    if (!sv || !preco || preco <= 0) { toast('Informe serviço e preço primeiro', 'warning'); return; }
-    if (!cod && !desc) { toast('Informe referência ou descrição', 'warning'); return; }
-    try {
-      await api('post', '/terc/precos', { cod_ref: cod, desc_ref: desc, id_servico: sv, id_colecao: col, grade: 1, preco });
-      toast('Preço salvo na tabela', 'success');
-      setPrecoTag('<i class="fas fa-check"></i> salvo', '#10b981');
-      _lastLookupKey = '';
-    } catch {}
-  }
-
-  // 📦 Auto-fill ao escolher PRODUTO
-  $('#m-prod').onchange = async () => {
-    const opt = $('#m-prod').options[$('#m-prod').selectedIndex];
-    if (!opt || !opt.value) return;
-    const cod = opt.dataset.cod || '';
-    const desc = opt.dataset.desc || '';
-    const colId = opt.dataset.col || '';
-    if (cod) $('#m-ref').value = cod;
-    if (desc) $('#m-descref').value = desc;
-    if (colId && !$('#m-col').value) $('#m-col').value = colId;
-    await loadCoresDoProduto();
-    toast('Produto atualizado', 'success');
-    autoLookupPreco();
-  };
-  $('#m-serv').addEventListener('change', autoLookupPreco);
-  $('#m-col').addEventListener('change', autoLookupPreco);
-  $('#m-ref').addEventListener('blur', () => { _lastLookupKey = ''; loadCoresDoProduto(); autoLookupPreco(); });
-
-  // 🎨 Eventos do novo seletor de cor (dropdown + badge + autocomplete)
-  const corInput = $('#m-cor');
-  const corDD = $('#m-cor-dropdown');
-  const corToggle = $('#m-cor-toggle');
-  corInput.addEventListener('focus', () => { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); });
-  corInput.addEventListener('input', () => { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); renderCorBadge(); });
-  corInput.addEventListener('blur', () => {
-    // Pequeno delay p/ permitir clique no dropdown antes de fechar
-    setTimeout(() => {
-      corDD.classList.add('hidden');
-      // Normaliza ao sair (Title Case)
-      const v = normCorPt(corInput.value);
-      if (v !== corInput.value) corInput.value = v;
-      renderCorBadge();
-      _lastLookupKey = '';
-      autoLookupPreco();
-    }, 180);
-  });
-  corToggle.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    const willOpen = corDD.classList.contains('hidden');
-    if (willOpen) { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); corInput.focus(); }
-    else corDD.classList.add('hidden');
-  });
-  // Fecha dropdown ao clicar fora
-  document.addEventListener('mousedown', (e) => {
-    if (corDD.classList.contains('hidden')) return;
-    if (!e.target.closest('.cor-picker-wrap')) corDD.classList.add('hidden');
-  }, { passive: true });
-  $('#m-preco').addEventListener('input', () => { setPrecoTag('<i class="fas fa-keyboard"></i> manual', '#f59e0b'); recalc(); });
-  card.querySelectorAll('.grade-in, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
-  // Recarrega cores e dispara lookup quando a grade muda (tamanho dominante pode mudar)
-  card.querySelectorAll('.grade-in').forEach(i => i.addEventListener('change', () => { _lastLookupKey = ''; autoLookupPreco(); }));
-  // Inicializa datalist de cores e tenta lookup com valores iniciais
-  loadCoresDoProduto();
-
-  // 👤 Auto-preenche parâmetros ocultos do terceirizado (não exibe no básico)
+  // ---- Auto-fill parâmetros do terceirizado ----
   $('#m-terc').addEventListener('change', () => {
     const t = TERC.terceirizados.find(x => x.id_terc == $('#m-terc').value);
     if (t) {
@@ -4365,41 +4245,411 @@ async function TERC_openRemModal(id, onSave) {
       if ($('#m-min')) $('#m-min').value = t.min_trab_dia || 480;
       if ($('#m-ef')) $('#m-ef').value = t.efic_padrao || 0.8;
       if ($('#m-pz')) $('#m-pz').value = t.prazo_padrao || 0;
-      recalc();
+      recalcAll();
     }
   });
 
-  // Botão manual de lookup (modo avançado)
-  const btnLookup = $('#m-lookup');
-  if (btnLookup) btnLookup.onclick = () => { _lastLookupKey = ''; autoLookupPreco(); };
+  // =================================================================
+  // RENDER DE 1 ITEM (card) — produto + cor + grade independente
+  // =================================================================
+  function renderItemCard(it) {
+    const wrap = document.createElement('div');
+    wrap.className = 'card p-3';
+    wrap.style.cssText = 'border:1px solid #e2e8f0;border-radius:8px;background:#fafbfc';
+    wrap.dataset.uid = String(it.uid);
 
-  recalc();
-  if (!edit) {
-    // Tenta lookup imediatamente se já há valores (re-edição)
-    setTimeout(autoLookupPreco, 100);
+    const corHex = TERC_corHex(it.cor);
+    const isLight = ['#ffffff','#fef3c7','#faf7ec','#f1f5f9','#e7d4b5','#86efac'].includes(corHex);
+    const corBadge = it.cor
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;background:${corHex};color:${isLight?'#0f172a':'#fff'};padding:2px 8px;border-radius:999px;border:1px solid rgba(0,0,0,.1)">
+           <span style="width:6px;height:6px;border-radius:50%;background:${isLight?'#0f172a':'#fff'};opacity:.6"></span>${it.cor}
+         </span>`
+      : '';
+
+    const idProdSel = it.id_produto || (TERC.findProdutoByRef ? (TERC.findProdutoByRef(it.cod_ref, r.id_colecao)?.id_produto || '') : '');
+
+    wrap.innerHTML = `
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold text-slate-700">
+          <i class="fas fa-tshirt mr-1 text-brand"></i>
+          Produto <span class="text-xs text-slate-500" data-role="cor-label">${corBadge}</span>
+        </div>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-secondary btn-sm" data-act="add-cor" title="Duplicar este produto com outra cor">
+            <i class="fas fa-palette mr-1"></i>+ Cor
+          </button>
+          <button type="button" class="btn btn-danger btn-sm" data-act="remove" title="Remover este item">
+            <i class="fas fa-trash"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-12 gap-2">
+        <div class="col-span-5"><label>Produto *</label>
+          <select data-f="prod">${TERC.optProdutos(idProdSel, r.id_colecao)}</select></div>
+        <div class="col-span-3"><label>Serviço *</label>
+          <select data-f="serv">${TERC.optServicos(it.id_servico)}</select></div>
+        <div class="col-span-2"><label>Referência</label>
+          <input data-f="ref" value="${(it.cod_ref || '').replace(/"/g, '&quot;')}" placeholder="auto" /></div>
+        <div class="col-span-2"><label>Preço (R$) <span class="text-xs" data-role="preco-tag"></span></label>
+          <input type="number" step="0.01" data-f="preco" value="${Number(it.preco_unit || 0).toFixed(2)}" /></div>
+
+        <div class="col-span-7"><label>Descrição</label>
+          <input data-f="descref" value="${(it.desc_ref || '').replace(/"/g, '&quot;')}" /></div>
+        <div class="col-span-3">
+          <label>Cor</label>
+          <div style="position:relative">
+            <input data-f="cor" value="${(it.cor || '').replace(/"/g, '&quot;')}" placeholder="Selecione ou digite" autocomplete="off" />
+            <button data-f="cor-toggle" type="button" tabindex="-1"
+              style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;cursor:pointer;color:#64748b;padding:4px">
+              <i class="fas fa-palette"></i>
+            </button>
+            <div data-f="cor-dd" class="hidden"
+              style="position:absolute;z-index:60;top:calc(100% + 4px);left:0;right:0;max-height:220px;overflow-y:auto;background:#fff;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.08)"></div>
+          </div>
+        </div>
+        <div class="col-span-2"><label>Tempo/peça (min)</label>
+          <input type="number" step="0.01" data-f="tempo" value="${Number(it.tempo_peca || 0)}" /></div>
+
+        <div class="col-span-12">
+          <label class="font-semibold">Grade *</label>
+          <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" data-f="grade">
+            ${TAMANHOS.map(t => `
+              <div class="text-center">
+                <div class="text-xs font-mono text-slate-500">${t}</div>
+                <input data-tam="${t}" type="number" min="0" value="${it.grade[t] || 0}" class="text-center grade-in-x" />
+              </div>`).join('')}
+          </div>
+          <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
+            <span>Total item: <b data-role="tot-pcs">0</b> pç</span>
+            <span>Valor: <b data-role="tot-val" class="text-emerald-700">R$ 0,00</b></span>
+            ${it._qtdRetornada > 0
+              ? `<span class="text-amber-700"><i class="fas fa-undo mr-1"></i>Retornado: ${it._qtdRetornada} pç (mín. permitido)</span>`
+              : ''}
+          </div>
+        </div>
+      </div>
+    `;
+
+    // ---- Event listeners deste card ----
+    const $$ = (sel) => wrap.querySelector(sel);
+    const fProd = $$('[data-f="prod"]');
+    const fServ = $$('[data-f="serv"]');
+    const fRef = $$('[data-f="ref"]');
+    const fDesc = $$('[data-f="descref"]');
+    const fCor = $$('[data-f="cor"]');
+    const fCorToggle = $$('[data-f="cor-toggle"]');
+    const fCorDD = $$('[data-f="cor-dd"]');
+    const fPreco = $$('[data-f="preco"]');
+    const fTempo = $$('[data-f="tempo"]');
+    const corLabel = $$('[data-role="cor-label"]');
+    const precoTag = $$('[data-role="preco-tag"]');
+
+    function corBadgeHTML(nome) {
+      if (!nome) return '';
+      const hex = TERC_corHex(nome);
+      const isLite = ['#ffffff','#fef3c7','#faf7ec','#f1f5f9','#e7d4b5','#86efac'].includes(hex);
+      return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;background:${hex};color:${isLite?'#0f172a':'#fff'};padding:2px 8px;border-radius:999px;border:1px solid rgba(0,0,0,.1)">
+        <span style="width:6px;height:6px;border-radius:50%;background:${isLite?'#0f172a':'#fff'};opacity:.6"></span>${nome}
+      </span>`;
+    }
+    function refreshCorLabel() { corLabel.innerHTML = corBadgeHTML(fCor.value.trim()); }
+    function setPrecoTag(txt, color) { precoTag.innerHTML = txt ? `<span style="color:${color}">${txt}</span>` : ''; }
+
+    // ---- Cor: dropdown + autocomplete ----
+    function renderCorDD(filterTerm = '') {
+      const q = filterTerm.trim().toLocaleLowerCase('pt-BR');
+      const items = _coresCache.filter(c => !q || (c.nome_cor || '').toLocaleLowerCase('pt-BR').includes(q));
+      let html = '';
+      if (items.length === 0 && q) {
+        html += `<div class="cor-opt" data-novo="${q.replace(/"/g,'&quot;')}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #e2e8f0;background:#fef9c3">
+          <i class="fas fa-plus text-amber-600"></i><span>Nova cor: <b>${TERC_normCorPt(filterTerm)}</b></span>
+        </div>`;
+      }
+      html += items.slice(0, 50).map(c => {
+        const hex = c.hex || TERC_corHex(c.nome_cor);
+        return `<div class="cor-opt" data-cor="${(c.nome_cor || '').replace(/"/g,'&quot;')}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #f1f5f9">
+          <span style="width:14px;height:14px;border-radius:50%;background:${hex};border:1px solid rgba(0,0,0,.15);flex-shrink:0"></span>
+          <span style="flex:1">${c.nome_cor}</span>
+          ${c.uso > 0 ? `<span style="font-size:10px;color:#64748b">${c.uso}</span>` : ''}
+        </div>`;
+      }).join('');
+      if (!html) html = '<div style="padding:8px 10px;color:#94a3b8;font-size:12px">Sem cores. Digite uma nova.</div>';
+      fCorDD.innerHTML = html;
+      fCorDD.querySelectorAll('.cor-opt').forEach(opt => {
+        opt.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const novo = opt.dataset.novo;
+          const cor = opt.dataset.cor || TERC_normCorPt(novo || '');
+          fCor.value = cor;
+          it.cor = cor;
+          fCorDD.classList.add('hidden');
+          refreshCorLabel();
+          autoLookup();
+        });
+      });
+    }
+
+    fCor.addEventListener('focus', () => { renderCorDD(fCor.value); fCorDD.classList.remove('hidden'); });
+    fCor.addEventListener('input', () => { renderCorDD(fCor.value); fCorDD.classList.remove('hidden'); refreshCorLabel(); });
+    fCor.addEventListener('blur', () => {
+      setTimeout(() => {
+        fCorDD.classList.add('hidden');
+        const v = TERC_normCorPt(fCor.value);
+        if (v !== fCor.value) fCor.value = v;
+        it.cor = fCor.value.trim();
+        refreshCorLabel();
+        autoLookup();
+      }, 180);
+    });
+    fCorToggle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const willOpen = fCorDD.classList.contains('hidden');
+      if (willOpen) { renderCorDD(fCor.value); fCorDD.classList.remove('hidden'); fCor.focus(); }
+      else fCorDD.classList.add('hidden');
+    });
+
+    // ---- Auto-fill ao escolher PRODUTO ----
+    fProd.onchange = () => {
+      const opt = fProd.options[fProd.selectedIndex];
+      if (!opt || !opt.value) return;
+      const cod = opt.dataset.cod || '';
+      const desc = opt.dataset.desc || '';
+      if (cod) { fRef.value = cod; it.cod_ref = cod; }
+      if (desc) { fDesc.value = desc; it.desc_ref = desc; }
+      it.id_produto = opt.value;
+      autoLookup();
+    };
+
+    // ---- Lookup automático de preço ----
+    let _lastKey = '';
+    async function autoLookup() {
+      const cod = fRef.value.trim();
+      const sv = fServ.value;
+      const col = $('#m-col').value;
+      const cor = fCor.value.trim();
+      const grade = Array.from(wrap.querySelectorAll('.grade-in-x'))
+        .map(i => ({ tam: i.dataset.tam, qtd: Number(i.value || 0) }))
+        .filter(g => g.qtd > 0).sort((a, b) => b.qtd - a.qtd);
+      const tam = grade[0]?.tam || '';
+      if (!cod || !sv) { setPrecoTag('', ''); return; }
+      const key = `${cod}|${sv}|${col}|${cor}|${tam}`;
+      if (key === _lastKey) return;
+      _lastKey = key;
+      try {
+        const params = new URLSearchParams({ cod_ref: cod, id_servico: sv });
+        if (col) params.set('id_colecao', col);
+        if (cor) params.set('cor', cor);
+        if (tam) params.set('tamanho', tam);
+        const res = await api('get', '/terc/precos/lookup?' + params.toString(), null, { silent: true });
+        if (res.data && res.data.preco != null) {
+          fPreco.value = Number(res.data.preco).toFixed(2);
+          it.preco_unit = Number(res.data.preco);
+          if (res.data.tempo_min) { fTempo.value = res.data.tempo_min; it.tempo_peca = Number(res.data.tempo_min); }
+          if (res.data.desc_ref && !fDesc.value) { fDesc.value = res.data.desc_ref; it.desc_ref = res.data.desc_ref; }
+          const lvl = res.data.match_level || '';
+          const labelMap = {
+            'produto+cor+grade+servico': 'tabela: prod+cor+grade+serv',
+            'produto+cor+servico': 'tabela: prod+cor+serv',
+            'produto+servico': 'tabela: prod+serv',
+            'servico_padrao': 'serv. padrão',
+          };
+          setPrecoTag('<i class="fas fa-check"></i> ' + (labelMap[lvl] || 'tabela'), '#10b981');
+          recalcItem();
+        } else {
+          setPrecoTag('<i class="fas fa-triangle-exclamation"></i> sem preço', '#f59e0b');
+        }
+      } catch {}
+    }
+
+    // ---- Inputs de campo: atualiza estado + recalcula ----
+    fServ.addEventListener('change', () => { it.id_servico = fServ.value; autoLookup(); recalcItem(); });
+    fRef.addEventListener('input', () => { it.cod_ref = fRef.value.trim(); });
+    fRef.addEventListener('blur', () => { _lastKey = ''; autoLookup(); });
+    fDesc.addEventListener('input', () => { it.desc_ref = fDesc.value.trim(); });
+    fPreco.addEventListener('input', () => {
+      it.preco_unit = Number(fPreco.value || 0);
+      setPrecoTag('<i class="fas fa-keyboard"></i> manual', '#f59e0b');
+      recalcItem();
+    });
+    fTempo.addEventListener('input', () => { it.tempo_peca = Number(fTempo.value || 0); recalcAll(); });
+
+    // ---- Grade: atualiza estado + recalcula ----
+    wrap.querySelectorAll('.grade-in-x').forEach(inp => {
+      inp.addEventListener('input', () => {
+        it.grade[inp.dataset.tam] = Number(inp.value || 0);
+        recalcItem();
+      });
+      inp.addEventListener('change', () => { _lastKey = ''; autoLookup(); });
+    });
+
+    // ---- Botões do card ----
+    wrap.querySelector('[data-act="add-cor"]').onclick = () => {
+      // Clona produto, mantém serviço/preço, mas zera grade e cor
+      const clone = newItem({
+        id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
+        id_servico: it.id_servico, cor: '', preco_unit: it.preco_unit,
+        tempo_peca: it.tempo_peca, grade: {},
+      });
+      itens.push(clone);
+      mountItens();
+      // Foco na cor do novo card
+      setTimeout(() => {
+        const last = $('#itens-wrap').lastElementChild;
+        if (last) last.querySelector('[data-f="cor"]')?.focus();
+      }, 30);
+    };
+    wrap.querySelector('[data-act="remove"]').onclick = () => {
+      if (it._qtdRetornada > 0) {
+        toast('Não é possível remover: este item já tem retornos registrados', 'warning');
+        return;
+      }
+      if (itens.length === 1) {
+        toast('A remessa precisa ter pelo menos 1 item', 'warning');
+        return;
+      }
+      itens = itens.filter(x => x.uid !== it.uid);
+      mountItens();
+    };
+
+    // ---- Recalcula totais deste card ----
+    function recalcItem() {
+      const total = TAMANHOS.reduce((a, t) => a + (Number(it.grade[t] || 0)), 0);
+      const valor = total * Number(it.preco_unit || 0);
+      wrap.querySelector('[data-role="tot-pcs"]').textContent = fmt.int(total);
+      wrap.querySelector('[data-role="tot-val"]').textContent = TERC.fmtBRL(valor);
+      it._totalPcs = total;
+      it._totalVal = valor;
+      recalcAll();
+    }
+
+    // Inicializa totais do card
+    recalcItem();
+    return wrap;
   }
 
+  // =================================================================
+  // RECALC GERAL (rodapé) + previsão
+  // =================================================================
+  function recalcAll() {
+    let totPcs = 0, totVal = 0, tempoMax = 0;
+    for (const it of itens) {
+      const t = TAMANHOS.reduce((a, tam) => a + (Number(it.grade[tam] || 0)), 0);
+      totPcs += t;
+      totVal += t * Number(it.preco_unit || 0);
+      if (Number(it.tempo_peca || 0) > tempoMax) tempoMax = Number(it.tempo_peca);
+    }
+    const $tot = $('#tot-itens'); if ($tot) $tot.textContent = itens.length;
+    const $pcs = $('#tot-pcs'); if ($pcs) $pcs.textContent = fmt.int(totPcs);
+    const $val = $('#tot-valor'); if ($val) $val.textContent = TERC.fmtBRL(totVal);
+
+    // Previsão (usa avançado se preenchido)
+    const dts = $('#m-dts').value;
+    const pess = Number($('#m-pess')?.value || 1);
+    const min = Number($('#m-min')?.value || 480);
+    const ef = Number($('#m-ef')?.value || 0.8);
+    const pz = Number($('#m-pz')?.value || 0);
+    const $prev = $('#tot-prev');
+    if (!$prev) return;
+    if (totPcs > 0 && dts) {
+      let dias = pz > 0 ? pz : (tempoMax > 0
+        ? Math.max(1, Math.ceil((totPcs * tempoMax) / (Math.max(1, pess) * Math.max(1, min) * Math.max(0.1, ef))))
+        : 0);
+      if (dias > 0) {
+        const d = dayjs(dts).add(dias, 'day').format('DD/MM/YYYY');
+        $prev.textContent = d + ' (' + dias + ' dia' + (dias > 1 ? 's' : '') + ')';
+      } else $prev.textContent = 'auto';
+    } else $prev.textContent = '—';
+  }
+
+  // =================================================================
+  // MOUNT/RE-RENDER da lista de cards
+  // =================================================================
+  function mountItens() {
+    const wrap = $('#itens-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    itens.forEach(it => wrap.appendChild(renderItemCard(it)));
+    recalcAll();
+  }
+  mountItens();
+
+  // ---- Listeners globais (cabeçalho) ----
+  $('#m-col').addEventListener('change', () => itens.forEach(() => {})); // reservado p/ futuro
+  ['m-dts', 'm-pess', 'm-min', 'm-ef', 'm-pz'].forEach(id => {
+    const el = $('#' + id); if (el) el.addEventListener('input', recalcAll);
+  });
+
+  // ---- Botão: Adicionar Produto ----
+  $('#btn-add-prod').onclick = () => {
+    itens.push(newItem());
+    mountItens();
+    setTimeout(() => {
+      const last = $('#itens-wrap').lastElementChild;
+      if (last) last.querySelector('[data-f="prod"]')?.focus();
+    }, 30);
+  };
+
+  // ---- Cancelar ----
   $('#m-cancel').onclick = () => m.remove();
+
+  // ---- SALVAR (1 requisição em lote) ----
   $('#m-save').onclick = async () => {
-    const grade = Array.from(card.querySelectorAll('.grade-in')).map(i => ({ tamanho: i.dataset.tam, qtd: Number(i.value || 0) })).filter(g => g.qtd > 0);
+    if (!$('#m-terc').value) { toast('Selecione o terceirizado', 'warning'); return; }
+    if (!$('#m-dts').value) { toast('Informe a data de saída', 'warning'); return; }
+
+    // Constrói itens enviáveis (validações)
+    const itensBody = [];
+    for (const it of itens) {
+      const grade = TAMANHOS
+        .map(t => ({ tamanho: t, qtd: Number(it.grade[t] || 0) }))
+        .filter(g => g.qtd > 0);
+      const totalItem = grade.reduce((a, g) => a + g.qtd, 0);
+      // Item totalmente vazio: ignora silenciosamente
+      if (totalItem === 0 && !it.cod_ref && !it.cor && !it.id_servico) continue;
+      // Validações por item
+      if (!it.id_servico) { toast('Cada produto precisa de um serviço', 'warning'); return; }
+      if (!it.cod_ref) { toast('Cada produto precisa de uma referência', 'warning'); return; }
+      if (totalItem === 0) { toast('Item sem quantidade na grade — preencha ou remova', 'warning'); return; }
+      // Proteção: não permitir qtd menor que retornado
+      if (it._qtdRetornada > 0 && totalItem < it._qtdRetornada) {
+        toast(`Item ${it.cod_ref}/${it.cor || '?'}: total (${totalItem}) < retornado (${it._qtdRetornada})`, 'warning');
+        return;
+      }
+      itensBody.push({
+        id_item: it.id_item || null,
+        id_produto: it.id_produto || null,
+        cod_ref: it.cod_ref,
+        desc_ref: it.desc_ref || '',
+        id_servico: Number(it.id_servico),
+        cor: it.cor || '',
+        preco_unit: Number(it.preco_unit || 0),
+        tempo_peca: Number(it.tempo_peca || 0),
+        grade,
+      });
+    }
+    if (itensBody.length === 0) { toast('Adicione pelo menos 1 produto com grade preenchida', 'warning'); return; }
+
     const body = {
-      num_controle, num_op: $('#m-op').value.trim(),
-      id_terc: $('#m-terc').value, id_servico: $('#m-serv').value, id_colecao: $('#m-col').value,
-      cod_ref: $('#m-ref').value.trim(), desc_ref: $('#m-descref').value.trim(),
-      cor: $('#m-cor').value.trim(),
-      dt_saida: $('#m-dts').value, dt_inicio: $('#m-dti')?.value || $('#m-dts').value,
-      tempo_peca: $('#m-tempo')?.value || 0, preco_unit: $('#m-preco').value,
-      qtd_pessoas: $('#m-pess')?.value || 1, min_trab_dia: $('#m-min')?.value || 480,
-      efic_pct: $('#m-ef')?.value || 0.8, prazo_dias: $('#m-pz')?.value || 0,
-      status: $('#m-status')?.value || 'AguardandoEnvio', observacao: $('#m-obs')?.value?.trim() || '',
-      grade,
+      num_controle,
+      num_op: $('#m-op').value.trim(),
+      id_terc: $('#m-terc').value,
+      id_colecao: $('#m-col').value,
+      dt_saida: $('#m-dts').value,
+      dt_inicio: $('#m-dti')?.value || $('#m-dts').value,
+      qtd_pessoas: $('#m-pess')?.value || 1,
+      min_trab_dia: $('#m-min')?.value || 480,
+      efic_pct: $('#m-ef')?.value || 0.8,
+      prazo_dias: $('#m-pz')?.value || 0,
+      status: $('#m-status')?.value || 'AguardandoEnvio',
+      observacao: $('#m-obs')?.value?.trim() || '',
+      itens: itensBody,
     };
-    if (!body.id_terc || !body.id_servico || !body.cod_ref || !body.dt_saida) { toast('Preencha terceirizado, serviço, referência/produto e data de saída', 'warning'); return; }
-    if (grade.length === 0) { toast('Informe ao menos uma quantidade na grade', 'warning'); return; }
+
     try {
       if (edit) await api('put', '/terc/remessas/' + id, body);
       else await api('post', '/terc/remessas', body);
-      toast('Remessa salva', 'success');
+      toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
       m.remove();
       if (onSave) onSave();
     } catch {}
@@ -5786,7 +6036,7 @@ async function renderTercPrecosBlock(body, refresh) {
       <div class="flex-1"></div>
       <button id="btn-importar" class="btn btn-secondary" title="Importar planilha de cor/preço"><i class="fas fa-file-excel mr-1"></i>Importar</button>
       <button id="btn-col" class="btn btn-secondary" title="Gerenciar coleções"><i class="fas fa-layer-group mr-1"></i>Coleções</button>
-      <button id="btn-cleanup" class="btn btn-warning" title="Detecta e remove preços duplicados (Ref+Cor+Grade+Serviço)"><i class="fas fa-broom mr-1"></i>Limpar Duplicados</button>
+      <button id="btn-cleanup" class="btn btn-warning" title="Remove duplicados de Produtos e Preços (Nome + Descrição)"><i class="fas fa-broom mr-1"></i>Limpar Duplicados</button>
       <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
       <button id="btn-del-all" class="btn btn-danger" title="Excluir TODOS os preços (confirmação dupla)"><i class="fas fa-trash-can mr-1"></i>Excluir todos</button>
     </div>
@@ -5852,7 +6102,7 @@ async function renderTercPrecosBlock(body, refresh) {
   body.querySelector('#btn-col').onclick = () => TERC_openColecoesModal(() => { load(); refresh && refresh(); });
   body.querySelector('#btn-importar').onclick = () => TERC_openImportPrecosModal(() => { load(); refresh && refresh(); });
   body.querySelector('#btn-del-all').onclick = () => TERC_confirmDelAllPrecos(() => { load(); refresh && refresh(); });
-  body.querySelector('#btn-cleanup').onclick = () => TERC_openCleanupModal('precos', () => { load(); refresh && refresh(); });
+  body.querySelector('#btn-cleanup').onclick = () => TERC_runCleanup(() => { load(); refresh && refresh(); });
   await load();
 }
 
@@ -5892,150 +6142,74 @@ window.TERC_corBadge = function (nome) {
  * - Mostra resumo: grupos analisados, manter, remover, conflitos/divergentes
  * - Lista detalhada das ações antes de executar
  * ================================================================= */
-function TERC_openCleanupModal(tipo, onDone) {
-  // tipo: 'precos' | 'produtos'
-  const t = tipo === 'produtos' ? 'produtos' : 'precos';
-  const titulo = t === 'produtos' ? 'Limpar Produtos Duplicados' : 'Limpar Preços Duplicados';
-  const regra = t === 'produtos'
-    ? 'Produtos com a <b>mesma referência</b> (ignorando maiúscula/minúscula e espaços) serão agrupados; mantemos o mais completo (ou o mais recente) e reapontamos remessas/preços.'
-    : 'Preços com a mesma combinação <b>Ref + Cor + Grade + Serviço (+ Coleção)</b> serão agrupados; mantemos um registro segundo a estratégia escolhida.';
+/* =================================================================
+ * 🧹 LIMPAR DUPLICADOS — versão leve (1 clique, SQL direto no backend)
+ * Regra: agrupa por Nome + Descrição (ignora referência) — vide /terc/cleanup/run
+ * ================================================================= */
+async function TERC_runCleanup(onDone) {
+  const okExec = confirm(
+    'Limpar duplicados (produtos e preços) com base em NOME + DESCRIÇÃO?\n\n' +
+    '• Mantém 1 registro por grupo, exclui os demais\n' +
+    '• Backup automático será criado antes da exclusão\n' +
+    '• A operação é direta (sem simulação)\n\n' +
+    'Clique OK para executar.'
+  );
+  if (!okExec) return;
 
+  // Toast com loading
   const m = el('div', { class: 'modal-backdrop' });
-  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
-  const estratHTML = t === 'produtos' ? `
-    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_completo" checked /> Manter o mais completo</label>
-    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_recente" /> Manter o mais recente</label>
-  ` : `
-    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_recente" checked /> Manter o mais recente</label>
-    <label class="flex items-center gap-2"><input type="radio" name="estr" value="maior" /> Manter maior preço</label>
-    <label class="flex items-center gap-2"><input type="radio" name="estr" value="menor" /> Manter menor preço</label>
-  `;
+  const card = el('div', { class: 'modal p-5 w-full max-w-md' });
   card.innerHTML = `
-    <h3 class="text-lg font-semibold mb-2"><i class="fas fa-broom mr-2 text-amber-600"></i>${titulo}</h3>
-    <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs mb-3">
-      <i class="fas fa-circle-info mr-1 text-amber-700"></i>${regra}
-      <br><b class="text-amber-700">Importante:</b> rodaremos primeiro em modo <b>Simulação</b> (não altera dados). Só após conferir o relatório, clique em <b>Executar limpeza</b>.
-    </div>
-
-    <div class="grid grid-cols-2 gap-3 mb-3">
+    <div class="flex items-center gap-3">
+      <i class="fas fa-spinner fa-spin text-xl text-amber-600"></i>
       <div>
-        <label class="text-xs font-semibold text-slate-600">Estratégia</label>
-        <div class="flex flex-col gap-1 text-sm mt-1">${estratHTML}</div>
+        <div class="font-semibold">Limpando duplicados…</div>
+        <div class="text-xs text-slate-500">Criando backup e removendo registros duplicados.</div>
       </div>
-      <div class="flex items-end justify-end gap-2">
-        <button id="c-sim" class="btn btn-secondary"><i class="fas fa-flask mr-1"></i>Simular</button>
-        <button id="c-go" class="btn btn-danger" disabled title="Disponível após simulação"><i class="fas fa-broom mr-1"></i>Executar limpeza</button>
-      </div>
-    </div>
-
-    <div id="c-result" class="text-sm"></div>
-
-    <div class="flex justify-end gap-2 mt-4">
-      <button id="c-cancel" class="btn btn-secondary">Fechar</button>
-    </div>
-  `;
+    </div>`;
   m.appendChild(card); document.body.appendChild(m);
 
-  let ultimoSimulado = false;
-  $('#c-cancel').onclick = () => m.remove();
+  try {
+    const r = await api('post', '/terc/cleanup/run', {});
+    const d = r?.data || {};
+    const remProd = d.produtos?.removidos || 0;
+    const remPrec = d.precos?.removidos || 0;
 
-  function getEstr() {
-    return card.querySelector('input[name="estr"]:checked')?.value
-      || (t === 'produtos' ? 'mais_completo' : 'mais_recente');
-  }
-
-  function renderResumo(d, executou) {
-    const tot = d.totais || {};
-    const acoes = fmt.safeArr(d.acoes);
-    const corBadge = (s) => `<span class="px-2 py-0.5 rounded text-xs bg-slate-100 font-mono">${s}</span>`;
-
-    let detalhesHTML = '';
-    if (acoes.length) {
-      detalhesHTML = `
-        <details class="mt-3 text-xs">
-          <summary class="cursor-pointer text-slate-700 font-semibold">Ver ${acoes.length} grupo(s) detectado(s)${d.truncado ? ' (truncado em 200/300)' : ''}</summary>
-          <div class="mt-2 max-h-72 overflow-y-auto border rounded">
-            <table class="w-full text-xs">
-              <thead class="bg-slate-100 sticky top-0">
-                <tr>
-                  <th class="text-left p-1.5">Grupo</th>
-                  <th class="text-left p-1.5">Manter</th>
-                  <th class="text-left p-1.5">Remover</th>
-                  <th class="text-left p-1.5">Obs.</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${acoes.map(a => {
-                  if (t === 'produtos') {
-                    return `<tr class="border-b">
-                      <td class="p-1.5">${corBadge(a.grupo)}</td>
-                      <td class="p-1.5">#${a.manter.id} <span class="text-slate-500">${a.manter.cod_ref || '—'}</span></td>
-                      <td class="p-1.5">${a.remover.length === 0 ? '<span class="text-slate-400">—</span>' : a.remover.map(r => `#${r.id}`).join(', ')}</td>
-                      <td class="p-1.5">${a.conflito ? `<span class="text-amber-700">⚠ ${a.conflito}</span>` : (a.remover.length ? `${a.remover.length} duplicata(s)` : 'OK')}</td>
-                    </tr>`;
-                  } else {
-                    return `<tr class="border-b">
-                      <td class="p-1.5">${corBadge(a.chave)}</td>
-                      <td class="p-1.5">#${a.manter.id} <b class="text-emerald-700">${TERC.fmtBRL(a.manter.preco)}</b></td>
-                      <td class="p-1.5">${a.remover.map(r => `#${r.id} (${TERC.fmtBRL(r.preco)})`).join(', ')}</td>
-                      <td class="p-1.5">${a.precos_divergentes ? '<span class="text-amber-700">⚠ preços divergentes</span>' : 'duplicata exata'}</td>
-                    </tr>`;
-                  }
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </details>
-      `;
-    }
-
-    const colDiv = t === 'produtos'
-      ? `<div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-amber-700">${fmt.int(tot.conflitos)}</div><div class="text-xs">Conflitos preservados</div></div>`
-      : `<div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-amber-700">${fmt.int(tot.divergentes)}</div><div class="text-xs">Preços divergentes</div></div>`;
-
-    $('#c-result').innerHTML = `
-      <div class="${executou ? 'bg-emerald-50 border-emerald-200' : 'bg-blue-50 border-blue-200'} border rounded p-3">
-        <div class="font-semibold mb-2">${executou ? '✅ Limpeza executada' : '🧪 Simulação concluída'} — estratégia: <b>${d.estrategia}</b></div>
-        <div class="grid grid-cols-4 gap-2 text-center">
-          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-slate-700">${fmt.int(tot.registros_total)}</div><div class="text-xs">Registros analisados</div></div>
-          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-emerald-700">${fmt.int(tot.manter)}</div><div class="text-xs">Mantidos</div></div>
-          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-red-700">${fmt.int(tot.remover)}</div><div class="text-xs">${executou ? 'Removidos' : 'A remover'}</div></div>
-          ${colDiv}
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-2"><i class="fas fa-check-circle mr-2 text-emerald-600"></i>Limpeza concluída</h3>
+      <div class="grid grid-cols-2 gap-2 text-center my-3">
+        <div class="p-3 bg-emerald-50 rounded">
+          <div class="text-2xl font-bold text-emerald-700">${fmt.int(remProd)}</div>
+          <div class="text-xs text-slate-600">produto(s) removido(s)</div>
+          <div class="text-[10px] text-slate-400 mt-1">${fmt.int(d.produtos?.antes || 0)} → ${fmt.int(d.produtos?.depois || 0)}</div>
         </div>
-        ${detalhesHTML}
+        <div class="p-3 bg-emerald-50 rounded">
+          <div class="text-2xl font-bold text-emerald-700">${fmt.int(remPrec)}</div>
+          <div class="text-xs text-slate-600">preço(s) removido(s)</div>
+          <div class="text-[10px] text-slate-400 mt-1">${fmt.int(d.precos?.antes || 0)} → ${fmt.int(d.precos?.depois || 0)}</div>
+        </div>
       </div>
-    `;
+      <div class="text-[11px] text-slate-500 bg-slate-50 rounded p-2 mb-3">
+        <i class="fas fa-database mr-1"></i>Backup: <code>${d.backup?.produtos || '—'}</code> · <code>${d.backup?.precos || '—'}</code>
+      </div>
+      <div class="flex justify-end">
+        <button id="c-close" class="btn btn-primary">OK</button>
+      </div>`;
+    $('#c-close').onclick = () => { m.remove(); onDone && onDone(); };
+    toast(`Limpeza: ${fmt.int(remProd)} produto(s) e ${fmt.int(remPrec)} preço(s) removido(s)`, 'success');
+  } catch (e) {
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-2 text-red-600"><i class="fas fa-triangle-exclamation mr-2"></i>Falha na limpeza</h3>
+      <div class="text-sm text-red-700 bg-red-50 rounded p-3 mb-3">
+        ${e?.response?.data?.error || e?.message || 'Erro desconhecido'}
+      </div>
+      <div class="flex justify-end">
+        <button id="c-close" class="btn btn-secondary">Fechar</button>
+      </div>`;
+    $('#c-close').onclick = () => m.remove();
   }
-
-  async function call(dryRun) {
-    $('#c-sim').disabled = true; $('#c-go').disabled = true;
-    $('#c-result').innerHTML = '<div class="p-3 text-slate-500"><i class="fas fa-spinner fa-spin mr-1"></i>Processando...</div>';
-    try {
-      const r = await api('post', '/terc/cleanup/' + t, { dry_run: dryRun, estrategia: getEstr() });
-      const d = r?.data || {};
-      renderResumo(d, !dryRun);
-      ultimoSimulado = dryRun;
-      if (!dryRun) {
-        toast(`Limpeza: ${fmt.int(d.totais?.remover)} registro(s) removido(s)`, 'success');
-        onDone && onDone();
-      }
-    } catch (e) {
-      $('#c-result').innerHTML = `<div class="text-red-600 p-3 bg-red-50 rounded"><i class="fas fa-triangle-exclamation mr-1"></i>${e?.response?.data?.error || e?.message || 'Falha na operação'}</div>`;
-    } finally {
-      $('#c-sim').disabled = false;
-      // Só habilita executar após uma simulação bem-sucedida
-      $('#c-go').disabled = !ultimoSimulado;
-    }
-  }
-
-  $('#c-sim').onclick = () => call(true);
-  $('#c-go').onclick = async () => {
-    const okExec = confirm('Confirma a execução REAL da limpeza? Esta operação é irreversível.\n\nClique OK para prosseguir.');
-    if (!okExec) return;
-    await call(false);
-  };
 }
-window.TERC_openCleanupModal = TERC_openCleanupModal;
+window.TERC_runCleanup = TERC_runCleanup;
 
 // Confirma exclusão de UM preço
 function TERC_confirmDelPreco() {

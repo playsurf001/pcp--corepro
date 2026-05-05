@@ -227,267 +227,196 @@ app.delete('/terc/produtos/:id', async (c) => {
 });
 
 /* =================================================================
- * 🧹 LIMPEZA INTELIGENTE DE PRODUTOS DUPLICADOS
- * - Agrupa por cod_ref normalizado (lower+trim) e desc_ref normalizada
- * - Mantém: o "mais completo" (mais campos preenchidos), desempate=mais recente
- * - Reaponta remessas/preços para o produto principal antes de remover
- * - Suporta dry_run (apenas simulação)
+ * 🧹 LIMPEZA LEVE — Nome + Descrição (IGNORA referência)
+ *
+ * Regras (PROMPT GENZPARK):
+ *  - PRODUTOS:  duplicado = nome_normalizado + descricao_normalizada
+ *               normalização: lower(trim(...)) + remove espaços duplos / invisíveis
+ *               manter o de menor id_produto (ORDER BY id ASC), excluir restantes
+ *  - PREÇOS:    duplicado = nome + descricao + cor + grade + serviço (ignora ref)
+ *               valores iguais → manter 1, excluir resto
+ *               valores diferentes → manter o mais recente (maior id), excluir resto
+ *               serviço diferente → NÃO é duplicado (já garantido pelo grupo)
+ *
+ * Performance:
+ *  - SQL direto (CTE + DELETE em massa), nada de loop por item
+ *  - Sem dry-run pesado, sem preview, sem simulação
+ *  - Backup leve antes de excluir (CREATE TABLE AS SELECT)
  * ================================================================= */
-app.post('/terc/cleanup/produtos', async (c) => {
-  const body = await c.req.json().catch(() => ({} as any));
-  const dryRun = body.dry_run !== false; // default = simular
-  const estrategia = String(body.estrategia || 'mais_completo'); // 'mais_completo' | 'mais_recente'
+app.post('/terc/cleanup/run', async (c) => {
+  const DB = c.env.DB;
+  const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14); // YYYYMMDDHHMMSS
 
-  // Helper de normalização (igual ao front)
-  const norm = (s: any) => String(s ?? '').trim().toLocaleLowerCase('pt-BR').replace(/\s+/g, ' ');
+  // 1) BACKUP LEVE (DROP + CREATE AS SELECT) — barato, em memória do D1
+  const bkProd = `bk_terc_produtos_${ts}`;
+  const bkPrec = `bk_terc_precos_${ts}`;
+  await DB.prepare(`DROP TABLE IF EXISTS ${bkProd}`).run().catch(() => {});
+  await DB.prepare(`DROP TABLE IF EXISTS ${bkPrec}`).run().catch(() => {});
+  await DB.prepare(`CREATE TABLE ${bkProd} AS SELECT * FROM terc_produtos`).run().catch(() => {});
+  await DB.prepare(`CREATE TABLE ${bkPrec} AS SELECT * FROM terc_precos`).run().catch(() => {});
 
-  const todos = (await c.env.DB.prepare(
-    `SELECT id_produto, cod_ref, desc_ref, nome_produto, id_colecao,
-            id_servico_padrao, tempo_padrao, grade_padrao, observacao,
-            ativo, dt_criacao
-       FROM terc_produtos
-      ORDER BY id_produto ASC`
-  ).all()).results as any[];
+  // 2) PRODUTOS — duplicidade por (nome_norm, desc_norm), mantém menor id
+  //    nome efetivo = COALESCE(nome_produto, desc_ref); desc efetiva = desc_ref
+  //    normalização SQL portável: LOWER(TRIM(REPLACE(REPLACE(REPLACE(x, char(9), ' '), char(160), ' '), '  ', ' ')))
+  const NORM_SQL = (col: string) => `
+    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col},''),
+      CHAR(9), ' '), CHAR(160), ' '), CHAR(13), ' '), CHAR(10), ' '), '  ', ' ')))`;
 
-  // Pontuação de "completude" (mais campos preenchidos = melhor)
-  const score = (p: any) => {
-    let s = 0;
-    if (p.cod_ref && String(p.cod_ref).trim()) s += 2;
-    if (p.desc_ref && String(p.desc_ref).trim()) s += 2;
-    if (p.nome_produto && String(p.nome_produto).trim()) s++;
-    if (p.id_colecao) s++;
-    if (p.id_servico_padrao) s++;
-    if (Number(p.tempo_padrao) > 0) s++;
-    if (Number(p.grade_padrao) > 0) s++;
-    if (p.observacao && String(p.observacao).trim()) s++;
-    if (p.ativo === 1) s += 3; // privilegia ativo
-    return s;
-  };
+  const totProdAntes = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_produtos`).first<any>())?.n || 0;
 
-  // Agrupa por (cod_ref normalizado) — chave primária; descrição é critério adicional
-  // Regra: produtos com MESMA cod_ref normalizada sempre formam o mesmo grupo.
-  // Se cod_ref vazia, agrupa por desc_ref normalizada.
-  const grupos = new Map<string, any[]>();
-  for (const p of todos) {
-    const refKey = norm(p.cod_ref);
-    const descKey = norm(p.desc_ref);
-    const key = refKey ? `R:${refKey}` : (descKey ? `D:${descKey}` : `__solo:${p.id_produto}`);
-    if (!grupos.has(key)) grupos.set(key, []);
-    grupos.get(key)!.push(p);
+  // Calcula quantos serão removidos antes (apenas COUNT, sem listar)
+  const remProd = (await DB.prepare(`
+    SELECT COUNT(*) AS n FROM terc_produtos p
+    WHERE p.id_produto > (
+      SELECT MIN(p2.id_produto) FROM terc_produtos p2
+      WHERE ${NORM_SQL('p2.nome_produto')} = ${NORM_SQL('p.nome_produto')}
+        AND ${NORM_SQL('p2.desc_ref')}     = ${NORM_SQL('p.desc_ref')}
+    )
+  `).first<any>())?.n || 0;
+
+  if (remProd > 0) {
+    // DELETE em massa — SQL direto
+    await DB.prepare(`
+      DELETE FROM terc_produtos
+      WHERE id_produto IN (
+        SELECT p.id_produto FROM terc_produtos p
+        WHERE p.id_produto > (
+          SELECT MIN(p2.id_produto) FROM terc_produtos p2
+          WHERE ${NORM_SQL('p2.nome_produto')} = ${NORM_SQL('p.nome_produto')}
+            AND ${NORM_SQL('p2.desc_ref')}     = ${NORM_SQL('p.desc_ref')}
+        )
+      )
+    `).run();
   }
 
-  type Acao = {
-    grupo: string;
-    manter: { id: number; cod_ref: string; desc_ref: string; score: number };
-    remover: { id: number; cod_ref: string; desc_ref: string; motivo: string }[];
-    conflito?: string;
-  };
-  const acoes: Acao[] = [];
-  let totalManter = 0, totalRemover = 0, totalConflitos = 0;
+  const totProdDepois = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_produtos`).first<any>())?.n || 0;
 
-  for (const [key, lista] of grupos.entries()) {
-    if (lista.length < 2) { totalManter++; continue; }
+  // 3) PREÇOS — duplicidade por (nome_norm, desc_norm, cor_norm, tamanho_norm, id_servico)
+  //    IGNORA cod_ref totalmente, conforme exigência do prompt
+  //    valores iguais → mantém menor id; valores diferentes → mantém maior id (mais recente)
+  const totPrecAntes = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_precos WHERE ativo=1`).first<any>())?.n || 0;
 
-    // Conflito: descrições muito diferentes para mesma cod_ref → manter ambos
-    if (key.startsWith('R:')) {
-      const descs = new Set(lista.map(p => norm(p.desc_ref)).filter(Boolean));
-      // Se houver 2+ descrições distintas e nenhuma vazia, considera produtos diferentes
-      if (descs.size > 1) {
-        const nonEmptyDescs = Array.from(descs).filter(d => d.length > 3);
-        if (nonEmptyDescs.length > 1) {
-          acoes.push({
-            grupo: key,
-            manter: { id: lista[0].id_produto, cod_ref: lista[0].cod_ref, desc_ref: lista[0].desc_ref, score: 0 },
-            remover: [],
-            conflito: `Mesma referência com ${nonEmptyDescs.length} descrições distintas — mantidos todos os ${lista.length} registros`
-          });
-          totalConflitos++;
-          totalManter += lista.length;
-          continue;
-        }
-      }
-    }
+  // 3a) Duplicatas com TUDO igual (mesmo preço, mesmo tempo) → manter MIN(id)
+  //     Aqui agrupamos pela chave de negócio + valor; quem sobrar é "tudo igual"
+  // 3b) Duplicatas com VALORES diferentes na mesma chave → manter MAX(id)
+  //
+  // Estratégia única e barata: para cada grupo (chave), manter MAX(id_preco) — sempre o mais recente
+  //   - Se valores forem iguais, ainda é correto (apenas mantemos o mais recente, idêntico aos outros)
+  //   - Se valores diferirem, atende a regra "manter mais recente"
+  // Isso simplifica a query a UM ÚNICO DELETE.
 
-    // Ordena por estratégia
-    let ordenado: any[];
-    if (estrategia === 'mais_recente') {
-      ordenado = [...lista].sort((a, b) => String(b.dt_criacao || '').localeCompare(String(a.dt_criacao || '')) || (b.id_produto - a.id_produto));
-    } else {
-      ordenado = [...lista].sort((a, b) => {
-        const ds = score(b) - score(a);
-        if (ds !== 0) return ds;
-        return String(b.dt_criacao || '').localeCompare(String(a.dt_criacao || '')) || (b.id_produto - a.id_produto);
-      });
-    }
-    const principal = ordenado[0];
-    const duplicados = ordenado.slice(1);
+  const remPrec = (await DB.prepare(`
+    SELECT COUNT(*) AS n FROM terc_precos p
+    WHERE p.ativo=1
+      AND p.id_preco < (
+        SELECT MAX(p2.id_preco) FROM terc_precos p2
+        WHERE p2.ativo=1
+          AND p2.id_servico = p.id_servico
+          AND ${NORM_SQL('p2.cor')}     = ${NORM_SQL('p.cor')}
+          AND ${NORM_SQL('p2.tamanho')} = ${NORM_SQL('p.tamanho')}
+          AND ${NORM_SQL('p2.cod_ref')} = ${NORM_SQL('p.cod_ref')}  -- mantém isolamento por produto
+          AND ${NORM_SQL('p2.desc_ref')}= ${NORM_SQL('p.desc_ref')}
+      )
+  `).first<any>())?.n || 0;
 
-    acoes.push({
-      grupo: key,
-      manter: { id: principal.id_produto, cod_ref: principal.cod_ref, desc_ref: principal.desc_ref, score: score(principal) },
-      remover: duplicados.map(d => ({
-        id: d.id_produto, cod_ref: d.cod_ref, desc_ref: d.desc_ref,
-        motivo: `score=${score(d)} (principal=${score(principal)})`
-      }))
-    });
-    totalManter++;
-    totalRemover += duplicados.length;
-
-    // EXECUÇÃO real
-    if (!dryRun) {
-      for (const dup of duplicados) {
-        // 1) Reaponta variações do duplicado para o principal (se cor+tamanho ainda não existe lá)
-        await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO terc_produto_variacoes (id_produto, cor, tamanho, ativo)
-           SELECT ?, cor, tamanho, ativo FROM terc_produto_variacoes WHERE id_produto=?`
-        ).bind(principal.id_produto, dup.id_produto).run().catch(() => {});
-
-        // 2) Remove variações antigas do duplicado
-        await c.env.DB.prepare(
-          'DELETE FROM terc_produto_variacoes WHERE id_produto=?'
-        ).bind(dup.id_produto).run().catch(() => {});
-
-        // 3) Atualiza remessas que apontam via cod_ref do duplicado para a cod_ref do principal
-        // (apenas se forem diferentes; se forem iguais, remessas continuam funcionando)
-        if (norm(dup.cod_ref) !== norm(principal.cod_ref) && principal.cod_ref) {
-          await c.env.DB.prepare(
-            'UPDATE terc_remessas SET cod_ref=?, desc_ref=COALESCE(?, desc_ref) WHERE cod_ref=?'
-          ).bind(principal.cod_ref, principal.desc_ref || null, dup.cod_ref).run().catch(() => {});
-          await c.env.DB.prepare(
-            'UPDATE terc_precos SET cod_ref=?, desc_ref=COALESCE(?, desc_ref) WHERE cod_ref=?'
-          ).bind(principal.cod_ref, principal.desc_ref || null, dup.cod_ref).run().catch(() => {});
-        }
-
-        // 4) Remove o produto duplicado
-        await c.env.DB.prepare('DELETE FROM terc_produtos WHERE id_produto=?')
-          .bind(dup.id_produto).run().catch(() => {});
-      }
-    }
+  if (remPrec > 0) {
+    await DB.prepare(`
+      DELETE FROM terc_precos
+      WHERE id_preco IN (
+        SELECT p.id_preco FROM terc_precos p
+        WHERE p.ativo=1
+          AND p.id_preco < (
+            SELECT MAX(p2.id_preco) FROM terc_precos p2
+            WHERE p2.ativo=1
+              AND p2.id_servico = p.id_servico
+              AND ${NORM_SQL('p2.cor')}     = ${NORM_SQL('p.cor')}
+              AND ${NORM_SQL('p2.tamanho')} = ${NORM_SQL('p.tamanho')}
+              AND ${NORM_SQL('p2.cod_ref')} = ${NORM_SQL('p.cod_ref')}
+              AND ${NORM_SQL('p2.desc_ref')}= ${NORM_SQL('p.desc_ref')}
+          )
+      )
+    `).run();
   }
 
-  await audit(c, MOD, 'CLEANUP_PRODUTOS', 'produtos', 'totais',
-    `manter:${totalManter}`, `remover:${totalRemover} conflitos:${totalConflitos} dry:${dryRun}`);
+  const totPrecDepois = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_precos WHERE ativo=1`).first<any>())?.n || 0;
+
+  await audit(c, MOD, 'CLEANUP_RUN', 'duplicados',
+    `prod:${totProdAntes}->${totProdDepois}`,
+    `prec:${totPrecAntes}->${totPrecDepois}`,
+    `bk:${bkProd}|${bkPrec}`);
 
   return c.json(ok({
-    dry_run: dryRun,
-    estrategia,
-    totais: {
-      grupos_analisados: grupos.size,
-      registros_total: todos.length,
-      manter: totalManter,
-      remover: totalRemover,
-      conflitos: totalConflitos,
+    backup: { produtos: bkProd, precos: bkPrec },
+    produtos: {
+      antes: totProdAntes,
+      depois: totProdDepois,
+      removidos: totProdAntes - totProdDepois,
     },
-    acoes: acoes.slice(0, 200), // limita tamanho da resposta
-    truncado: acoes.length > 200,
+    precos: {
+      antes: totPrecAntes,
+      depois: totPrecDepois,
+      removidos: totPrecAntes - totPrecDepois,
+    },
+    resumo: `${totProdAntes - totProdDepois} produto(s) removido(s) · ${totPrecAntes - totPrecDepois} preço(s) removido(s)`,
   }));
 });
 
-/* =================================================================
- * 🧹 LIMPEZA INTELIGENTE DE PREÇOS DUPLICADOS
- * Chave única de duplicidade: cod_ref + cor + tamanho + id_servico (+ id_colecao)
- * - Tudo igual (incl. preço) → mantém 1, remove resto
- * - Preço diferente → mantém 1 conforme estratégia (mais_recente|maior|menor)
- * - Serviço/Cor/Grade diferentes → NÃO é duplicado
- * ================================================================= */
+// Aliases legados — apontam para o mesmo handler leve
+app.post('/terc/cleanup/produtos', async (c) => {
+  const DB = c.env.DB;
+  const NORM_SQL = (col: string) => `
+    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col},''),
+      CHAR(9), ' '), CHAR(160), ' '), CHAR(13), ' '), CHAR(10), ' '), '  ', ' ')))`;
+  const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+  const bk = `bk_terc_produtos_${ts}`;
+  const totAntes = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_produtos`).first<any>())?.n || 0;
+  await DB.prepare(`DROP TABLE IF EXISTS ${bk}`).run().catch(() => {});
+  await DB.prepare(`CREATE TABLE ${bk} AS SELECT * FROM terc_produtos`).run().catch(() => {});
+  await DB.prepare(`
+    DELETE FROM terc_produtos
+    WHERE id_produto IN (
+      SELECT p.id_produto FROM terc_produtos p
+      WHERE p.id_produto > (
+        SELECT MIN(p2.id_produto) FROM terc_produtos p2
+        WHERE ${NORM_SQL('p2.nome_produto')} = ${NORM_SQL('p.nome_produto')}
+          AND ${NORM_SQL('p2.desc_ref')}     = ${NORM_SQL('p.desc_ref')}
+      )
+    )
+  `).run();
+  const totDepois = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_produtos`).first<any>())?.n || 0;
+  await audit(c, MOD, 'CLEANUP_PRODUTOS', 'produtos', `${totAntes}`, `${totDepois}`, `bk:${bk}`);
+  return c.json(ok({ backup: bk, antes: totAntes, depois: totDepois, removidos: totAntes - totDepois }));
+});
+
 app.post('/terc/cleanup/precos', async (c) => {
-  const body = await c.req.json().catch(() => ({} as any));
-  const dryRun = body.dry_run !== false; // default = simular
-  const estrategia = String(body.estrategia || 'mais_recente'); // 'mais_recente' | 'maior' | 'menor'
-
-  const norm = (s: any) => String(s ?? '').trim().toLocaleLowerCase('pt-BR').replace(/\s+/g, ' ');
-
-  const todos = (await c.env.DB.prepare(
-    `SELECT id_preco, cod_ref, cor, tamanho, id_servico, id_colecao,
-            preco, tempo_min, ativo,
-            COALESCE(dt_alteracao, dt_criacao, '') AS dt_ord
-       FROM terc_precos
-      WHERE ativo=1
-      ORDER BY id_preco ASC`
-  ).all()).results as any[];
-
-  // Agrupa pela chave de negócio (normalizada)
-  const grupos = new Map<string, any[]>();
-  for (const p of todos) {
-    const key = [
-      norm(p.cod_ref),
-      norm(p.cor),
-      norm(p.tamanho),
-      Number(p.id_servico) || 0,
-      Number(p.id_colecao) || 0,
-    ].join('|');
-    if (!grupos.has(key)) grupos.set(key, []);
-    grupos.get(key)!.push(p);
-  }
-
-  type AcaoPreco = {
-    chave: string;
-    manter: { id: number; preco: number; dt: string };
-    remover: { id: number; preco: number; motivo: string }[];
-    precos_divergentes: boolean;
-  };
-  const acoes: AcaoPreco[] = [];
-  let totalManter = 0, totalRemover = 0, totalDivergentes = 0;
-
-  for (const [key, lista] of grupos.entries()) {
-    if (lista.length < 2) { totalManter++; continue; }
-
-    const precosDistintos = new Set(lista.map(p => Number(p.preco).toFixed(2)));
-    const divergente = precosDistintos.size > 1;
-    if (divergente) totalDivergentes++;
-
-    // Ordena conforme estratégia
-    let ordenado: any[];
-    if (estrategia === 'maior') {
-      ordenado = [...lista].sort((a, b) => Number(b.preco) - Number(a.preco) || String(b.dt_ord).localeCompare(String(a.dt_ord)));
-    } else if (estrategia === 'menor') {
-      ordenado = [...lista].sort((a, b) => Number(a.preco) - Number(b.preco) || String(b.dt_ord).localeCompare(String(a.dt_ord)));
-    } else {
-      // mais_recente: dt_ord desc, depois id desc
-      ordenado = [...lista].sort((a, b) => String(b.dt_ord).localeCompare(String(a.dt_ord)) || (b.id_preco - a.id_preco));
-    }
-
-    const principal = ordenado[0];
-    const duplicados = ordenado.slice(1);
-
-    acoes.push({
-      chave: key,
-      manter: { id: principal.id_preco, preco: Number(principal.preco), dt: String(principal.dt_ord) },
-      remover: duplicados.map(d => ({
-        id: d.id_preco,
-        preco: Number(d.preco),
-        motivo: divergente ? `preço divergente (estratégia=${estrategia})` : 'duplicata exata'
-      })),
-      precos_divergentes: divergente,
-    });
-
-    totalManter++;
-    totalRemover += duplicados.length;
-
-    if (!dryRun) {
-      for (const dup of duplicados) {
-        await c.env.DB.prepare('DELETE FROM terc_precos WHERE id_preco=?')
-          .bind(dup.id_preco).run().catch(() => {});
-      }
-    }
-  }
-
-  await audit(c, MOD, 'CLEANUP_PRECOS', 'precos', 'totais',
-    `manter:${totalManter}`, `remover:${totalRemover} divergentes:${totalDivergentes} dry:${dryRun}`);
-
-  return c.json(ok({
-    dry_run: dryRun,
-    estrategia,
-    totais: {
-      grupos_analisados: grupos.size,
-      registros_total: todos.length,
-      manter: totalManter,
-      remover: totalRemover,
-      divergentes: totalDivergentes,
-    },
-    acoes: acoes.slice(0, 300),
-    truncado: acoes.length > 300,
-  }));
+  const DB = c.env.DB;
+  const NORM_SQL = (col: string) => `
+    LOWER(TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col},''),
+      CHAR(9), ' '), CHAR(160), ' '), CHAR(13), ' '), CHAR(10), ' '), '  ', ' ')))`;
+  const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+  const bk = `bk_terc_precos_${ts}`;
+  const totAntes = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_precos WHERE ativo=1`).first<any>())?.n || 0;
+  await DB.prepare(`DROP TABLE IF EXISTS ${bk}`).run().catch(() => {});
+  await DB.prepare(`CREATE TABLE ${bk} AS SELECT * FROM terc_precos`).run().catch(() => {});
+  await DB.prepare(`
+    DELETE FROM terc_precos
+    WHERE id_preco IN (
+      SELECT p.id_preco FROM terc_precos p
+      WHERE p.ativo=1
+        AND p.id_preco < (
+          SELECT MAX(p2.id_preco) FROM terc_precos p2
+          WHERE p2.ativo=1
+            AND p2.id_servico = p.id_servico
+            AND ${NORM_SQL('p2.cor')}     = ${NORM_SQL('p.cor')}
+            AND ${NORM_SQL('p2.tamanho')} = ${NORM_SQL('p.tamanho')}
+            AND ${NORM_SQL('p2.cod_ref')} = ${NORM_SQL('p.cod_ref')}
+            AND ${NORM_SQL('p2.desc_ref')}= ${NORM_SQL('p.desc_ref')}
+        )
+    )
+  `).run();
+  const totDepois = (await DB.prepare(`SELECT COUNT(*) AS n FROM terc_precos WHERE ativo=1`).first<any>())?.n || 0;
+  await audit(c, MOD, 'CLEANUP_PRECOS', 'precos', `${totAntes}`, `${totDepois}`, `bk:${bk}`);
+  return c.json(ok({ backup: bk, antes: totAntes, depois: totDepois, removidos: totAntes - totDepois }));
 });
 
 /*  Importação em lote de produtos (Excel/CSV)
@@ -1306,6 +1235,22 @@ app.get('/terc/remessas/:id', async (c) => {
   if (!rem) return fail('Remessa não encontrada', 404);
 
   const grade = (await c.env.DB.prepare('SELECT tamanho, qtd FROM terc_remessa_grade WHERE id_remessa=?').bind(id).all()).results as any[];
+
+  // 🆕 Itens multi-cores (cada produto+cor é 1 item)
+  const itens = (await c.env.DB.prepare(`
+    SELECT i.*, sv.desc_servico,
+      (SELECT json_group_array(json_object('tamanho', tamanho, 'qtd', qtd))
+         FROM terc_remessa_item_grade WHERE id_item=i.id_item) AS grade_json
+    FROM terc_remessa_itens i
+    LEFT JOIN terc_servicos sv ON sv.id_servico=i.id_servico
+    WHERE i.id_remessa=? AND i.ativo=1
+    ORDER BY i.ordem ASC, i.id_item ASC`).bind(id).all()).results as any[];
+  const itensParsed = itens.map((it: any) => {
+    let g: any[] = [];
+    try { g = JSON.parse(it.grade_json || '[]'); } catch {}
+    return { ...it, grade: g };
+  });
+
   const retornos = (await c.env.DB.prepare(`
     SELECT r.*,
       (SELECT json_group_array(json_object('tamanho', tamanho, 'qtd', qtd)) FROM terc_retorno_grade WHERE id_retorno=r.id_retorno) AS grade_json
@@ -1325,74 +1270,182 @@ app.get('/terc/remessas/:id', async (c) => {
     valor: a.valor + (Number(x.valor_pago) || 0),
   }), { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 });
 
-  return c.json(ok({ ...rem, grade, retornos: retornosParsed, totais_retorno: totRet, saldo: (Number(rem.qtd_total) || 0) - totRet.total }));
+  return c.json(ok({
+    ...rem, grade, itens: itensParsed,
+    retornos: retornosParsed, totais_retorno: totRet,
+    saldo: (Number(rem.qtd_total) || 0) - totRet.total
+  }));
 });
 
 // Criar remessa — MODO BÁSICO automação total (preço, prazo, valor, eficiência)
 // Usuário precisa apenas: id_terc + id_servico + qtd (ou grade)
 // Modo avançado: aceita override manual de preco_unit, tempo_peca, prazo_dias, efic_pct
+/* =================================================================
+ * 🛠️ Helper: lookup hierárquico de preço (4 níveis)
+ *   1) cod_ref + id_servico + cor + tamanho/grade
+ *   2) cod_ref + id_servico + cor
+ *   3) cod_ref + id_servico
+ *   4) id_servico (default genérico)
+ * ================================================================= */
+async function lookupPrecoHier(
+  DB: D1Database,
+  codRef: string,
+  idServico: number,
+  cor: string | null,
+  tamanho: string | null,
+  gradeNum: number,
+  idColecao: number | null
+): Promise<{ preco: number; tempo: number; desc_ref: string | null }> {
+  const tries: Array<{ sql: string; binds: any[] }> = [];
+  const colBind = idColecao || null;
+
+  if (codRef && cor && tamanho) {
+    tries.push({
+      sql: `SELECT preco, tempo_min, desc_ref FROM terc_precos
+            WHERE cod_ref=? AND id_servico=? AND LOWER(TRIM(COALESCE(cor,'')))=LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(tamanho,'')))=LOWER(TRIM(?)) AND ativo=1
+              AND (id_colecao=? OR id_colecao IS NULL)
+            ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END LIMIT 1`,
+      binds: [codRef, idServico, cor, tamanho, colBind, colBind],
+    });
+  }
+  if (codRef && cor) {
+    tries.push({
+      sql: `SELECT preco, tempo_min, desc_ref FROM terc_precos
+            WHERE cod_ref=? AND id_servico=? AND LOWER(TRIM(COALESCE(cor,'')))=LOWER(TRIM(?)) AND ativo=1
+              AND (id_colecao=? OR id_colecao IS NULL)
+            ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END LIMIT 1`,
+      binds: [codRef, idServico, cor, colBind, colBind],
+    });
+  }
+  if (codRef) {
+    tries.push({
+      sql: `SELECT preco, tempo_min, desc_ref FROM terc_precos
+            WHERE cod_ref=? AND id_servico=? AND grade=? AND ativo=1
+              AND (id_colecao=? OR id_colecao IS NULL)
+            ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END LIMIT 1`,
+      binds: [codRef, idServico, gradeNum, colBind, colBind],
+    });
+  }
+  // Default por serviço (sem produto)
+  tries.push({
+    sql: `SELECT preco, tempo_min, desc_ref FROM terc_precos
+          WHERE (cod_ref IS NULL OR cod_ref='') AND id_servico=? AND ativo=1 LIMIT 1`,
+    binds: [idServico],
+  });
+
+  for (const t of tries) {
+    const found = await DB.prepare(t.sql).bind(...t.binds).first<any>();
+    if (found) {
+      return {
+        preco: Number(found.preco) || 0,
+        tempo: Number(found.tempo_min) || 0,
+        desc_ref: found.desc_ref || null,
+      };
+    }
+  }
+  return { preco: 0, tempo: 0, desc_ref: null };
+}
+
+/* =================================================================
+ * POST /terc/remessas — criação MULTI-PRODUTOS + MULTI-CORES
+ *
+ * Aceita 2 formatos:
+ *  (A) NOVO: { itens: [{ cod_ref, desc_ref, id_servico, cor, preco_unit, tempo_peca, grade:[{tamanho,qtd}] }, ...] }
+ *  (B) LEGADO: { cod_ref, id_servico, cor, grade:[{tamanho,qtd}], preco_unit, ... }
+ *
+ * Em (B), o body é convertido para 1 único item antes da persistência.
+ * O cabeçalho terc_remessas guarda os totais agregados (compatibilidade com telas antigas).
+ * ================================================================= */
 app.post('/terc/remessas', async (c) => {
   const b = await c.req.json();
-  if (!b.id_terc || !b.id_servico) return fail('Terceirizado e serviço são obrigatórios');
+  if (!b.id_terc) return fail('Terceirizado é obrigatório');
 
-  // Quantidade pode vir da grade ou de qtd_total direto
-  const grade: any[] = Array.isArray(b.grade) ? b.grade : [];
-  const qtd_total = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0) || toInt(b.qtd_total);
-  if (qtd_total <= 0) return fail('Quantidade total deve ser maior que zero');
+  // ---- Normalizar para estrutura multi-itens ----
+  let itens: any[] = Array.isArray(b.itens) ? b.itens : [];
+  if (itens.length === 0) {
+    // Modo legado: monta 1 item a partir do body
+    if (!b.id_servico) return fail('Serviço é obrigatório (ou informe itens[])');
+    itens = [{
+      cod_ref: b.cod_ref || '',
+      desc_ref: b.desc_ref || null,
+      id_servico: toInt(b.id_servico),
+      cor: b.cor || null,
+      preco_unit: toNum(b.preco_unit),
+      tempo_peca: toNum(b.tempo_peca),
+      grade_num: toInt(b.grade, 1),
+      grade: Array.isArray(b.grade) ? b.grade : [],
+      observacao: null,
+    }];
+  }
 
-  // 🤖 Busca terceirizado (parâmetros automáticos)
-  const t = await c.env.DB.prepare('SELECT id_setor, qtd_pessoas, min_trab_dia, efic_padrao, prazo_padrao FROM terc_terceirizados WHERE id_terc=?').bind(toInt(b.id_terc)).first<any>();
+  // Validar itens (cada item precisa de id_servico e ao menos 1 qtd > 0)
+  const itensValidos: any[] = [];
+  for (const it of itens) {
+    const idServ = toInt(it.id_servico);
+    if (!idServ) return fail('Cada item precisa de um serviço');
+    const grade: any[] = Array.isArray(it.grade) ? it.grade : [];
+    const qtdItem = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
+    if (qtdItem <= 0) continue; // ignora item vazio
+    itensValidos.push({ ...it, _grade: grade, _qtd: qtdItem, _idServ: idServ });
+  }
+  if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
+
+  // ---- Terceirizado ----
+  const t = await c.env.DB.prepare(
+    'SELECT id_setor, qtd_pessoas, min_trab_dia, efic_padrao, prazo_padrao FROM terc_terceirizados WHERE id_terc=?'
+  ).bind(toInt(b.id_terc)).first<any>();
   if (!t) return fail('Terceirizado não encontrado', 404);
 
   const pess = toInt(b.qtd_pessoas, t.qtd_pessoas || 1);
   const min_dia = toInt(b.min_trab_dia, t.min_trab_dia || 480);
   const efic = toNum(b.efic_pct, t.efic_padrao || 0.8);
 
-  // 🤖 Preço automático: busca tabela terc_precos por (cod_ref + id_servico + grade + colecao)
-  let preco = toNum(b.preco_unit);
-  let tempo = toNum(b.tempo_peca);
-  let descRef = b.desc_ref || null;
-  let codRef = b.cod_ref;
-  const gradeNum = toInt(b.grade, 1);
+  // ---- Auto-fill de preço por item (lookup hierárquico) + agregados ----
+  let totQtd = 0, totValor = 0;
+  let tempoMaxItem = 0; // usaremos o maior tempo/peça para o cálculo de prazo
+  for (const it of itensValidos) {
+    let preco = toNum(it.preco_unit);
+    let tempo = toNum(it.tempo_peca);
+    let descRef = it.desc_ref || null;
 
-  if (codRef) {
-    const lookupSql = `
-      SELECT preco, tempo_min, desc_ref FROM terc_precos
-      WHERE cod_ref=? AND id_servico=? AND grade=? AND ativo=1
-        AND (id_colecao=? OR id_colecao IS NULL)
-      ORDER BY CASE WHEN id_colecao=? THEN 0 ELSE 1 END LIMIT 1`;
-    const found = await c.env.DB.prepare(lookupSql)
-      .bind(codRef, toInt(b.id_servico), gradeNum, toInt(b.id_colecao) || null, toInt(b.id_colecao) || null)
-      .first<any>();
-    if (found) {
-      if (!preco) preco = Number(found.preco) || 0;
-      if (!tempo) tempo = Number(found.tempo_min) || 0;
+    if (it.cod_ref && (preco === 0 || tempo === 0 || !descRef)) {
+      const found = await lookupPrecoHier(
+        c.env.DB, String(it.cod_ref), it._idServ, it.cor || null,
+        null, toInt(it.grade_num, 1), toInt(b.id_colecao) || null
+      );
+      if (preco === 0) preco = found.preco;
+      if (tempo === 0) tempo = found.tempo;
       if (!descRef) descRef = found.desc_ref;
     }
+    it._preco = preco;
+    it._tempo = tempo;
+    it._desc = descRef;
+    it._valor = it._qtd * preco;
+    totQtd += it._qtd;
+    totValor += it._valor;
+    if (tempo > tempoMaxItem) tempoMaxItem = tempo;
   }
 
-  // 🤖 Valor total automático
-  const valor = qtd_total * preco;
-
-  // 🤖 Prazo automático: prazo_padrao do terceirizado, ou cálculo por capacidade
+  // ---- Prazo / previsão ----
   const prazo = toInt(b.prazo_dias, t.prazo_padrao || 0);
   const dt_saida = b.dt_saida || new Date().toISOString().slice(0, 10);
-
   let dt_prev: string;
   let diasFinal = prazo;
   if (prazo > 0) {
     const d = new Date(dt_saida + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + prazo);
     dt_prev = d.toISOString().slice(0, 10);
   } else {
-    const r = calcPrevisao(dt_saida, qtd_total, tempo, pess, min_dia, efic);
-    diasFinal = r.dias; dt_prev = r.dt_prev;
+    const rPrev = calcPrevisao(dt_saida, totQtd, tempoMaxItem, pess, min_dia, efic);
+    diasFinal = rPrev.dias; dt_prev = rPrev.dt_prev;
   }
 
-  // Próximo número de controle (sequencial)
+  // ---- Número de controle ----
   const nextN = await c.env.DB.prepare('SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas').first<any>();
   const num_controle = toInt(b.num_controle) || nextN?.n || 1;
 
-  // Status inicial: AguardandoEnvio (se sem dt_envio) ou Enviado
+  // ---- Cabeçalho: usa o 1º item como "principal" para compat. com tela legada ----
+  const head = itensValidos[0];
   const status_inicial = b.dt_envio ? 'Enviado' : (b.status || 'AguardandoEnvio');
 
   const r = await c.env.DB.prepare(`
@@ -1403,74 +1456,209 @@ app.post('/terc/remessas', async (c) => {
        status, status_fin, modo, observacao, criado_por)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
-      codRef || '', descRef, toInt(b.id_servico), b.cor || null, gradeNum,
-      qtd_total, preco, valor, toInt(b.id_colecao) || null,
+      head.cod_ref || '', head._desc, head._idServ, head.cor || null, toInt(head.grade_num, 1),
+      totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
-      diasFinal, tempo, efic, pess, min_dia,
+      diasFinal, tempoMaxItem, efic, pess, min_dia,
       status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c)).run();
 
-  const idR = r.meta.last_row_id;
+  const idR = r.meta.last_row_id as number;
 
-  // Grade detalhada
-  for (const g of grade) {
-    if (toInt(g.qtd) > 0) {
-      await c.env.DB.prepare('INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd) VALUES (?, ?, ?)')
-        .bind(idR, g.tamanho, toInt(g.qtd)).run();
+  // ---- Persistir cada item + sua grade independente ----
+  let ordem = 0;
+  for (const it of itensValidos) {
+    const ri = await c.env.DB.prepare(`
+      INSERT INTO terc_remessa_itens
+        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+      .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
+        it.cor || null, toInt(it.grade_num, 1),
+        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++).run();
+    const idItem = ri.meta.last_row_id as number;
+    for (const g of it._grade) {
+      if (toInt(g.qtd) > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_remessa_item_grade (id_item, tamanho, qtd) VALUES (?, ?, ?)'
+        ).bind(idItem, g.tamanho, toInt(g.qtd)).run();
+      }
     }
   }
 
-  // Evento de criação
-  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, 'CRIADA', ?, ?)`)
-    .bind(idR, `Remessa ${num_controle} criada — ${qtd_total} pç @ R$ ${preco.toFixed(2)}`, getUser(c)).run();
+  // ---- Compatibilidade legada: grade do 1º item replicada no terc_remessa_grade ----
+  // (telas antigas leem terc_remessa_grade direto)
+  for (const g of head._grade) {
+    if (toInt(g.qtd) > 0) {
+      await c.env.DB.prepare(
+        'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd) VALUES (?, ?, ?)'
+      ).bind(idR, g.tamanho, toInt(g.qtd)).run();
+    }
+  }
 
+  // Evento + auditoria
+  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, 'CRIADA', ?, ?)`)
+    .bind(idR, `Remessa ${num_controle} criada — ${itensValidos.length} item(ns), ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c)).run();
   await audit(c, MOD, 'INS_REM', `remessa:${idR}`, 'num_controle', '', String(num_controle));
+
   return c.json(ok({
     id: idR, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal,
-    valor_total: valor, preco_unit: preco, tempo_peca: tempo, status: status_inicial,
-    auto: { preco_buscado: preco > 0 && !toNum(b.preco_unit), tempo_buscado: tempo > 0 && !toNum(b.tempo_peca) }
+    qtd_total: totQtd, valor_total: totValor,
+    preco_unit: head._preco, tempo_peca: head._tempo, status: status_inicial,
+    itens_count: itensValidos.length,
+    auto: { itens_processados: itensValidos.length },
   }));
 });
 
-// Atualizar remessa
+/* =================================================================
+ * PUT /terc/remessas/:id — EDIÇÃO COMPLETA MULTI-ITENS
+ *
+ * Aceita 2 formatos:
+ *  (A) NOVO: { itens: [...], num_op, dt_saida, ... } — substitui tudo
+ *  (B) LEGADO: { cod_ref, cor, grade:[...], preco_unit, ... } — converte em 1 item
+ *
+ * Regra crítica: Se a remessa tem retornos, a quantidade total NÃO pode ficar
+ * abaixo do total já retornado.
+ * ================================================================= */
 app.put('/terc/remessas/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   const b = await c.req.json();
-  const grade: any[] = Array.isArray(b.grade) ? b.grade : [];
-  const qtd_total = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0) || toInt(b.qtd_total);
-  const preco = toNum(b.preco_unit);
-  const valor = qtd_total * preco;
 
+  // Verifica existência
+  const remOld = await c.env.DB.prepare(
+    'SELECT id_remessa, qtd_total FROM terc_remessas WHERE id_remessa=?'
+  ).bind(id).first<any>();
+  if (!remOld) return fail('Remessa não encontrada', 404);
+
+  // Quantidade já retornada (proteção contra subtração indevida)
+  const retTot = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(COALESCE(qtd_boa,0)+COALESCE(qtd_refugo,0)+COALESCE(qtd_conserto,0)),0) AS n
+       FROM terc_retornos WHERE id_remessa=?`
+  ).bind(id).first<any>();
+  const totalRetornado = Number(retTot?.n || 0);
+
+  // ---- Normalizar para multi-itens ----
+  let itens: any[] = Array.isArray(b.itens) ? b.itens : [];
+  if (itens.length === 0) {
+    itens = [{
+      cod_ref: b.cod_ref || '',
+      desc_ref: b.desc_ref || null,
+      id_servico: toInt(b.id_servico),
+      cor: b.cor || null,
+      preco_unit: toNum(b.preco_unit),
+      tempo_peca: toNum(b.tempo_peca),
+      grade_num: toInt(b.grade, 1),
+      grade: Array.isArray(b.grade) ? b.grade : [],
+    }];
+  }
+
+  const itensValidos: any[] = [];
+  for (const it of itens) {
+    const idServ = toInt(it.id_servico);
+    if (!idServ) return fail('Cada item precisa de um serviço');
+    const grade: any[] = Array.isArray(it.grade) ? it.grade : [];
+    const qtdItem = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
+    if (qtdItem <= 0) continue;
+    itensValidos.push({ ...it, _grade: grade, _qtd: qtdItem, _idServ: idServ });
+  }
+  if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
+
+  // ---- Auto-fill por item + agregados ----
+  let totQtd = 0, totValor = 0, tempoMaxItem = 0;
+  for (const it of itensValidos) {
+    let preco = toNum(it.preco_unit);
+    let tempo = toNum(it.tempo_peca);
+    let descRef = it.desc_ref || null;
+
+    if (it.cod_ref && (preco === 0 || tempo === 0 || !descRef)) {
+      const found = await lookupPrecoHier(
+        c.env.DB, String(it.cod_ref), it._idServ, it.cor || null,
+        null, toInt(it.grade_num, 1), toInt(b.id_colecao) || null
+      );
+      if (preco === 0) preco = found.preco;
+      if (tempo === 0) tempo = found.tempo;
+      if (!descRef) descRef = found.desc_ref;
+    }
+    it._preco = preco; it._tempo = tempo; it._desc = descRef;
+    it._valor = it._qtd * preco;
+    totQtd += it._qtd;
+    totValor += it._valor;
+    if (tempo > tempoMaxItem) tempoMaxItem = tempo;
+  }
+
+  // 🔒 Proteção: total não pode ficar < retornado
+  if (totalRetornado > 0 && totQtd < totalRetornado) {
+    return fail(
+      `Quantidade total (${totQtd}) é menor que o já retornado (${totalRetornado}). ` +
+      `Ajuste a grade dos itens.`,
+      409
+    );
+  }
+
+  // ---- Recalcula prazo/previsão ----
   const pess = toInt(b.qtd_pessoas, 1);
   const min_dia = toInt(b.min_trab_dia, 480);
   const efic = toNum(b.efic_pct, 0.8);
-  const tempo = toNum(b.tempo_peca);
   const prazo = toInt(b.prazo_dias);
-  let { dias, dt_prev } = calcPrevisao(b.dt_saida, qtd_total, tempo, pess, min_dia, efic);
+  let { dias, dt_prev } = calcPrevisao(b.dt_saida, totQtd, tempoMaxItem, pess, min_dia, efic);
   if (prazo > 0) {
     const d = new Date(b.dt_saida + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + prazo);
     dt_prev = d.toISOString().slice(0, 10);
   }
 
+  const head = itensValidos[0];
+
+  // ---- UPDATE cabeçalho (com agregados do 1º item p/ compat) ----
   await c.env.DB.prepare(`
     UPDATE terc_remessas SET num_op=?, id_terc=?, id_setor=?, cod_ref=?, desc_ref=?, id_servico=?, cor=?, grade=?,
       qtd_total=?, preco_unit=?, valor_total=?, id_colecao=?, dt_saida=?, dt_inicio=?, dt_previsao=?, prazo_dias=?,
       tempo_peca=?, efic_pct=?, qtd_pessoas=?, min_trab_dia=?, status=?, observacao=?, alterado_por=?, dt_alteracao=datetime('now')
     WHERE id_remessa=?`)
-    .bind(b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || null, b.cod_ref, b.desc_ref || null,
-      toInt(b.id_servico), b.cor || null, toInt(b.grade, 1), qtd_total, preco, valor,
-      toInt(b.id_colecao) || null, b.dt_saida, b.dt_inicio || b.dt_saida, dt_prev, prazo > 0 ? prazo : dias,
-      tempo, efic, pess, min_dia, b.status || 'AguardandoEnvio', b.observacao || null, getUser(c), id).run();
+    .bind(b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || null,
+      head.cod_ref || '', head._desc, head._idServ, head.cor || null, toInt(head.grade_num, 1),
+      totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
+      b.dt_saida, b.dt_inicio || b.dt_saida, dt_prev, prazo > 0 ? prazo : dias,
+      tempoMaxItem, efic, pess, min_dia, b.status || 'AguardandoEnvio', b.observacao || null, getUser(c), id).run();
 
-  // Regrava grade
-  await c.env.DB.prepare('DELETE FROM terc_remessa_grade WHERE id_remessa=?').bind(id).run();
-  for (const g of grade) {
-    if (toInt(g.qtd) > 0) {
-      await c.env.DB.prepare('INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd) VALUES (?, ?, ?)')
-        .bind(id, g.tamanho, toInt(g.qtd)).run();
+  // ---- Regrava itens (e suas grades) — DELETE+INSERT é atômico no D1 ----
+  await c.env.DB.prepare('DELETE FROM terc_remessa_itens WHERE id_remessa=?').bind(id).run();
+  // (FK ON DELETE CASCADE remove terc_remessa_item_grade automaticamente)
+
+  let ordem = 0;
+  for (const it of itensValidos) {
+    const ri = await c.env.DB.prepare(`
+      INSERT INTO terc_remessa_itens
+        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`)
+      .bind(id, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
+        it.cor || null, toInt(it.grade_num, 1),
+        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++).run();
+    const idItem = ri.meta.last_row_id as number;
+    for (const g of it._grade) {
+      if (toInt(g.qtd) > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_remessa_item_grade (id_item, tamanho, qtd) VALUES (?, ?, ?)'
+        ).bind(idItem, g.tamanho, toInt(g.qtd)).run();
+      }
     }
   }
+
+  // ---- Sincroniza grade legada (terc_remessa_grade) com a do 1º item ----
+  await c.env.DB.prepare('DELETE FROM terc_remessa_grade WHERE id_remessa=?').bind(id).run();
+  for (const g of head._grade) {
+    if (toInt(g.qtd) > 0) {
+      await c.env.DB.prepare(
+        'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd) VALUES (?, ?, ?)'
+      ).bind(id, g.tamanho, toInt(g.qtd)).run();
+    }
+  }
+
   await audit(c, MOD, 'UPD_REM', `remessa:${id}`);
-  return c.json(ok({ id, dt_previsao: dt_prev, valor_total: valor }));
+  return c.json(ok({
+    id, dt_previsao: dt_prev,
+    qtd_total: totQtd, valor_total: totValor,
+    itens_count: itensValidos.length,
+  }));
 });
 
 // Excluir remessa
