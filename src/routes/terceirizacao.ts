@@ -226,6 +226,270 @@ app.delete('/terc/produtos/:id', async (c) => {
   return c.json(ok({ id, deleted: true }));
 });
 
+/* =================================================================
+ * 🧹 LIMPEZA INTELIGENTE DE PRODUTOS DUPLICADOS
+ * - Agrupa por cod_ref normalizado (lower+trim) e desc_ref normalizada
+ * - Mantém: o "mais completo" (mais campos preenchidos), desempate=mais recente
+ * - Reaponta remessas/preços para o produto principal antes de remover
+ * - Suporta dry_run (apenas simulação)
+ * ================================================================= */
+app.post('/terc/cleanup/produtos', async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const dryRun = body.dry_run !== false; // default = simular
+  const estrategia = String(body.estrategia || 'mais_completo'); // 'mais_completo' | 'mais_recente'
+
+  // Helper de normalização (igual ao front)
+  const norm = (s: any) => String(s ?? '').trim().toLocaleLowerCase('pt-BR').replace(/\s+/g, ' ');
+
+  const todos = (await c.env.DB.prepare(
+    `SELECT id_produto, cod_ref, desc_ref, nome_produto, id_colecao,
+            id_servico_padrao, tempo_padrao, grade_padrao, observacao,
+            ativo, dt_criacao
+       FROM terc_produtos
+      ORDER BY id_produto ASC`
+  ).all()).results as any[];
+
+  // Pontuação de "completude" (mais campos preenchidos = melhor)
+  const score = (p: any) => {
+    let s = 0;
+    if (p.cod_ref && String(p.cod_ref).trim()) s += 2;
+    if (p.desc_ref && String(p.desc_ref).trim()) s += 2;
+    if (p.nome_produto && String(p.nome_produto).trim()) s++;
+    if (p.id_colecao) s++;
+    if (p.id_servico_padrao) s++;
+    if (Number(p.tempo_padrao) > 0) s++;
+    if (Number(p.grade_padrao) > 0) s++;
+    if (p.observacao && String(p.observacao).trim()) s++;
+    if (p.ativo === 1) s += 3; // privilegia ativo
+    return s;
+  };
+
+  // Agrupa por (cod_ref normalizado) — chave primária; descrição é critério adicional
+  // Regra: produtos com MESMA cod_ref normalizada sempre formam o mesmo grupo.
+  // Se cod_ref vazia, agrupa por desc_ref normalizada.
+  const grupos = new Map<string, any[]>();
+  for (const p of todos) {
+    const refKey = norm(p.cod_ref);
+    const descKey = norm(p.desc_ref);
+    const key = refKey ? `R:${refKey}` : (descKey ? `D:${descKey}` : `__solo:${p.id_produto}`);
+    if (!grupos.has(key)) grupos.set(key, []);
+    grupos.get(key)!.push(p);
+  }
+
+  type Acao = {
+    grupo: string;
+    manter: { id: number; cod_ref: string; desc_ref: string; score: number };
+    remover: { id: number; cod_ref: string; desc_ref: string; motivo: string }[];
+    conflito?: string;
+  };
+  const acoes: Acao[] = [];
+  let totalManter = 0, totalRemover = 0, totalConflitos = 0;
+
+  for (const [key, lista] of grupos.entries()) {
+    if (lista.length < 2) { totalManter++; continue; }
+
+    // Conflito: descrições muito diferentes para mesma cod_ref → manter ambos
+    if (key.startsWith('R:')) {
+      const descs = new Set(lista.map(p => norm(p.desc_ref)).filter(Boolean));
+      // Se houver 2+ descrições distintas e nenhuma vazia, considera produtos diferentes
+      if (descs.size > 1) {
+        const nonEmptyDescs = Array.from(descs).filter(d => d.length > 3);
+        if (nonEmptyDescs.length > 1) {
+          acoes.push({
+            grupo: key,
+            manter: { id: lista[0].id_produto, cod_ref: lista[0].cod_ref, desc_ref: lista[0].desc_ref, score: 0 },
+            remover: [],
+            conflito: `Mesma referência com ${nonEmptyDescs.length} descrições distintas — mantidos todos os ${lista.length} registros`
+          });
+          totalConflitos++;
+          totalManter += lista.length;
+          continue;
+        }
+      }
+    }
+
+    // Ordena por estratégia
+    let ordenado: any[];
+    if (estrategia === 'mais_recente') {
+      ordenado = [...lista].sort((a, b) => String(b.dt_criacao || '').localeCompare(String(a.dt_criacao || '')) || (b.id_produto - a.id_produto));
+    } else {
+      ordenado = [...lista].sort((a, b) => {
+        const ds = score(b) - score(a);
+        if (ds !== 0) return ds;
+        return String(b.dt_criacao || '').localeCompare(String(a.dt_criacao || '')) || (b.id_produto - a.id_produto);
+      });
+    }
+    const principal = ordenado[0];
+    const duplicados = ordenado.slice(1);
+
+    acoes.push({
+      grupo: key,
+      manter: { id: principal.id_produto, cod_ref: principal.cod_ref, desc_ref: principal.desc_ref, score: score(principal) },
+      remover: duplicados.map(d => ({
+        id: d.id_produto, cod_ref: d.cod_ref, desc_ref: d.desc_ref,
+        motivo: `score=${score(d)} (principal=${score(principal)})`
+      }))
+    });
+    totalManter++;
+    totalRemover += duplicados.length;
+
+    // EXECUÇÃO real
+    if (!dryRun) {
+      for (const dup of duplicados) {
+        // 1) Reaponta variações do duplicado para o principal (se cor+tamanho ainda não existe lá)
+        await c.env.DB.prepare(
+          `INSERT OR IGNORE INTO terc_produto_variacoes (id_produto, cor, tamanho, ativo)
+           SELECT ?, cor, tamanho, ativo FROM terc_produto_variacoes WHERE id_produto=?`
+        ).bind(principal.id_produto, dup.id_produto).run().catch(() => {});
+
+        // 2) Remove variações antigas do duplicado
+        await c.env.DB.prepare(
+          'DELETE FROM terc_produto_variacoes WHERE id_produto=?'
+        ).bind(dup.id_produto).run().catch(() => {});
+
+        // 3) Atualiza remessas que apontam via cod_ref do duplicado para a cod_ref do principal
+        // (apenas se forem diferentes; se forem iguais, remessas continuam funcionando)
+        if (norm(dup.cod_ref) !== norm(principal.cod_ref) && principal.cod_ref) {
+          await c.env.DB.prepare(
+            'UPDATE terc_remessas SET cod_ref=?, desc_ref=COALESCE(?, desc_ref) WHERE cod_ref=?'
+          ).bind(principal.cod_ref, principal.desc_ref || null, dup.cod_ref).run().catch(() => {});
+          await c.env.DB.prepare(
+            'UPDATE terc_precos SET cod_ref=?, desc_ref=COALESCE(?, desc_ref) WHERE cod_ref=?'
+          ).bind(principal.cod_ref, principal.desc_ref || null, dup.cod_ref).run().catch(() => {});
+        }
+
+        // 4) Remove o produto duplicado
+        await c.env.DB.prepare('DELETE FROM terc_produtos WHERE id_produto=?')
+          .bind(dup.id_produto).run().catch(() => {});
+      }
+    }
+  }
+
+  await audit(c, MOD, 'CLEANUP_PRODUTOS', 'produtos', 'totais',
+    `manter:${totalManter}`, `remover:${totalRemover} conflitos:${totalConflitos} dry:${dryRun}`);
+
+  return c.json(ok({
+    dry_run: dryRun,
+    estrategia,
+    totais: {
+      grupos_analisados: grupos.size,
+      registros_total: todos.length,
+      manter: totalManter,
+      remover: totalRemover,
+      conflitos: totalConflitos,
+    },
+    acoes: acoes.slice(0, 200), // limita tamanho da resposta
+    truncado: acoes.length > 200,
+  }));
+});
+
+/* =================================================================
+ * 🧹 LIMPEZA INTELIGENTE DE PREÇOS DUPLICADOS
+ * Chave única de duplicidade: cod_ref + cor + tamanho + id_servico (+ id_colecao)
+ * - Tudo igual (incl. preço) → mantém 1, remove resto
+ * - Preço diferente → mantém 1 conforme estratégia (mais_recente|maior|menor)
+ * - Serviço/Cor/Grade diferentes → NÃO é duplicado
+ * ================================================================= */
+app.post('/terc/cleanup/precos', async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const dryRun = body.dry_run !== false; // default = simular
+  const estrategia = String(body.estrategia || 'mais_recente'); // 'mais_recente' | 'maior' | 'menor'
+
+  const norm = (s: any) => String(s ?? '').trim().toLocaleLowerCase('pt-BR').replace(/\s+/g, ' ');
+
+  const todos = (await c.env.DB.prepare(
+    `SELECT id_preco, cod_ref, cor, tamanho, id_servico, id_colecao,
+            preco, tempo_min, ativo,
+            COALESCE(dt_alteracao, dt_criacao, '') AS dt_ord
+       FROM terc_precos
+      WHERE ativo=1
+      ORDER BY id_preco ASC`
+  ).all()).results as any[];
+
+  // Agrupa pela chave de negócio (normalizada)
+  const grupos = new Map<string, any[]>();
+  for (const p of todos) {
+    const key = [
+      norm(p.cod_ref),
+      norm(p.cor),
+      norm(p.tamanho),
+      Number(p.id_servico) || 0,
+      Number(p.id_colecao) || 0,
+    ].join('|');
+    if (!grupos.has(key)) grupos.set(key, []);
+    grupos.get(key)!.push(p);
+  }
+
+  type AcaoPreco = {
+    chave: string;
+    manter: { id: number; preco: number; dt: string };
+    remover: { id: number; preco: number; motivo: string }[];
+    precos_divergentes: boolean;
+  };
+  const acoes: AcaoPreco[] = [];
+  let totalManter = 0, totalRemover = 0, totalDivergentes = 0;
+
+  for (const [key, lista] of grupos.entries()) {
+    if (lista.length < 2) { totalManter++; continue; }
+
+    const precosDistintos = new Set(lista.map(p => Number(p.preco).toFixed(2)));
+    const divergente = precosDistintos.size > 1;
+    if (divergente) totalDivergentes++;
+
+    // Ordena conforme estratégia
+    let ordenado: any[];
+    if (estrategia === 'maior') {
+      ordenado = [...lista].sort((a, b) => Number(b.preco) - Number(a.preco) || String(b.dt_ord).localeCompare(String(a.dt_ord)));
+    } else if (estrategia === 'menor') {
+      ordenado = [...lista].sort((a, b) => Number(a.preco) - Number(b.preco) || String(b.dt_ord).localeCompare(String(a.dt_ord)));
+    } else {
+      // mais_recente: dt_ord desc, depois id desc
+      ordenado = [...lista].sort((a, b) => String(b.dt_ord).localeCompare(String(a.dt_ord)) || (b.id_preco - a.id_preco));
+    }
+
+    const principal = ordenado[0];
+    const duplicados = ordenado.slice(1);
+
+    acoes.push({
+      chave: key,
+      manter: { id: principal.id_preco, preco: Number(principal.preco), dt: String(principal.dt_ord) },
+      remover: duplicados.map(d => ({
+        id: d.id_preco,
+        preco: Number(d.preco),
+        motivo: divergente ? `preço divergente (estratégia=${estrategia})` : 'duplicata exata'
+      })),
+      precos_divergentes: divergente,
+    });
+
+    totalManter++;
+    totalRemover += duplicados.length;
+
+    if (!dryRun) {
+      for (const dup of duplicados) {
+        await c.env.DB.prepare('DELETE FROM terc_precos WHERE id_preco=?')
+          .bind(dup.id_preco).run().catch(() => {});
+      }
+    }
+  }
+
+  await audit(c, MOD, 'CLEANUP_PRECOS', 'precos', 'totais',
+    `manter:${totalManter}`, `remover:${totalRemover} divergentes:${totalDivergentes} dry:${dryRun}`);
+
+  return c.json(ok({
+    dry_run: dryRun,
+    estrategia,
+    totais: {
+      grupos_analisados: grupos.size,
+      registros_total: todos.length,
+      manter: totalManter,
+      remover: totalRemover,
+      divergentes: totalDivergentes,
+    },
+    acoes: acoes.slice(0, 300),
+    truncado: acoes.length > 300,
+  }));
+});
+
 /*  Importação em lote de produtos (Excel/CSV)
  *  Aliases aceitos por coluna (case/acento-insensitive — normalizados no front):
  *    cod_ref       ← "NOME REFERÊNCIA" | referencia | ref | codigo | cod_ref
@@ -754,6 +1018,43 @@ app.get('/terc/cores', async (c) => {
   return c.json(ok(rs.results));
 });
 
+// 🌈 Cores DISTINCT — unifica catálogo (terc_cores) + cores realmente usadas em terc_precos
+// Filtra por cod_ref se informado (cores efetivamente cadastradas para aquele produto).
+// Sempre normaliza/deduplica e retorna ordem alfabética.
+app.get('/terc/cores/distinct', async (c) => {
+  const cod = String(c.req.query('cod_ref') || '').trim();
+  const set = new Map<string, { nome_cor: string; hex: string | null; uso: number }>();
+
+  // 1) Catálogo (terc_cores)
+  const cat = await c.env.DB.prepare(
+    'SELECT nome_cor, hex FROM terc_cores WHERE ativo=1'
+  ).all();
+  for (const r of (cat.results as any[])) {
+    const nome = String(r.nome_cor || '').trim();
+    if (!nome) continue;
+    const k = nome.toLocaleLowerCase('pt-BR');
+    if (!set.has(k)) set.set(k, { nome_cor: nome, hex: r.hex || null, uso: 0 });
+  }
+
+  // 2) Cores presentes em terc_precos (com filtro opcional por cod_ref)
+  let sql = `SELECT cor AS nome_cor, COUNT(*) AS uso FROM terc_precos
+             WHERE ativo=1 AND cor IS NOT NULL AND cor!=''`;
+  const binds: any[] = [];
+  if (cod) { sql += ' AND cod_ref=?'; binds.push(cod); }
+  sql += ' GROUP BY cor';
+  const usadas = await c.env.DB.prepare(sql).bind(...binds).all();
+  for (const r of (usadas.results as any[])) {
+    const nome = String(r.nome_cor || '').trim();
+    if (!nome) continue;
+    const k = nome.toLocaleLowerCase('pt-BR');
+    if (set.has(k)) set.get(k)!.uso = Number(r.uso) || 0;
+    else set.set(k, { nome_cor: nome, hex: null, uso: Number(r.uso) || 0 });
+  }
+
+  const list = Array.from(set.values()).sort((a, b) => a.nome_cor.localeCompare(b.nome_cor, 'pt-BR'));
+  return c.json(ok(list));
+});
+
 app.post('/terc/cores', async (c) => {
   const b = await c.req.json();
   const nome = String(b.nome_cor ?? '').trim();
@@ -791,15 +1092,31 @@ app.post('/terc/precos/importar', async (c) => {
   const idColecao = toInt(b.id_colecao) || null;
   if (rows.length === 0) return fail('Nenhuma linha para importar');
 
-  // Pré-carrega serviços para mapear nome → id
-  const svRows = await c.env.DB.prepare('SELECT id_servico, desc_servico FROM terc_servicos').all();
+  // 🔠 Normalização: trim + colapsa espaços + Title Case (ex.: "  azul claro " → "Azul Claro")
+  const normCor = (s: any): string => {
+    const t = String(s ?? '').trim().replace(/\s+/g, ' ');
+    if (!t) return '';
+    // Capitaliza cada palavra (preserva acentos)
+    return t.toLocaleLowerCase('pt-BR').replace(/(^|\s|-|\/)(\p{L})/gu, (_m, sep, ch) => sep + ch.toLocaleUpperCase('pt-BR'));
+  };
+  const normTam = (s: any): string => String(s ?? '').trim().toUpperCase().replace(/\s+/g, '');
+
+  // Pré-carrega serviços ATIVOS para mapear nome → id (case-insensitive + sem acento)
+  const stripAcc = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const svRows = await c.env.DB.prepare('SELECT id_servico, desc_servico FROM terc_servicos WHERE ativo=1').all();
   const svMap = new Map<string, number>();
   for (const sv of (svRows.results as any[])) {
-    svMap.set(String(sv.desc_servico || '').toLowerCase().trim(), Number(sv.id_servico));
+    svMap.set(stripAcc(String(sv.desc_servico || '')), Number(sv.id_servico));
   }
+
+  // Cache: cod_ref+id_colecao → id_produto (evita SELECT repetido durante o lote)
+  const prodCache = new Map<string, number>();
+  // Cache: cod_ref+cor (normalizada) → boolean (variação criada)
+  const varCache = new Set<string>();
 
   let criados = 0, atualizados = 0, ignorados = 0;
   const erros: { linha: number; motivo: string }[] = [];
+  const coresVistas = new Set<string>();
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] || {};
@@ -807,49 +1124,62 @@ app.post('/terc/precos/importar', async (c) => {
     try {
       const cod_ref  = String(row.cod_ref ?? row.referencia ?? row.ref ?? '').trim();
       const desc_ref = String(row.desc_ref ?? row.descricao ?? '').trim();
-      const cor      = String(row.cor ?? '').trim();
-      const tamanho  = String(row.tamanho ?? row.grade ?? '').trim();
+      const cor      = normCor(row.cor);
+      const tamanho  = normTam(row.tamanho ?? row.grade);
       const svRaw    = String(row.servico ?? row.desc_servico ?? '').trim();
       const preco    = toNum(row.preco);
       const tempo    = toNum(row.tempo ?? row.tempo_min);
 
+      // Validações obrigatórias
       if (!cod_ref) { erros.push({ linha: lineNo, motivo: 'Referência vazia' }); ignorados++; continue; }
       if (!svRaw)   { erros.push({ linha: lineNo, motivo: 'Serviço vazio' });   ignorados++; continue; }
-      const idSv = svMap.get(svRaw.toLowerCase());
+      const idSv = svMap.get(stripAcc(svRaw));
       if (!idSv)    { erros.push({ linha: lineNo, motivo: `Serviço "${svRaw}" não cadastrado` }); ignorados++; continue; }
+      if (preco < 0) { erros.push({ linha: lineNo, motivo: 'Preço negativo' }); ignorados++; continue; }
 
-      // Procura preço existente pela chave de negócio
+      // 🔑 Chave única: cod_ref + id_servico + cor + tamanho + id_colecao
+      // (todas comparações com COALESCE para manter consistência com índice)
       const existing = await c.env.DB.prepare(`
         SELECT id_preco FROM terc_precos
-        WHERE cod_ref=? AND id_servico=? AND COALESCE(cor,'')=? AND COALESCE(tamanho,'')=?
+        WHERE cod_ref=?
+          AND id_servico=?
+          AND COALESCE(cor,'')=?
+          AND COALESCE(tamanho,'')=?
           AND COALESCE(id_colecao,0)=COALESCE(?,0)
         LIMIT 1`)
         .bind(cod_ref, idSv, cor, tamanho, idColecao).first<any>();
 
       if (modo === 'simular') {
         if (existing) atualizados++; else criados++;
+        if (cor) coresVistas.add(cor);
         continue;
       }
 
-      if (existing && (modo === 'atualizar' || modo === 'criar')) {
+      if (existing) {
         if (modo === 'criar') { ignorados++; continue; } // modo criar: pula existentes
+        // ATUALIZAR: força ativo=1, sobrescreve preço/tempo, mantém desc se vazia
         await c.env.DB.prepare(`
-          UPDATE terc_precos SET desc_ref=COALESCE(NULLIF(?, ''), desc_ref),
-                                  preco=?, tempo_min=?, ativo=1,
-                                  dt_alteracao=datetime('now'), alterado_por=?
+          UPDATE terc_precos
+             SET desc_ref=COALESCE(NULLIF(?, ''), desc_ref),
+                 preco=?, tempo_min=?, ativo=1,
+                 dt_alteracao=datetime('now'), alterado_por=?
            WHERE id_preco=?`)
           .bind(desc_ref, preco, tempo, getUser(c), existing.id_preco).run();
         atualizados++;
       } else {
-        // Não existe → cria (mesmo no modo 'atualizar' criamos os faltantes)
+        // CRIAR (em modo 'atualizar' também criamos os faltantes)
         await c.env.DB.prepare(`
           INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, tamanho,
                                    preco, tempo_min, id_colecao, ativo)
           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 1)`)
           .bind(cod_ref, desc_ref || null, idSv, cor, tamanho, preco, tempo, idColecao).run();
         criados++;
+      }
 
-        // Garantir produto e variação correspondente
+      // 📦 Garante produto + variação (via cache para performance)
+      const prodKey = `${cod_ref}|${idColecao || 0}`;
+      let idProd = prodCache.get(prodKey);
+      if (!idProd) {
         await c.env.DB.prepare(`
           INSERT OR IGNORE INTO terc_produtos (cod_ref, desc_ref, id_colecao, ativo)
           VALUES (?, ?, ?, 1)`)
@@ -857,11 +1187,25 @@ app.post('/terc/precos/importar', async (c) => {
         const prod = await c.env.DB.prepare(
           'SELECT id_produto FROM terc_produtos WHERE cod_ref=? AND COALESCE(id_colecao,0)=COALESCE(?,0) LIMIT 1'
         ).bind(cod_ref, idColecao).first<any>();
-        if (prod && (cor || tamanho)) {
+        if (prod) { idProd = Number(prod.id_produto); prodCache.set(prodKey, idProd); }
+      }
+
+      if (idProd && (cor || tamanho)) {
+        const vk = `${idProd}|${cor}|${tamanho}`;
+        if (!varCache.has(vk)) {
           await c.env.DB.prepare(
             'INSERT OR IGNORE INTO terc_produto_variacoes (id_produto, cor, tamanho) VALUES (?, ?, ?)'
-          ).bind(prod.id_produto, cor, tamanho).run().catch(() => {});
+          ).bind(idProd, cor, tamanho).run().catch(() => {});
+          varCache.add(vk);
         }
+      }
+
+      // Garante cor no catálogo terc_cores (para popular o select)
+      if (cor && !coresVistas.has(cor)) {
+        coresVistas.add(cor);
+        await c.env.DB.prepare(
+          'INSERT OR IGNORE INTO terc_cores (nome_cor) VALUES (?)'
+        ).bind(cor).run().catch(() => {});
       }
     } catch (e: any) {
       erros.push({ linha: lineNo, motivo: String(e?.message || e) });
@@ -875,6 +1219,7 @@ app.post('/terc/precos/importar', async (c) => {
     criados, atualizados, ignorados,
     erros: erros.slice(0, 50),
     total_erros: erros.length,
+    cores_detectadas: Array.from(coresVistas).sort(),
     simulado: modo === 'simular',
     modo,
   }));

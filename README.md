@@ -12,10 +12,12 @@ Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecç�
 ## URLs Públicas
 
 ### 🚀 Produção (Cloudflare Pages)
-- **App**: https://corepro-confeccao.pages.dev ⭐ (URL oficial fixo)
+- **App (domínio oficial)**: https://confeccao.corepro.com.br ⭐
+- **App (URL Pages)**: https://corepro-confeccao.pages.dev
 - **URL anterior (mantido como espelho)**: https://pcp-confeccao.pages.dev
-- **Health**: https://corepro-confeccao.pages.dev/api/health
+- **Health**: https://confeccao.corepro.com.br/api/health
 - **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → corepro-confeccao
+- **D1 Database**: `pcp-confeccao-prod` (`cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — 10 migrations aplicadas
 
 ### 📦 Código fonte (GitHub)
 - **Repositório**: https://github.com/playsurf001/pcp--corepro

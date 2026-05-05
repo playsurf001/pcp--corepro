@@ -4040,9 +4040,16 @@ async function TERC_openRemModal(id, onSave) {
       <div class="col-span-2"><label>Referência</label><input id="m-ref" value="${r.cod_ref || ''}" placeholder="auto-preenchido" /></div>
       <div class="col-span-2"><label>Descrição</label><input id="m-descref" value="${r.desc_ref || ''}" /></div>
       <div class="col-span-2">
-        <label>Cor</label>
-        <input id="m-cor" value="${(r.cor || '').replace(/"/g, '&quot;')}" list="rem-cor-dl" placeholder="auto-carregado do produto" />
-        <datalist id="rem-cor-dl"></datalist>
+        <label>Cor <span id="m-cor-badge" class="ml-1 align-middle"></span></label>
+        <div class="cor-picker-wrap" style="position:relative">
+          <input id="m-cor" value="${(r.cor || '').replace(/"/g, '&quot;')}" placeholder="Selecione ou digite uma cor" autocomplete="off" />
+          <button id="m-cor-toggle" type="button" tabindex="-1" title="Abrir lista de cores"
+                  style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;cursor:pointer;color:#64748b;padding:4px">
+            <i class="fas fa-palette"></i>
+          </button>
+          <div id="m-cor-dropdown" class="hidden"
+               style="position:absolute;z-index:50;top:calc(100% + 4px);left:0;right:0;max-height:240px;overflow-y:auto;background:#fff;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.08)"></div>
+        </div>
       </div>
 
       <div class="col-span-2"><label>Data saída *</label><input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
@@ -4119,30 +4126,115 @@ async function TERC_openRemModal(id, onSave) {
     } else $('#m-prev').textContent = '—';
   }
 
-  // 🎨 Carrega cores cadastradas para o produto selecionado (datalist dinâmico)
-  async function loadCoresDoProduto() {
-    const dl = $('#rem-cor-dl');
-    if (!dl) return;
-    const cod = $('#m-ref').value.trim();
-    let nomes = new Set();
-    // 1) Cores cadastradas em variações do produto (id_produto)
-    const idProd = $('#m-prod').value;
-    if (idProd) {
-      try {
-        const r = await api('get', '/terc/produtos/' + idProd + '/variacoes', null, { silent: true });
-        fmt.safeArr(r?.data).forEach(v => { if (v.cor) nomes.add(v.cor); });
-      } catch {}
+  // 🎨 Cache de cores carregadas (com hex) — repovoado a cada mudança de produto
+  let _coresList = []; // [{nome_cor, hex, uso}]
+
+  // Mapa de cores PT-BR → hex aproximado (fallback quando não há hex no catálogo)
+  function corHex(nome) {
+    if (!nome) return '#cbd5e1';
+    const n = String(nome).toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    const map = {
+      'amarelo': '#facc15', 'areia': '#d6c79e', 'azul': '#2563eb', 'azul claro': '#60a5fa',
+      'azul marinho': '#1e3a8a', 'marinho': '#1e3a8a', 'bege': '#e7d4b5', 'branco': '#ffffff',
+      'caqui': '#a08d5f', 'cereja': '#b91c1c', 'chumbo': '#475569', 'cinza': '#94a3b8',
+      'creme': '#fef3c7', 'dourado': '#d4a017', 'gelo': '#f1f5f9', 'goiaba': '#f87171',
+      'indigo': '#4f46e5', 'laranja': '#f97316', 'lodo': '#65733d', 'marrom': '#78350f',
+      'mostarda': '#ca8a04', 'off white': '#faf7ec', 'petroleo': '#0f766e',
+      'pink': '#ec4899', 'preto': '#0a0a0a', 'rosa': '#fb7185', 'roxo': '#7c3aed',
+      'salmao': '#fb923c', 'verde': '#16a34a', 'verde claro': '#86efac',
+      'verde musgo': '#4d6b32', 'vermelho': '#dc2626', 'vinho': '#7f1d1d',
+    };
+    if (map[n]) return map[n];
+    // Hash simples → cor consistente para nomes desconhecidos
+    let h = 0; for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) | 0;
+    const hue = Math.abs(h) % 360;
+    return `hsl(${hue} 65% 55%)`;
+  }
+
+  // Renderiza o badge da cor selecionada ao lado do label
+  function renderCorBadge() {
+    const el = $('#m-cor-badge');
+    if (!el) return;
+    const nome = $('#m-cor').value.trim();
+    if (!nome) { el.innerHTML = ''; return; }
+    const hex = corHex(nome);
+    const isLight = ['#ffffff','#fef3c7','#faf7ec','#f1f5f9','#e7d4b5','#86efac'].includes(hex);
+    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;background:${hex};color:${isLight?'#0f172a':'#fff'};padding:1px 8px;border-radius:999px;border:1px solid rgba(0,0,0,.1)">
+      <span style="width:6px;height:6px;border-radius:50%;background:${isLight?'#0f172a':'#fff'};opacity:.6"></span>${nome}
+    </span>`;
+  }
+
+  // Normaliza cor (Title Case) ao perder foco — alinha com importador
+  function normCorPt(s) {
+    const t = String(s ?? '').trim().replace(/\s+/g, ' ');
+    if (!t) return '';
+    return t.toLocaleLowerCase('pt-BR').replace(/(^|\s|-|\/)(\p{L})/gu, (_m, sep, ch) => sep + ch.toLocaleUpperCase('pt-BR'));
+  }
+
+  // Renderiza o dropdown filtrando pelo termo digitado
+  function renderCorDropdown(filter = '') {
+    const dd = $('#m-cor-dropdown');
+    if (!dd) return;
+    const q = filter.trim().toLocaleLowerCase('pt-BR');
+    const items = _coresList.filter(c => !q || c.nome_cor.toLocaleLowerCase('pt-BR').includes(q));
+    let html = '';
+    if (items.length === 0 && q) {
+      html += `<div class="cor-opt cor-new" data-novo="${q}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #e2e8f0;background:#fef9c3">
+        <i class="fas fa-plus text-amber-600"></i>
+        <span>Nova cor: <b>${normCorPt(filter)}</b></span>
+      </div>`;
     }
-    // 2) Cores presentes na tabela de preços para esse cod_ref
+    html += items.slice(0, 50).map(c => {
+      const hex = c.hex || corHex(c.nome_cor);
+      return `<div class="cor-opt" data-cor="${c.nome_cor.replace(/"/g,'&quot;')}" style="padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #f1f5f9">
+        <span style="width:14px;height:14px;border-radius:50%;background:${hex};border:1px solid rgba(0,0,0,.15);flex-shrink:0"></span>
+        <span style="flex:1">${c.nome_cor}</span>
+        ${c.uso > 0 ? `<span style="font-size:10px;color:#64748b">${c.uso} preço(s)</span>` : ''}
+      </div>`;
+    }).join('');
+    if (!html) html = '<div style="padding:8px 10px;color:#94a3b8;font-size:12px">Sem cores cadastradas. Digite uma nova.</div>';
+    dd.innerHTML = html;
+    // Bind clicks
+    dd.querySelectorAll('.cor-opt').forEach(opt => {
+      opt.addEventListener('click', () => {
+        const novo = opt.dataset.novo;
+        const cor = opt.dataset.cor || normCorPt(novo || '');
+        $('#m-cor').value = cor;
+        dd.classList.add('hidden');
+        renderCorBadge();
+        _lastLookupKey = '';
+        autoLookupPreco();
+      });
+      opt.addEventListener('mouseenter', () => { opt.style.background = '#f1f5f9'; });
+      opt.addEventListener('mouseleave', () => { opt.style.background = ''; });
+    });
+  }
+
+  // 🎨 Carrega cores: prioridade = produto específico, fallback = todas as cores cadastradas
+  async function loadCoresDoProduto() {
+    const cod = $('#m-ref').value.trim();
+    let lista = [];
+    // 1) Endpoint distinct filtrado pelo produto
     if (cod) {
       try {
-        const r = await api('get', '/terc/precos?cod_ref=' + encodeURIComponent(cod), null, { silent: true });
-        fmt.safeArr(r?.data).forEach(p => { if (p.cor) nomes.add(p.cor); });
+        const r = await api('get', '/terc/cores/distinct?cod_ref=' + encodeURIComponent(cod), null, { silent: true });
+        lista = fmt.safeArr(r?.data);
       } catch {}
     }
-    // 3) Catálogo geral (fallback)
-    if (nomes.size === 0) fmt.safeArr(window.TERC?.cores).forEach(c => nomes.add(c.nome_cor));
-    dl.innerHTML = Array.from(nomes).sort().map(n => `<option value="${n}">`).join('');
+    // 2) Fallback: todas as cores do sistema (catálogo + uso global)
+    if (lista.length === 0) {
+      try {
+        const r = await api('get', '/terc/cores/distinct', null, { silent: true });
+        lista = fmt.safeArr(r?.data);
+      } catch {}
+    }
+    // 3) Último fallback: catálogo TERC.cores em memória
+    if (lista.length === 0) {
+      lista = fmt.safeArr(window.TERC?.cores).map(c => ({ nome_cor: c.nome_cor, hex: c.hex, uso: 0 }));
+    }
+    _coresList = lista;
+    renderCorDropdown('');
+    renderCorBadge();
   }
 
   // 🔎 Lookup automático de preço (Produto + Cor + Tamanho + Serviço, com fallback)
@@ -4228,8 +4320,36 @@ async function TERC_openRemModal(id, onSave) {
   $('#m-serv').addEventListener('change', autoLookupPreco);
   $('#m-col').addEventListener('change', autoLookupPreco);
   $('#m-ref').addEventListener('blur', () => { _lastLookupKey = ''; loadCoresDoProduto(); autoLookupPreco(); });
-  $('#m-cor').addEventListener('change', () => { _lastLookupKey = ''; autoLookupPreco(); });
-  $('#m-cor').addEventListener('blur',   () => { _lastLookupKey = ''; autoLookupPreco(); });
+
+  // 🎨 Eventos do novo seletor de cor (dropdown + badge + autocomplete)
+  const corInput = $('#m-cor');
+  const corDD = $('#m-cor-dropdown');
+  const corToggle = $('#m-cor-toggle');
+  corInput.addEventListener('focus', () => { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); });
+  corInput.addEventListener('input', () => { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); renderCorBadge(); });
+  corInput.addEventListener('blur', () => {
+    // Pequeno delay p/ permitir clique no dropdown antes de fechar
+    setTimeout(() => {
+      corDD.classList.add('hidden');
+      // Normaliza ao sair (Title Case)
+      const v = normCorPt(corInput.value);
+      if (v !== corInput.value) corInput.value = v;
+      renderCorBadge();
+      _lastLookupKey = '';
+      autoLookupPreco();
+    }, 180);
+  });
+  corToggle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const willOpen = corDD.classList.contains('hidden');
+    if (willOpen) { renderCorDropdown(corInput.value); corDD.classList.remove('hidden'); corInput.focus(); }
+    else corDD.classList.add('hidden');
+  });
+  // Fecha dropdown ao clicar fora
+  document.addEventListener('mousedown', (e) => {
+    if (corDD.classList.contains('hidden')) return;
+    if (!e.target.closest('.cor-picker-wrap')) corDD.classList.add('hidden');
+  }, { passive: true });
   $('#m-preco').addEventListener('input', () => { setPrecoTag('<i class="fas fa-keyboard"></i> manual', '#f59e0b'); recalc(); });
   card.querySelectorAll('.grade-in, #m-tempo, #m-pess, #m-min, #m-ef, #m-pz, #m-dts').forEach(i => i.addEventListener('input', recalc));
   // Recarrega cores e dispara lookup quando a grade muda (tamanho dominante pode mudar)
@@ -5666,6 +5786,7 @@ async function renderTercPrecosBlock(body, refresh) {
       <div class="flex-1"></div>
       <button id="btn-importar" class="btn btn-secondary" title="Importar planilha de cor/preço"><i class="fas fa-file-excel mr-1"></i>Importar</button>
       <button id="btn-col" class="btn btn-secondary" title="Gerenciar coleções"><i class="fas fa-layer-group mr-1"></i>Coleções</button>
+      <button id="btn-cleanup" class="btn btn-warning" title="Detecta e remove preços duplicados (Ref+Cor+Grade+Serviço)"><i class="fas fa-broom mr-1"></i>Limpar Duplicados</button>
       <button id="btn-novo" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Novo Preço</button>
       <button id="btn-del-all" class="btn btn-danger" title="Excluir TODOS os preços (confirmação dupla)"><i class="fas fa-trash-can mr-1"></i>Excluir todos</button>
     </div>
@@ -5700,7 +5821,7 @@ async function renderTercPrecosBlock(body, refresh) {
               <tr class="border-b hover:bg-slate-50">
                 <td class="p-2 font-mono text-xs">${x.cod_ref || '—'}</td>
                 <td class="p-2">${x.desc_ref || '<span class="text-slate-400">—</span>'}</td>
-                <td class="p-2">${x.cor ? `<span class="px-2 py-0.5 rounded text-xs bg-slate-100">${x.cor}</span>` : '<span class="text-slate-400">—</span>'}</td>
+                <td class="p-2">${x.cor ? TERC_corBadge(x.cor) : '<span class="text-slate-400">—</span>'}</td>
                 <td class="p-2 text-center">${x.tamanho ? `<span class="px-2 py-0.5 rounded text-xs bg-blue-50 text-blue-700 font-mono">${x.tamanho}</span>` : '<span class="text-slate-400">—</span>'}</td>
                 <td class="p-2">${x.desc_servico || '—'}</td>
                 <td class="p-2">${x.nome_colecao || '<span class="text-slate-400">Todas</span>'}</td>
@@ -5731,8 +5852,190 @@ async function renderTercPrecosBlock(body, refresh) {
   body.querySelector('#btn-col').onclick = () => TERC_openColecoesModal(() => { load(); refresh && refresh(); });
   body.querySelector('#btn-importar').onclick = () => TERC_openImportPrecosModal(() => { load(); refresh && refresh(); });
   body.querySelector('#btn-del-all').onclick = () => TERC_confirmDelAllPrecos(() => { load(); refresh && refresh(); });
+  body.querySelector('#btn-cleanup').onclick = () => TERC_openCleanupModal('precos', () => { load(); refresh && refresh(); });
   await load();
 }
+
+/* =================================================================
+ * 🎨 Helper global: badge colorida a partir do nome da cor
+ * Usado na listagem de preços, na nova remessa e onde mais houver cor.
+ * ================================================================= */
+window.TERC_corBadge = function (nome) {
+  if (!nome) return '';
+  const n = String(nome).toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const map = {
+    'amarelo':'#facc15','areia':'#d6c79e','azul':'#2563eb','azul claro':'#60a5fa',
+    'azul marinho':'#1e3a8a','marinho':'#1e3a8a','bege':'#e7d4b5','branco':'#ffffff',
+    'caqui':'#a08d5f','cereja':'#b91c1c','chumbo':'#475569','cinza':'#94a3b8',
+    'creme':'#fef3c7','dourado':'#d4a017','gelo':'#f1f5f9','goiaba':'#f87171',
+    'indigo':'#4f46e5','laranja':'#f97316','lodo':'#65733d','marrom':'#78350f',
+    'mostarda':'#ca8a04','off white':'#faf7ec','petroleo':'#0f766e',
+    'pink':'#ec4899','preto':'#0a0a0a','rosa':'#fb7185','roxo':'#7c3aed',
+    'salmao':'#fb923c','verde':'#16a34a','verde claro':'#86efac',
+    'verde musgo':'#4d6b32','vermelho':'#dc2626','vinho':'#7f1d1d',
+  };
+  let hex = map[n];
+  if (!hex) {
+    let h = 0; for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) | 0;
+    hex = `hsl(${Math.abs(h) % 360} 65% 55%)`;
+  }
+  const claros = ['#ffffff','#fef3c7','#faf7ec','#f1f5f9','#e7d4b5','#86efac'];
+  const fg = claros.includes(hex) ? '#0f172a' : '#fff';
+  return `<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:11px;background:${hex};color:${fg};border:1px solid rgba(0,0,0,.1)">
+    <span style="width:7px;height:7px;border-radius:50%;background:${fg};opacity:.55"></span>${nome}
+  </span>`;
+};
+
+/* =================================================================
+ * 🧹 LIMPEZA INTELIGENTE DE DUPLICADOS — Modal único (precos | produtos)
+ * - Modo: simular (default) ou executar
+ * - Mostra resumo: grupos analisados, manter, remover, conflitos/divergentes
+ * - Lista detalhada das ações antes de executar
+ * ================================================================= */
+function TERC_openCleanupModal(tipo, onDone) {
+  // tipo: 'precos' | 'produtos'
+  const t = tipo === 'produtos' ? 'produtos' : 'precos';
+  const titulo = t === 'produtos' ? 'Limpar Produtos Duplicados' : 'Limpar Preços Duplicados';
+  const regra = t === 'produtos'
+    ? 'Produtos com a <b>mesma referência</b> (ignorando maiúscula/minúscula e espaços) serão agrupados; mantemos o mais completo (ou o mais recente) e reapontamos remessas/preços.'
+    : 'Preços com a mesma combinação <b>Ref + Cor + Grade + Serviço (+ Coleção)</b> serão agrupados; mantemos um registro segundo a estratégia escolhida.';
+
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-4xl' });
+  const estratHTML = t === 'produtos' ? `
+    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_completo" checked /> Manter o mais completo</label>
+    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_recente" /> Manter o mais recente</label>
+  ` : `
+    <label class="flex items-center gap-2"><input type="radio" name="estr" value="mais_recente" checked /> Manter o mais recente</label>
+    <label class="flex items-center gap-2"><input type="radio" name="estr" value="maior" /> Manter maior preço</label>
+    <label class="flex items-center gap-2"><input type="radio" name="estr" value="menor" /> Manter menor preço</label>
+  `;
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-2"><i class="fas fa-broom mr-2 text-amber-600"></i>${titulo}</h3>
+    <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs mb-3">
+      <i class="fas fa-circle-info mr-1 text-amber-700"></i>${regra}
+      <br><b class="text-amber-700">Importante:</b> rodaremos primeiro em modo <b>Simulação</b> (não altera dados). Só após conferir o relatório, clique em <b>Executar limpeza</b>.
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div>
+        <label class="text-xs font-semibold text-slate-600">Estratégia</label>
+        <div class="flex flex-col gap-1 text-sm mt-1">${estratHTML}</div>
+      </div>
+      <div class="flex items-end justify-end gap-2">
+        <button id="c-sim" class="btn btn-secondary"><i class="fas fa-flask mr-1"></i>Simular</button>
+        <button id="c-go" class="btn btn-danger" disabled title="Disponível após simulação"><i class="fas fa-broom mr-1"></i>Executar limpeza</button>
+      </div>
+    </div>
+
+    <div id="c-result" class="text-sm"></div>
+
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="c-cancel" class="btn btn-secondary">Fechar</button>
+    </div>
+  `;
+  m.appendChild(card); document.body.appendChild(m);
+
+  let ultimoSimulado = false;
+  $('#c-cancel').onclick = () => m.remove();
+
+  function getEstr() {
+    return card.querySelector('input[name="estr"]:checked')?.value
+      || (t === 'produtos' ? 'mais_completo' : 'mais_recente');
+  }
+
+  function renderResumo(d, executou) {
+    const tot = d.totais || {};
+    const acoes = fmt.safeArr(d.acoes);
+    const corBadge = (s) => `<span class="px-2 py-0.5 rounded text-xs bg-slate-100 font-mono">${s}</span>`;
+
+    let detalhesHTML = '';
+    if (acoes.length) {
+      detalhesHTML = `
+        <details class="mt-3 text-xs">
+          <summary class="cursor-pointer text-slate-700 font-semibold">Ver ${acoes.length} grupo(s) detectado(s)${d.truncado ? ' (truncado em 200/300)' : ''}</summary>
+          <div class="mt-2 max-h-72 overflow-y-auto border rounded">
+            <table class="w-full text-xs">
+              <thead class="bg-slate-100 sticky top-0">
+                <tr>
+                  <th class="text-left p-1.5">Grupo</th>
+                  <th class="text-left p-1.5">Manter</th>
+                  <th class="text-left p-1.5">Remover</th>
+                  <th class="text-left p-1.5">Obs.</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${acoes.map(a => {
+                  if (t === 'produtos') {
+                    return `<tr class="border-b">
+                      <td class="p-1.5">${corBadge(a.grupo)}</td>
+                      <td class="p-1.5">#${a.manter.id} <span class="text-slate-500">${a.manter.cod_ref || '—'}</span></td>
+                      <td class="p-1.5">${a.remover.length === 0 ? '<span class="text-slate-400">—</span>' : a.remover.map(r => `#${r.id}`).join(', ')}</td>
+                      <td class="p-1.5">${a.conflito ? `<span class="text-amber-700">⚠ ${a.conflito}</span>` : (a.remover.length ? `${a.remover.length} duplicata(s)` : 'OK')}</td>
+                    </tr>`;
+                  } else {
+                    return `<tr class="border-b">
+                      <td class="p-1.5">${corBadge(a.chave)}</td>
+                      <td class="p-1.5">#${a.manter.id} <b class="text-emerald-700">${TERC.fmtBRL(a.manter.preco)}</b></td>
+                      <td class="p-1.5">${a.remover.map(r => `#${r.id} (${TERC.fmtBRL(r.preco)})`).join(', ')}</td>
+                      <td class="p-1.5">${a.precos_divergentes ? '<span class="text-amber-700">⚠ preços divergentes</span>' : 'duplicata exata'}</td>
+                    </tr>`;
+                  }
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      `;
+    }
+
+    const colDiv = t === 'produtos'
+      ? `<div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-amber-700">${fmt.int(tot.conflitos)}</div><div class="text-xs">Conflitos preservados</div></div>`
+      : `<div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-amber-700">${fmt.int(tot.divergentes)}</div><div class="text-xs">Preços divergentes</div></div>`;
+
+    $('#c-result').innerHTML = `
+      <div class="${executou ? 'bg-emerald-50 border-emerald-200' : 'bg-blue-50 border-blue-200'} border rounded p-3">
+        <div class="font-semibold mb-2">${executou ? '✅ Limpeza executada' : '🧪 Simulação concluída'} — estratégia: <b>${d.estrategia}</b></div>
+        <div class="grid grid-cols-4 gap-2 text-center">
+          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-slate-700">${fmt.int(tot.registros_total)}</div><div class="text-xs">Registros analisados</div></div>
+          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-emerald-700">${fmt.int(tot.manter)}</div><div class="text-xs">Mantidos</div></div>
+          <div class="p-2 bg-white rounded"><div class="text-2xl font-bold text-red-700">${fmt.int(tot.remover)}</div><div class="text-xs">${executou ? 'Removidos' : 'A remover'}</div></div>
+          ${colDiv}
+        </div>
+        ${detalhesHTML}
+      </div>
+    `;
+  }
+
+  async function call(dryRun) {
+    $('#c-sim').disabled = true; $('#c-go').disabled = true;
+    $('#c-result').innerHTML = '<div class="p-3 text-slate-500"><i class="fas fa-spinner fa-spin mr-1"></i>Processando...</div>';
+    try {
+      const r = await api('post', '/terc/cleanup/' + t, { dry_run: dryRun, estrategia: getEstr() });
+      const d = r?.data || {};
+      renderResumo(d, !dryRun);
+      ultimoSimulado = dryRun;
+      if (!dryRun) {
+        toast(`Limpeza: ${fmt.int(d.totais?.remover)} registro(s) removido(s)`, 'success');
+        onDone && onDone();
+      }
+    } catch (e) {
+      $('#c-result').innerHTML = `<div class="text-red-600 p-3 bg-red-50 rounded"><i class="fas fa-triangle-exclamation mr-1"></i>${e?.response?.data?.error || e?.message || 'Falha na operação'}</div>`;
+    } finally {
+      $('#c-sim').disabled = false;
+      // Só habilita executar após uma simulação bem-sucedida
+      $('#c-go').disabled = !ultimoSimulado;
+    }
+  }
+
+  $('#c-sim').onclick = () => call(true);
+  $('#c-go').onclick = async () => {
+    const okExec = confirm('Confirma a execução REAL da limpeza? Esta operação é irreversível.\n\nClique OK para prosseguir.');
+    if (!okExec) return;
+    await call(false);
+  };
+}
+window.TERC_openCleanupModal = TERC_openCleanupModal;
 
 // Confirma exclusão de UM preço
 function TERC_confirmDelPreco() {
