@@ -5043,95 +5043,302 @@ async function TERC_openColecoesModal(onSave) {
 // Modal de retorno — cria novo OU edita existente quando idRetornoEdit é informado.
 // Em modo edit: pré-preenche valores, NÃO subtrai a si mesmo do gradeMax e usa PUT.
 async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
-  const res = await api('get', '/terc/remessas/' + idRemessa);
-  const r = res.data || {};
+  // Carrega contexto multi-itens (itens da remessa + grade enviada + saldo disponível por item)
   const editing = !!idRetornoEdit;
-  const retEdit = editing ? (fmt.safeArr(r.retornos).find(x => Number(x.id_retorno) === Number(idRetornoEdit)) || null) : null;
+  const ctxQS = editing ? `?id_retorno=${encodeURIComponent(idRetornoEdit)}` : '';
+  let ctx;
+  try {
+    ctx = (await api('get', `/terc/remessas/${idRemessa}/retorno-context${ctxQS}`)).data || {};
+  } catch {
+    toast('Falha ao carregar dados da remessa', 'error');
+    return;
+  }
+  const rem = ctx.remessa || {};
+  const itensRem = fmt.safeArr(ctx.itens);
+  if (itensRem.length === 0) { toast('Remessa sem itens cadastrados', 'error'); return; }
+  const retEdit = editing ? ctx.retorno_edit : null;
   if (editing && !retEdit) { toast('Retorno não encontrado', 'error'); return; }
 
-  // Saldo: total da remessa − soma dos retornos atuais (se editando, descontar este retorno)
-  const totalRetTodos = fmt.safeNum(r.totais_retorno?.total);
-  const totalEsteRet = retEdit ? fmt.safeNum(retEdit.qtd_total) : 0;
-  const saldoBase = fmt.safeNum(r.qtd_total) - totalRetTodos + totalEsteRet;
+  // Mapa de itens já lançados neste retorno (modo edição) → para preencher inputs
+  const editByItem = new Map();
+  if (editing) {
+    fmt.safeArr(retEdit.itens).forEach(ri => {
+      editByItem.set(Number(ri.id_item), {
+        qtd_boa: fmt.safeNum(ri.qtd_boa),
+        qtd_refugo: fmt.safeNum(ri.qtd_refugo),
+        qtd_conserto: fmt.safeNum(ri.qtd_conserto),
+        valor: ri.valor != null ? Number(ri.valor) : null,
+        observacao: ri.observacao || '',
+        gradeMap: Object.fromEntries(fmt.safeArr(ri.grade).map(g => [g.tamanho, fmt.safeNum(g.qtd)])),
+      });
+    });
+  }
 
-  const m = el('div', { class: 'modal-backdrop' });
-  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
-  // Grade máxima disponível por tamanho = enviada − retornos de OUTROS retornos (não este)
-  const gradeMax = Object.fromEntries(fmt.safeArr(r.grade).map(g => [g.tamanho, fmt.safeNum(g.qtd)]));
-  fmt.safeArr(r.retornos).forEach(ret => {
-    if (editing && Number(ret.id_retorno) === Number(idRetornoEdit)) return; // não subtrai a si mesmo
-    fmt.safeArr(ret.grade).forEach(g => { gradeMax[g.tamanho] = (gradeMax[g.tamanho] || 0) - fmt.safeNum(g.qtd); });
-  });
-  // Mapa do retorno em edição (qtd preenchida nos inputs)
-  const gradeAtual = editing ? Object.fromEntries(fmt.safeArr(retEdit.grade).map(g => [g.tamanho, fmt.safeNum(g.qtd)])) : {};
+  // Estado local da UI
+  const state = {
+    items: itensRem.map(it => {
+      const ed = editByItem.get(Number(it.id_item));
+      const gradeEnv = fmt.safeArr(it.grade); // grade enviada
+      const gradeMax = it.gradeMax || {};     // disponível por tamanho
+      // Inicializa grade-input com o que já está lançado neste retorno (edição) ou 0
+      const gradeInput = {};
+      gradeEnv.forEach(g => { gradeInput[g.tamanho] = ed?.gradeMap?.[g.tamanho] || 0; });
+      return {
+        id_item: Number(it.id_item),
+        cod_ref: it.cod_ref || '',
+        desc_ref: it.desc_ref || '',
+        cor: it.cor || '',
+        desc_servico: it.desc_servico || '',
+        preco_unit: Number(it.preco_unit) || 0,
+        qtd_enviada: fmt.safeNum(it.qtd_total),
+        qtd_disponivel: fmt.safeNum(it.qtd_disponivel),
+        gradeEnv,
+        gradeMax,
+        gradeInput,
+        qtd_refugo: ed?.qtd_refugo || 0,
+        qtd_conserto: ed?.qtd_conserto || 0,
+        observacao: ed?.observacao || '',
+        // boa é derivado da soma da grade — não precisa input separado
+      };
+    }),
+  };
 
   const titleIcon = editing ? 'fa-pen-to-square' : 'fa-truck-arrow-right';
-  const titleTxt = editing ? `Editar Retorno · Remessa ${r.num_controle}` : `Registrar Retorno · Remessa ${r.num_controle}`;
+  const titleTxt = editing
+    ? `Editar Retorno · Remessa ${rem.num_controle}`
+    : `Registrar Retorno · Remessa ${rem.num_controle}`;
   const dtVal = editing ? (retEdit.dt_retorno || dayjs().format('YYYY-MM-DD')) : dayjs().format('YYYY-MM-DD');
-  const boaVal = editing ? fmt.safeNum(retEdit.qtd_boa) : 0;
-  const refVal = editing ? fmt.safeNum(retEdit.qtd_refugo) : 0;
-  const consVal = editing ? fmt.safeNum(retEdit.qtd_conserto) : 0;
-  const valVal = editing ? (retEdit.valor_pago != null ? retEdit.valor_pago : '') : '';
+  const valVal = editing && retEdit.valor_pago != null ? retEdit.valor_pago : '';
   const dtpVal = editing ? (retEdit.dt_pagamento || '') : '';
   const obsVal = editing ? (retEdit.observacao || '') : '';
 
+  // Paleta de cor para o badge da cor
+  const colorBadge = (cor) => {
+    if (!cor) return '<span class="text-slate-400">—</span>';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-slate-100 border border-slate-300">
+      <span class="w-2 h-2 rounded-full bg-slate-500"></span>${cor}
+    </span>`;
+  };
+
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-5xl max-h-[92vh] overflow-y-auto' });
   card.innerHTML = `
-    <h3 class="text-lg font-semibold mb-2"><i class="fas ${titleIcon} mr-2 text-brand"></i>${titleTxt}</h3>
-    <div class="bg-slate-50 p-3 rounded mb-3 text-sm grid grid-cols-3 gap-2">
-      <div><b>Terceirizado:</b> ${r.nome_terc || '—'}</div>
-      <div><b>Ref:</b> <span class="font-mono">${r.cod_ref || ''}</span> ${r.cor || ''}</div>
-      <div><b>Serviço:</b> ${r.desc_servico || '—'}</div>
-      <div><b>Enviadas:</b> ${fmt.int(r.qtd_total)}</div>
-      <div><b>Outros retornos:</b> ${fmt.int(totalRetTodos - totalEsteRet)}</div>
-      <div class="${saldoBase > 0 ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}"><b>Disponível:</b> ${fmt.int(saldoBase)}</div>
+    <h3 class="text-lg font-semibold mb-2">
+      <i class="fas ${titleIcon} mr-2 text-brand"></i>${titleTxt}
+    </h3>
+    <div class="bg-slate-50 p-3 rounded mb-3 text-sm grid grid-cols-2 md:grid-cols-4 gap-2">
+      <div><b>Terceirizado:</b> ${rem.nome_terc || '—'}</div>
+      <div><b>Itens:</b> ${state.items.length}</div>
+      <div><b>Total enviado:</b> ${fmt.int(rem.qtd_total)}</div>
+      <div><b>Status:</b> ${rem.status || '—'}</div>
     </div>
-    <div class="grid grid-cols-5 gap-3">
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
       <div><label>Data retorno *</label><input type="date" id="m-dtr" value="${dtVal}" /></div>
-      <div><label>Boas</label><input type="number" min="0" id="m-boa" value="${boaVal}" /></div>
-      <div><label>Refugo</label><input type="number" min="0" id="m-ref" value="${refVal}" /></div>
-      <div><label>Conserto</label><input type="number" min="0" id="m-cons" value="${consVal}" /></div>
-      <div><label>Valor pago (R$)</label><input type="number" step="0.01" id="m-val" value="${valVal}" placeholder="auto = boas × preço" /></div>
-      <div class="col-span-5">
-        <label>Grade retornada <span class="text-xs text-slate-500">(máx. = enviado − outros retornos)</span></label>
-        <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" id="g-wrap">
-          ${fmt.safeArr(r.grade).map(g => {
-            const max = fmt.safeNum(gradeMax[g.tamanho]);
-            const cur = fmt.safeNum(gradeAtual[g.tamanho]);
-            return `
-            <div class="text-center">
-              <div class="text-xs font-mono text-slate-500">${g.tamanho} <span class="text-slate-400">(máx ${max})</span></div>
-              <input data-tam="${g.tamanho}" data-max="${max}" type="number" min="0" max="${max}" value="${cur}" class="text-center ret-in" />
-            </div>`;
-          }).join('')}
-        </div>
-        <div class="mt-2 text-sm">Grade total: <b id="g-total">${fmt.int(Object.values(gradeAtual).reduce((a, v) => a + v, 0))}</b></div>
-      </div>
       <div><label>Data pagamento</label><input type="date" id="m-dtp" value="${dtpVal}" /></div>
-      <div class="col-span-4"><label>Observação</label><input id="m-obs" value="${obsVal.replace(/"/g, '&quot;')}" /></div>
+      <div><label>Valor pago total (R$) <span class="text-xs text-slate-400">(opcional — auto = soma dos itens)</span></label>
+        <input type="number" step="0.01" id="m-val" value="${valVal}" placeholder="auto" />
+      </div>
+      <div class="md:col-span-3"><label>Observação geral</label>
+        <input id="m-obs" value="${String(obsVal).replace(/"/g, '&quot;')}" />
+      </div>
     </div>
-    <div class="flex justify-end gap-2 mt-4">
-      <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
-      <button id="m-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}</button>
+
+    <div class="text-sm font-semibold mb-2 text-slate-700">
+      <i class="fas fa-boxes-stacked mr-1"></i>Itens da remessa
+      <span class="text-xs text-slate-500 font-normal">(preencha o retorno por item / cor / tamanho)</span>
+    </div>
+    <div id="ret-items-wrap" class="space-y-3"></div>
+
+    <div class="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded flex items-center justify-between">
+      <div class="text-sm">
+        <div><b>Total geral retornado:</b> <span id="tg-qtd">0</span> pç
+          (boas <span id="tg-boa">0</span> · refugo <span id="tg-ref">0</span> · conserto <span id="tg-con">0</span>)
+        </div>
+        <div class="text-xs text-slate-600 mt-1">Valor calculado: R$ <span id="tg-val">0,00</span></div>
+      </div>
+      <div class="flex gap-2">
+        <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="m-save" class="btn btn-primary">
+          <i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}
+        </button>
+      </div>
     </div>
   `;
-  m.appendChild(card); document.body.appendChild(m);
-  function recalc() {
-    const tot = Array.from(card.querySelectorAll('.ret-in')).reduce((a, i) => a + fmt.safeNum(i.value), 0);
-    $('#g-total').textContent = fmt.int(tot);
-    if (!$('#m-boa').dataset.manual) $('#m-boa').value = tot;
+  m.appendChild(card);
+  document.body.appendChild(m);
+
+  const itemsWrap = card.querySelector('#ret-items-wrap');
+
+  // Renderiza um card por item da remessa
+  function renderItem(it, idx) {
+    const semSaldo = it.qtd_disponivel <= 0;
+    const cardEl = document.createElement('div');
+    cardEl.className = `border-2 rounded-lg p-3 ${semSaldo ? 'border-slate-200 bg-slate-50 opacity-70' : 'border-slate-300 bg-white'}`;
+    cardEl.dataset.idx = idx;
+
+    cardEl.innerHTML = `
+      <div class="flex flex-wrap items-center gap-3 mb-2">
+        <div class="text-sm">
+          <span class="font-mono font-semibold">${it.cod_ref || '—'}</span>
+          <span class="text-slate-600">· ${it.desc_ref || ''}</span>
+        </div>
+        <div>${colorBadge(it.cor)}</div>
+        <div class="text-xs px-2 py-0.5 bg-blue-50 border border-blue-200 rounded text-blue-700">
+          <i class="fas fa-screwdriver-wrench mr-1"></i>${it.desc_servico || '—'}
+        </div>
+        <div class="text-xs ml-auto flex gap-3 text-slate-600">
+          <span>Enviado: <b>${fmt.int(it.qtd_enviada)}</b></span>
+          <span>Disponível: <b class="${semSaldo ? 'text-slate-400' : 'text-amber-700'}">${fmt.int(it.qtd_disponivel)}</b></span>
+          <span>Preço: <b>R$ ${fmt.num(it.preco_unit)}</b></span>
+        </div>
+      </div>
+
+      ${semSaldo ? `<div class="text-xs text-slate-500 italic">Item já totalmente retornado.</div>` : `
+      <div class="grid grid-cols-5 md:grid-cols-12 gap-2 items-end">
+        <div class="col-span-5 md:col-span-9">
+          <div class="text-xs text-slate-500 mb-1">Grade retornada
+            <span class="text-slate-400">(máx por tamanho = enviado − retornos anteriores)</span>
+          </div>
+          <div class="grid grid-cols-5 md:grid-cols-10 gap-1">
+            ${it.gradeEnv.map(g => {
+              const max = fmt.safeNum(it.gradeMax[g.tamanho]);
+              const cur = fmt.safeNum(it.gradeInput[g.tamanho]);
+              return `<div class="text-center">
+                <div class="text-[10px] font-mono text-slate-500">${g.tamanho}
+                  <span class="text-slate-400">(${max})</span>
+                </div>
+                <input data-role="grade" data-tam="${g.tamanho}" data-max="${max}"
+                       type="number" min="0" max="${max}" value="${cur}"
+                       class="text-center ret-grade-in" />
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+        <div class="col-span-2 md:col-span-1">
+          <label class="text-xs">Refugo</label>
+          <input data-role="refugo" type="number" min="0" value="${it.qtd_refugo}" class="ret-side-in" />
+        </div>
+        <div class="col-span-2 md:col-span-1">
+          <label class="text-xs">Conserto</label>
+          <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in" />
+        </div>
+        <div class="col-span-1 md:col-span-1 text-right">
+          <div class="text-[10px] text-slate-500">Total item</div>
+          <div class="text-sm font-bold" data-role="tot-qtd">0</div>
+          <div class="text-[10px] text-emerald-700 font-semibold" data-role="tot-val">R$ 0,00</div>
+        </div>
+        <div class="col-span-5 md:col-span-12">
+          <input data-role="obs" placeholder="Observação do item (opcional)"
+                 value="${String(it.observacao || '').replace(/"/g, '&quot;')}" />
+        </div>
+      </div>`}
+    `;
+    return cardEl;
   }
-  card.querySelectorAll('.ret-in').forEach(i => i.addEventListener('input', recalc));
-  $('#m-boa').addEventListener('input', () => { $('#m-boa').dataset.manual = '1'; });
-  if (editing) $('#m-boa').dataset.manual = '1'; // não sobrescreve em edit
-  $('#m-cancel').onclick = () => m.remove();
-  $('#m-save').onclick = async () => {
-    const grade = Array.from(card.querySelectorAll('.ret-in')).map(i => ({ tamanho: i.dataset.tam, qtd: fmt.safeNum(i.value) })).filter(g => g.qtd > 0);
+
+  state.items.forEach((it, i) => itemsWrap.appendChild(renderItem(it, i)));
+
+  // Recalcula totais por item e total geral
+  function recalc() {
+    let tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
+    state.items.forEach((it, i) => {
+      const cardEl = itemsWrap.querySelector(`[data-idx="${i}"]`);
+      if (!cardEl) return;
+      let boa = 0;
+      cardEl.querySelectorAll('input[data-role="grade"]').forEach(inp => {
+        const v = fmt.safeNum(inp.value);
+        const max = fmt.safeNum(inp.dataset.max);
+        // marca visualmente se exceder o máximo
+        inp.classList.toggle('border-red-500', v > max);
+        boa += v;
+        it.gradeInput[inp.dataset.tam] = v;
+      });
+      const refInp = cardEl.querySelector('input[data-role="refugo"]');
+      const conInp = cardEl.querySelector('input[data-role="conserto"]');
+      const ref = refInp ? fmt.safeNum(refInp.value) : 0;
+      const con = conInp ? fmt.safeNum(conInp.value) : 0;
+      it.qtd_refugo = ref;
+      it.qtd_conserto = con;
+      const obsInp = cardEl.querySelector('input[data-role="obs"]');
+      if (obsInp) it.observacao = obsInp.value;
+
+      const totItem = boa + ref + con;
+      const valItem = boa * it.preco_unit;
+
+      const totQtdEl = cardEl.querySelector('[data-role="tot-qtd"]');
+      const totValEl = cardEl.querySelector('[data-role="tot-val"]');
+      if (totQtdEl) {
+        totQtdEl.textContent = fmt.int(totItem);
+        totQtdEl.classList.toggle('text-red-600', totItem > it.qtd_disponivel);
+      }
+      if (totValEl) totValEl.textContent = `R$ ${fmt.num(valItem)}`;
+
+      tBoa += boa; tRef += ref; tCon += con; tVal += valItem;
+    });
+    const tQtd = tBoa + tRef + tCon;
+    card.querySelector('#tg-qtd').textContent = fmt.int(tQtd);
+    card.querySelector('#tg-boa').textContent = fmt.int(tBoa);
+    card.querySelector('#tg-ref').textContent = fmt.int(tRef);
+    card.querySelector('#tg-con').textContent = fmt.int(tCon);
+    card.querySelector('#tg-val').textContent = fmt.num(tVal);
+  }
+
+  // Bind global de inputs
+  itemsWrap.addEventListener('input', recalc);
+  recalc();
+
+  card.querySelector('#m-cancel').onclick = () => m.remove();
+  card.querySelector('#m-save').onclick = async () => {
+    // Monta payload por item
+    const itensPayload = [];
+    state.items.forEach((it, i) => {
+      if (it.qtd_disponivel <= 0) return;
+      const grade = Object.entries(it.gradeInput)
+        .map(([tamanho, qtd]) => ({ tamanho, qtd: fmt.safeNum(qtd) }))
+        .filter(g => g.qtd > 0);
+      const qtdBoa = grade.reduce((a, g) => a + g.qtd, 0);
+      const qtdRef = fmt.safeNum(it.qtd_refugo);
+      const qtdCon = fmt.safeNum(it.qtd_conserto);
+      const tot = qtdBoa + qtdRef + qtdCon;
+      if (tot <= 0) return;
+      // Validação local: total não excede disponível
+      if (tot > it.qtd_disponivel) {
+        toast(`Item ${it.cod_ref}/${it.cor}: total ${tot} excede disponível (${it.qtd_disponivel})`, 'error');
+        throw new Error('valid');
+      }
+      // Validação local: cada tamanho ≤ máx
+      for (const g of grade) {
+        const max = fmt.safeNum(it.gradeMax[g.tamanho]);
+        if (g.qtd > max) {
+          toast(`Item ${it.cod_ref}/${it.cor} tam ${g.tamanho}: ${g.qtd} excede ${max}`, 'error');
+          throw new Error('valid');
+        }
+      }
+      itensPayload.push({
+        id_item: it.id_item,
+        qtd_boa: qtdBoa,
+        qtd_refugo: qtdRef,
+        qtd_conserto: qtdCon,
+        grade,
+        observacao: it.observacao || null,
+      });
+    });
+
+    if (itensPayload.length === 0) {
+      toast('Informe ao menos 1 item com quantidade retornada > 0', 'error');
+      return;
+    }
+
     const body = {
-      id_remessa: idRemessa, dt_retorno: $('#m-dtr').value,
-      qtd_boa: $('#m-boa').value, qtd_refugo: $('#m-ref').value, qtd_conserto: $('#m-cons').value,
-      valor_pago: $('#m-val').value || null, dt_pagamento: $('#m-dtp').value || null,
-      observacao: $('#m-obs').value.trim(), grade,
+      id_remessa: idRemessa,
+      dt_retorno: card.querySelector('#m-dtr').value,
+      dt_pagamento: card.querySelector('#m-dtp').value || null,
+      valor_pago: card.querySelector('#m-val').value || null,
+      observacao: card.querySelector('#m-obs').value.trim(),
+      itens: itensPayload,
     };
+
     try {
       if (editing) {
         await api('put', '/terc/retornos/' + idRetornoEdit, body);
@@ -5142,7 +5349,9 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       }
       m.remove();
       if (onSave) onSave();
-    } catch {}
+    } catch (e) {
+      if (e?.message === 'valid') return; // validação local, toast já mostrado
+    }
   };
 }
 

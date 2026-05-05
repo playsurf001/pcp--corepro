@@ -1717,126 +1717,404 @@ app.delete('/terc/remessas/:id', async (c) => {
  * RETORNOS (podem existir múltiplos retornos parciais por remessa)
  * ================================================================= */
 
-app.post('/terc/retornos', async (c) => {
-  const b = await c.req.json();
-  if (!b.id_remessa || !b.dt_retorno) return fail('id_remessa e dt_retorno são obrigatórios');
+/* =================================================================
+ * Helper: lê os itens da remessa com suas grades e calcula o saldo
+ * disponível por item (qtd enviada − soma de retornos anteriores).
+ * Retorna mapa { id_item: { ...item, gradeMap, gradeMaxMap, retornado } }
+ * ================================================================= */
+async function _itensRemessaComSaldo(DB: D1Database, idRemessa: number, idRetEditar: number = 0) {
+  const itens = (await DB.prepare(`
+    SELECT i.id_item, i.id_remessa, i.id_produto, i.cod_ref, i.desc_ref,
+           i.id_servico, i.cor, i.preco_unit, i.qtd_total, i.tempo_peca,
+           sv.desc_servico
+      FROM terc_remessa_itens i
+      LEFT JOIN terc_servicos sv ON sv.id_servico = i.id_servico
+     WHERE i.id_remessa = ? AND i.ativo = 1
+     ORDER BY i.ordem ASC, i.id_item ASC`).bind(idRemessa).all()).results as any[];
 
-  const rem = await c.env.DB.prepare('SELECT * FROM terc_remessas WHERE id_remessa=?').bind(toInt(b.id_remessa)).first<any>();
-  if (!rem) return fail('Remessa não encontrada', 404);
+  if (itens.length === 0) return [];
 
-  const grade: any[] = Array.isArray(b.grade) ? b.grade : [];
-  const qtd_total_grade = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
-  const qtd_boa = toInt(b.qtd_boa, qtd_total_grade);
-  const qtd_refugo = toInt(b.qtd_refugo);
-  const qtd_conserto = toInt(b.qtd_conserto);
-  const qtd_total = qtd_boa + qtd_refugo + qtd_conserto;
-  if (qtd_total <= 0) return fail('Quantidade retornada deve ser maior que zero');
-
-  // Valida se não excede remessa
-  const jaRet = await c.env.DB.prepare('SELECT COALESCE(SUM(qtd_boa+qtd_refugo+qtd_conserto),0) AS s FROM terc_retornos WHERE id_remessa=?').bind(toInt(b.id_remessa)).first<any>();
-  const totalAposRetorno = (Number(jaRet?.s) || 0) + qtd_total;
-  if (totalAposRetorno > Number(rem.qtd_total)) {
-    return fail(`Quantidade excede a remessa. Remessa: ${rem.qtd_total}, já retornado: ${jaRet?.s || 0}, tentativa: ${qtd_total}`, 400);
+  // Carrega grades enviadas por item
+  const ids = itens.map(i => i.id_item);
+  const placeholders = ids.map(() => '?').join(',');
+  const grades = (await DB.prepare(
+    `SELECT id_item, tamanho, qtd FROM terc_remessa_item_grade
+      WHERE id_item IN (${placeholders})`
+  ).bind(...ids).all()).results as any[];
+  const gradeByItem: Record<number, Record<string, number>> = {};
+  for (const g of grades) {
+    (gradeByItem[g.id_item] ||= {})[g.tamanho] = Number(g.qtd) || 0;
   }
 
-  const valor_pago = toNum(b.valor_pago, qtd_boa * Number(rem.preco_unit || 0));
+  // Carrega retornos anteriores por item (excluindo o que está em edição)
+  const retIts = (await DB.prepare(`
+    SELECT ri.id_item, ri.qtd_boa, ri.qtd_refugo, ri.qtd_conserto, ri.qtd_total
+      FROM terc_retorno_itens ri
+     WHERE ri.id_remessa = ?
+       AND (? = 0 OR ri.id_retorno <> ?)`
+  ).bind(idRemessa, idRetEditar, idRetEditar).all()).results as any[];
 
-  const r = await c.env.DB.prepare(`
-    INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto, valor_pago, dt_pagamento, observacao, criado_por)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(toInt(b.id_remessa), b.dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
-      valor_pago, b.dt_pagamento || null, b.observacao || null, getUser(c)).run();
-  const idRet = r.meta.last_row_id;
-  for (const g of grade) {
-    if (toInt(g.qtd) > 0) {
-      await c.env.DB.prepare('INSERT INTO terc_retorno_grade (id_retorno, tamanho, qtd) VALUES (?, ?, ?)')
-        .bind(idRet, g.tamanho, toInt(g.qtd)).run();
+  const retGrades = (await DB.prepare(`
+    SELECT rig.tamanho, rig.qtd, ri.id_item
+      FROM terc_retorno_item_grade rig
+      JOIN terc_retorno_itens ri ON ri.id_ret_item = rig.id_ret_item
+     WHERE ri.id_remessa = ?
+       AND (? = 0 OR ri.id_retorno <> ?)`
+  ).bind(idRemessa, idRetEditar, idRetEditar).all()).results as any[];
+
+  const retornadoByItem: Record<number, number> = {};
+  for (const r of retIts) {
+    retornadoByItem[r.id_item] = (retornadoByItem[r.id_item] || 0) + (Number(r.qtd_total) || 0);
+  }
+  const retGradeByItem: Record<number, Record<string, number>> = {};
+  for (const g of retGrades) {
+    (retGradeByItem[g.id_item] ||= {})[g.tamanho] = (retGradeByItem[g.id_item]?.[g.tamanho] || 0) + (Number(g.qtd) || 0);
+  }
+
+  return itens.map(it => {
+    const gEnv = gradeByItem[it.id_item] || {};
+    const gRet = retGradeByItem[it.id_item] || {};
+    const gradeMax: Record<string, number> = {};
+    for (const t of Object.keys(gEnv)) gradeMax[t] = Math.max(0, (gEnv[t] || 0) - (gRet[t] || 0));
+    const enviado = Object.values(gEnv).reduce((a, v) => a + v, 0) || Number(it.qtd_total) || 0;
+    const retornado = retornadoByItem[it.id_item] || 0;
+    // grade como array (preserva ordem dos tamanhos da grade enviada)
+    const gradeArr = Object.entries(gEnv).map(([tamanho, qtd]) => ({ tamanho, qtd }));
+    return {
+      ...it,
+      grade: gradeArr,
+      gradeEnviada: gEnv,
+      gradeMax,
+      qtd_enviada: enviado,
+      qtd_retornada_anterior: retornado,
+      qtd_disponivel: Math.max(0, enviado - retornado),
+    };
+  });
+}
+
+/* =================================================================
+ * GET /terc/remessas/:id/retorno-context
+ * Devolve a estrutura pronta para a tela "Registrar Retorno":
+ *   - cabeçalho da remessa
+ *   - itens[] com gradeEnviada, gradeMax (por tamanho) e disponível
+ * Aceita ?id_retorno=X para excluir esse retorno do cálculo (modo edição).
+ * ================================================================= */
+app.get('/terc/remessas/:id/retorno-context', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const idRetEdit = toInt(c.req.query('id_retorno') || 0);
+  const rem = await c.env.DB.prepare(`
+    SELECT r.*, t.nome_terc, sv.desc_servico
+      FROM terc_remessas r
+      LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc
+      LEFT JOIN terc_servicos sv ON sv.id_servico = r.id_servico
+     WHERE r.id_remessa = ?`).bind(id).first<any>();
+  if (!rem) return fail('Remessa não encontrada', 404);
+
+  const itens = await _itensRemessaComSaldo(c.env.DB, id, idRetEdit);
+
+  // Se for edição, devolve também os valores já lançados deste retorno (por item)
+  let retornoEdit: any = null;
+  if (idRetEdit) {
+    const r0 = await c.env.DB.prepare('SELECT * FROM terc_retornos WHERE id_retorno=?').bind(idRetEdit).first<any>();
+    if (r0) {
+      const ris = (await c.env.DB.prepare(`
+        SELECT ri.*, (SELECT json_group_array(json_object('tamanho', tamanho, 'qtd', qtd))
+                        FROM terc_retorno_item_grade WHERE id_ret_item = ri.id_ret_item) AS grade_json
+          FROM terc_retorno_itens ri WHERE ri.id_retorno = ?`).bind(idRetEdit).all()).results as any[];
+      retornoEdit = {
+        ...r0,
+        itens: ris.map(x => {
+          let g: any[] = [];
+          try { g = JSON.parse(x.grade_json || '[]'); } catch {}
+          return { ...x, grade: g };
+        }),
+      };
     }
   }
 
-  // 🤖 Atualiza status da remessa + financeiro automático
+  return c.json(ok({ remessa: rem, itens, retorno_edit: retornoEdit }));
+});
+
+/* =================================================================
+ * POST /terc/retornos — RETORNO MULTI-ITENS
+ * Aceita 2 formatos:
+ *   (A) NOVO: { id_remessa, dt_retorno, itens: [
+ *         { id_item, qtd_boa, qtd_refugo, qtd_conserto,
+ *           grade: [{tamanho, qtd}], valor (opcional) }, ... ] }
+ *   (B) LEGADO: { id_remessa, dt_retorno, qtd_boa, qtd_refugo, qtd_conserto,
+ *         grade: [...] } — converte automaticamente para 1 item (o 1º da remessa).
+ * ================================================================= */
+app.post('/terc/retornos', async (c) => {
+  const b = await c.req.json();
+  if (!b.id_remessa || !b.dt_retorno) return fail('id_remessa e dt_retorno são obrigatórios');
+  const idRem = toInt(b.id_remessa);
+
+  const rem = await c.env.DB.prepare('SELECT * FROM terc_remessas WHERE id_remessa=?').bind(idRem).first<any>();
+  if (!rem) return fail('Remessa não encontrada', 404);
+
+  // ---- Carrega itens da remessa (com saldo disponível por item) ----
+  const itensRem = await _itensRemessaComSaldo(c.env.DB, idRem, 0);
+  const mapItens = new Map<number, any>();
+  for (const it of itensRem) mapItens.set(it.id_item, it);
+
+  // ---- Normaliza payload em itens[] ----
+  let itensInput: any[] = Array.isArray(b.itens) ? b.itens : [];
+  if (itensInput.length === 0) {
+    // LEGADO: cabe em 1 item (o 1º da remessa)
+    if (itensRem.length === 0) return fail('Remessa não tem itens cadastrados', 400);
+    const principal = itensRem[0];
+    itensInput = [{
+      id_item: principal.id_item,
+      qtd_boa: toInt(b.qtd_boa),
+      qtd_refugo: toInt(b.qtd_refugo),
+      qtd_conserto: toInt(b.qtd_conserto),
+      grade: Array.isArray(b.grade) ? b.grade : [],
+    }];
+  }
+
+  // ---- Valida cada item retornado ----
+  const itensValid: any[] = [];
+  for (const x of itensInput) {
+    const idItem = toInt(x.id_item);
+    if (!idItem) return fail('Cada item retornado precisa de id_item');
+    const it = mapItens.get(idItem);
+    if (!it) return fail(`Item #${idItem} não pertence à remessa`, 400);
+
+    const grade: any[] = Array.isArray(x.grade) ? x.grade : [];
+    const totalGrade = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
+    let qtdBoa = toInt(x.qtd_boa, totalGrade);
+    const qtdRef = toInt(x.qtd_refugo);
+    const qtdCon = toInt(x.qtd_conserto);
+    // Se grade veio mas qtd_boa não bate com a soma da grade, prioriza a grade
+    if (totalGrade > 0 && qtdBoa === 0) qtdBoa = totalGrade;
+    const qtdTot = qtdBoa + qtdRef + qtdCon;
+    if (qtdTot <= 0) continue; // ignora item sem retorno
+
+    // Valida: total_item <= disponível (enviado − outros retornos)
+    if (qtdTot > it.qtd_disponivel) {
+      return fail(
+        `Item ${it.cod_ref || ''}/${it.cor || '?'}: total ${qtdTot} excede o disponível (${it.qtd_disponivel}).`,
+        400,
+      );
+    }
+    // Valida grade: qtd por tamanho <= máx do tamanho disponível
+    for (const g of grade) {
+      const max = it.gradeMax[g.tamanho] || 0;
+      if ((toInt(g.qtd) || 0) > max) {
+        return fail(
+          `Item ${it.cod_ref || ''}/${it.cor || '?'} tamanho ${g.tamanho}: ${g.qtd} excede o disponível (${max}).`,
+          400,
+        );
+      }
+    }
+
+    const preco = Number(it.preco_unit) || 0;
+    const valor = (x.valor != null ? toNum(x.valor) : qtdBoa * preco);
+    itensValid.push({
+      idItem, it, grade, qtdBoa, qtdRef, qtdCon, qtdTot, preco, valor,
+      observacao: x.observacao || null,
+    });
+  }
+  if (itensValid.length === 0) return fail('Informe ao menos 1 item com quantidade retornada > 0', 400);
+
+  // ---- Totaliza para gravação no cabeçalho ----
+  const totBoa = itensValid.reduce((a, x) => a + x.qtdBoa, 0);
+  const totRef = itensValid.reduce((a, x) => a + x.qtdRef, 0);
+  const totCon = itensValid.reduce((a, x) => a + x.qtdCon, 0);
+  const totQtd = totBoa + totRef + totCon;
+  // Valor total: usa o que veio em b.valor_pago se informado; senão soma valores por item
+  const totValor = b.valor_pago != null && b.valor_pago !== ''
+    ? toNum(b.valor_pago)
+    : itensValid.reduce((a, x) => a + x.valor, 0);
+
+  // ---- INSERT cabeçalho ----
+  const r = await c.env.DB.prepare(`
+    INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
+                               valor_pago, dt_pagamento, observacao, criado_por)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(idRem, b.dt_retorno, totQtd, totBoa, totRef, totCon,
+      totValor, b.dt_pagamento || null, b.observacao || null, getUser(c)).run();
+  const idRet = r.meta.last_row_id as number;
+
+  // ---- INSERT por item retornado + grade do item ----
+  const gradeAgreg: Record<string, number> = {}; // p/ compat. terc_retorno_grade legado
+  for (const x of itensValid) {
+    const ri = await c.env.DB.prepare(`
+      INSERT INTO terc_retorno_itens
+        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_servico,
+         qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(idRet, x.idItem, idRem,
+        x.it.cod_ref, x.it.desc_ref, x.it.cor, x.it.id_servico,
+        x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao).run();
+    const idRi = ri.meta.last_row_id as number;
+    for (const g of x.grade) {
+      const q = toInt(g.qtd);
+      if (q > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_retorno_item_grade (id_ret_item, tamanho, qtd) VALUES (?, ?, ?)'
+        ).bind(idRi, g.tamanho, q).run();
+        gradeAgreg[g.tamanho] = (gradeAgreg[g.tamanho] || 0) + q;
+      }
+    }
+  }
+
+  // ---- Compat. legada: replica grade agregada em terc_retorno_grade ----
+  for (const [tam, q] of Object.entries(gradeAgreg)) {
+    if (q > 0) {
+      await c.env.DB.prepare('INSERT INTO terc_retorno_grade (id_retorno, tamanho, qtd) VALUES (?, ?, ?)')
+        .bind(idRet, tam, q).run();
+    }
+  }
+
+  // ---- Atualiza status da remessa ----
+  const jaRet = await c.env.DB.prepare(
+    'SELECT COALESCE(SUM(qtd_boa+qtd_refugo+qtd_conserto),0) AS s FROM terc_retornos WHERE id_remessa=?'
+  ).bind(idRem).first<any>();
+  const totalAposRetorno = Number(jaRet?.s) || 0;
   const completo = totalAposRetorno >= Number(rem.qtd_total);
   const novoStatus = completo ? 'Retornado' : 'Parcial';
-  // Soma valor pago acumulado neste retorno
-  const valorAcumulado = (Number(rem.valor_pago) || 0) + valor_pago;
-  // Se completo: gera pendência financeira automática
   const novoStatusFin = completo ? 'PendentePagamento' : (rem.status_fin || 'NaoFaturado');
 
   await c.env.DB.prepare(`UPDATE terc_remessas SET status=?, status_fin=?, dt_recebimento=COALESCE(dt_recebimento, ?) WHERE id_remessa=?`)
-    .bind(novoStatus, novoStatusFin, completo ? b.dt_retorno : null, toInt(b.id_remessa)).run();
+    .bind(novoStatus, novoStatusFin, completo ? b.dt_retorno : null, idRem).run();
 
-  // Evento timeline
   await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, ?, ?, ?)`)
-    .bind(toInt(b.id_remessa),
+    .bind(idRem,
       completo ? 'RETORNO_TOTAL' : 'RETORNO_PARCIAL',
-      `Retorno ${qtd_total} pç (boa: ${qtd_boa}, refugo: ${qtd_refugo}, conserto: ${qtd_conserto}) — R$ ${valor_pago.toFixed(2)}`,
+      `Retorno ${totQtd} pç em ${itensValid.length} item(ns) (boa: ${totBoa}, refugo: ${totRef}, conserto: ${totCon}) — R$ ${totValor.toFixed(2)}`,
       getUser(c)).run();
 
-  await audit(c, MOD, 'INS_RET', `retorno:${idRet}`, 'qtd_total', '', String(qtd_total));
+  await audit(c, MOD, 'INS_RET', `retorno:${idRet}`, 'qtd_total', '', String(totQtd));
   return c.json(ok({
     id: idRet, status_remessa: novoStatus, status_fin: novoStatusFin,
     total_retornado: totalAposRetorno, saldo: Number(rem.qtd_total) - totalAposRetorno,
-    valor_pago, valor_acumulado: valorAcumulado
+    itens_count: itensValid.length, qtd_boa: totBoa, qtd_refugo: totRef, qtd_conserto: totCon,
+    valor_pago: totValor,
   }));
 });
 
-// Editar retorno (PUT) — recalcula status da remessa e total pago
+/* =================================================================
+ * PUT /terc/retornos/:id — EDIÇÃO MULTI-ITENS
+ * Aceita 2 formatos (igual ao POST). Substitui todos os itens deste retorno.
+ * ================================================================= */
 app.put('/terc/retornos/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   const b = await c.req.json();
   const ret = await c.env.DB.prepare('SELECT * FROM terc_retornos WHERE id_retorno=?').bind(id).first<any>();
   if (!ret) return fail('Retorno não encontrado', 404);
-  const rem = await c.env.DB.prepare('SELECT * FROM terc_remessas WHERE id_remessa=?').bind(ret.id_remessa).first<any>();
+  const idRem = Number(ret.id_remessa);
+  const rem = await c.env.DB.prepare('SELECT * FROM terc_remessas WHERE id_remessa=?').bind(idRem).first<any>();
   if (!rem) return fail('Remessa associada não encontrada', 404);
 
-  const grade: any[] = Array.isArray(b.grade) ? b.grade : [];
-  const qtd_total_grade = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
-  const qtd_boa = toInt(b.qtd_boa, qtd_total_grade);
-  const qtd_refugo = toInt(b.qtd_refugo);
-  const qtd_conserto = toInt(b.qtd_conserto);
-  const qtd_total = qtd_boa + qtd_refugo + qtd_conserto;
-  if (qtd_total <= 0) return fail('Quantidade retornada deve ser maior que zero');
+  // Itens da remessa com saldo (excluindo este retorno do cálculo)
+  const itensRem = await _itensRemessaComSaldo(c.env.DB, idRem, id);
+  const mapItens = new Map<number, any>();
+  for (const it of itensRem) mapItens.set(it.id_item, it);
 
-  // Valida — soma dos demais retornos + este novo total não pode passar da remessa
-  const outros = await c.env.DB.prepare(
-    'SELECT COALESCE(SUM(qtd_boa+qtd_refugo+qtd_conserto),0) AS s FROM terc_retornos WHERE id_remessa=? AND id_retorno<>?'
-  ).bind(ret.id_remessa, id).first<any>();
-  const totalAposEdit = (Number(outros?.s) || 0) + qtd_total;
-  if (totalAposEdit > Number(rem.qtd_total)) {
-    return fail(
-      `Quantidade excede a remessa. Remessa: ${rem.qtd_total}, outros retornos: ${outros?.s || 0}, tentativa: ${qtd_total}`,
-      400,
-    );
+  // Normaliza itens[]
+  let itensInput: any[] = Array.isArray(b.itens) ? b.itens : [];
+  if (itensInput.length === 0) {
+    if (itensRem.length === 0) return fail('Remessa não tem itens cadastrados', 400);
+    const principal = itensRem[0];
+    itensInput = [{
+      id_item: principal.id_item,
+      qtd_boa: toInt(b.qtd_boa),
+      qtd_refugo: toInt(b.qtd_refugo),
+      qtd_conserto: toInt(b.qtd_conserto),
+      grade: Array.isArray(b.grade) ? b.grade : [],
+    }];
   }
 
-  const dt_retorno = b.dt_retorno || ret.dt_retorno;
-  const valor_pago = b.valor_pago != null && b.valor_pago !== ''
+  // Validação por item
+  const itensValid: any[] = [];
+  for (const x of itensInput) {
+    const idItem = toInt(x.id_item);
+    if (!idItem) return fail('Cada item retornado precisa de id_item');
+    const it = mapItens.get(idItem);
+    if (!it) return fail(`Item #${idItem} não pertence à remessa`, 400);
+    const grade: any[] = Array.isArray(x.grade) ? x.grade : [];
+    const totalGrade = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
+    let qtdBoa = toInt(x.qtd_boa, totalGrade);
+    const qtdRef = toInt(x.qtd_refugo);
+    const qtdCon = toInt(x.qtd_conserto);
+    if (totalGrade > 0 && qtdBoa === 0) qtdBoa = totalGrade;
+    const qtdTot = qtdBoa + qtdRef + qtdCon;
+    if (qtdTot <= 0) continue;
+    if (qtdTot > it.qtd_disponivel) {
+      return fail(`Item ${it.cod_ref || ''}/${it.cor || '?'}: total ${qtdTot} excede o disponível (${it.qtd_disponivel}).`, 400);
+    }
+    for (const g of grade) {
+      const max = it.gradeMax[g.tamanho] || 0;
+      if ((toInt(g.qtd) || 0) > max) {
+        return fail(`Item ${it.cod_ref || ''}/${it.cor || '?'} tamanho ${g.tamanho}: ${g.qtd} excede o disponível (${max}).`, 400);
+      }
+    }
+    const preco = Number(it.preco_unit) || 0;
+    const valor = (x.valor != null ? toNum(x.valor) : qtdBoa * preco);
+    itensValid.push({ idItem, it, grade, qtdBoa, qtdRef, qtdCon, qtdTot, preco, valor, observacao: x.observacao || null });
+  }
+  if (itensValid.length === 0) return fail('Informe ao menos 1 item com quantidade retornada > 0', 400);
+
+  const totBoa = itensValid.reduce((a, x) => a + x.qtdBoa, 0);
+  const totRef = itensValid.reduce((a, x) => a + x.qtdRef, 0);
+  const totCon = itensValid.reduce((a, x) => a + x.qtdCon, 0);
+  const totQtd = totBoa + totRef + totCon;
+  const totValor = b.valor_pago != null && b.valor_pago !== ''
     ? toNum(b.valor_pago)
-    : qtd_boa * Number(rem.preco_unit || 0);
+    : itensValid.reduce((a, x) => a + x.valor, 0);
+
+  const dt_retorno = b.dt_retorno || ret.dt_retorno;
   const dt_pagamento = b.dt_pagamento || null;
   const observacao = b.observacao != null ? b.observacao : ret.observacao;
 
   const valoresAntes = `boa:${ret.qtd_boa},ref:${ret.qtd_refugo},cons:${ret.qtd_conserto},val:${ret.valor_pago}`;
-  const valoresDepois = `boa:${qtd_boa},ref:${qtd_refugo},cons:${qtd_conserto},val:${valor_pago}`;
+  const valoresDepois = `boa:${totBoa},ref:${totRef},cons:${totCon},val:${totValor}`;
 
   await c.env.DB.prepare(`
     UPDATE terc_retornos
        SET dt_retorno=?, qtd_total=?, qtd_boa=?, qtd_refugo=?, qtd_conserto=?,
            valor_pago=?, dt_pagamento=?, observacao=?
      WHERE id_retorno=?`)
-    .bind(dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
-      valor_pago, dt_pagamento, observacao, id).run();
+    .bind(dt_retorno, totQtd, totBoa, totRef, totCon, totValor, dt_pagamento, observacao, id).run();
 
-  // Regrava grade do retorno
+  // Regrava itens (FK ON DELETE CASCADE limpa terc_retorno_item_grade)
+  await c.env.DB.prepare('DELETE FROM terc_retorno_itens WHERE id_retorno=?').bind(id).run();
   await c.env.DB.prepare('DELETE FROM terc_retorno_grade WHERE id_retorno=?').bind(id).run();
-  for (const g of grade) {
-    if (toInt(g.qtd) > 0) {
+
+  const gradeAgreg: Record<string, number> = {};
+  for (const x of itensValid) {
+    const ri = await c.env.DB.prepare(`
+      INSERT INTO terc_retorno_itens
+        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_servico,
+         qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, x.idItem, idRem,
+        x.it.cod_ref, x.it.desc_ref, x.it.cor, x.it.id_servico,
+        x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao).run();
+    const idRi = ri.meta.last_row_id as number;
+    for (const g of x.grade) {
+      const q = toInt(g.qtd);
+      if (q > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_retorno_item_grade (id_ret_item, tamanho, qtd) VALUES (?, ?, ?)'
+        ).bind(idRi, g.tamanho, q).run();
+        gradeAgreg[g.tamanho] = (gradeAgreg[g.tamanho] || 0) + q;
+      }
+    }
+  }
+  for (const [tam, q] of Object.entries(gradeAgreg)) {
+    if (q > 0) {
       await c.env.DB.prepare('INSERT INTO terc_retorno_grade (id_retorno, tamanho, qtd) VALUES (?, ?, ?)')
-        .bind(id, g.tamanho, toInt(g.qtd)).run();
+        .bind(id, tam, q).run();
     }
   }
 
-  // 🤖 Reavalia status da remessa
+  // Reavalia status da remessa
+  const sumAll = await c.env.DB.prepare(
+    'SELECT COALESCE(SUM(qtd_boa+qtd_refugo+qtd_conserto),0) AS s FROM terc_retornos WHERE id_remessa=?'
+  ).bind(idRem).first<any>();
+  const totalAposEdit = Number(sumAll?.s) || 0;
   let novoStatus = (rem.dt_envio ? 'Enviado' : 'AguardandoEnvio');
   if (totalAposEdit > 0 && totalAposEdit < Number(rem.qtd_total)) novoStatus = 'Parcial';
   else if (totalAposEdit >= Number(rem.qtd_total)) novoStatus = 'Retornado';
@@ -1844,16 +2122,17 @@ app.put('/terc/retornos/:id', async (c) => {
   const dt_recebimento = totalAposEdit >= Number(rem.qtd_total) ? dt_retorno : null;
   await c.env.DB.prepare(
     'UPDATE terc_remessas SET status=?, status_fin=?, dt_recebimento=COALESCE(?, dt_recebimento) WHERE id_remessa=?'
-  ).bind(novoStatus, novoStatusFin, dt_recebimento, ret.id_remessa).run();
+  ).bind(novoStatus, novoStatusFin, dt_recebimento, idRem).run();
 
   await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, 'RETORNO_EDITADO', ?, ?)`)
-    .bind(ret.id_remessa, `Retorno #${id} editado (${valoresAntes} → ${valoresDepois})`, getUser(c)).run().catch(() => {});
+    .bind(idRem, `Retorno #${id} editado (${valoresAntes} → ${valoresDepois})`, getUser(c)).run().catch(() => {});
 
   await audit(c, MOD, 'UPD_RET', `retorno:${id}`, 'totais', valoresAntes, valoresDepois);
   return c.json(ok({
     id, status_remessa: novoStatus, status_fin: novoStatusFin,
     total_retornado: totalAposEdit, saldo: Number(rem.qtd_total) - totalAposEdit,
-    qtd_boa, qtd_refugo, qtd_conserto, qtd_total, valor_pago,
+    qtd_boa: totBoa, qtd_refugo: totRef, qtd_conserto: totCon, qtd_total: totQtd,
+    valor_pago: totValor, itens_count: itensValid.length,
   }));
 });
 
