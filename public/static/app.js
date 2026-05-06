@@ -5042,6 +5042,36 @@ async function TERC_openColecoesModal(onSave) {
 
 // Modal de retorno — cria novo OU edita existente quando idRetornoEdit é informado.
 // Em modo edit: pré-preenche valores, NÃO subtrai a si mesmo do gradeMax e usa PUT.
+/**
+ * Distribui uma quantidade (refugo + conserto) sobre a grade
+ * SEMPRE começando pelo tamanho com MAIOR quantidade disponível.
+ * Retorna um mapa { tamanho: qtd_descontada } e o total que sobrou (não distribuído).
+ *
+ * Regras:
+ *  - Nunca gera valor negativo.
+ *  - Sempre reduz primeiro o maior. Empate: ordem da grade enviada.
+ *  - Se sobrar quantidade (> que a soma da grade), retorna 'sobra'.
+ */
+function _distribuirReducao(gradeAtual, ordemTamanhos, qtdReduzir) {
+  const restante = { ...gradeAtual };
+  const desconto = {};
+  let falta = Math.max(0, qtdReduzir | 0);
+  while (falta > 0) {
+    // encontra tamanho com MAIOR quantidade restante (>0)
+    let alvo = null, max = 0;
+    for (const t of ordemTamanhos) {
+      const v = restante[t] || 0;
+      if (v > max) { max = v; alvo = t; }
+    }
+    if (!alvo) break; // nada mais para tirar
+    const tirar = Math.min(falta, max);
+    restante[alvo] -= tirar;
+    desconto[alvo] = (desconto[alvo] || 0) + tirar;
+    falta -= tirar;
+  }
+  return { gradeAjustada: restante, desconto, sobra: falta };
+}
+
 async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   // Carrega contexto multi-itens (itens da remessa + grade enviada + saldo disponível por item)
   const editing = !!idRetornoEdit;
@@ -5075,14 +5105,47 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   }
 
   // Estado local da UI
+  // gradeRetornada = grade TOTAL que voltou (boas + refugo + conserto)
+  // refugo/conserto saem AUTOMATICAMENTE dos maiores tamanhos
+  // gradeBoas = gradeRetornada − distribuição(refugo + conserto)
   const state = {
     items: itensRem.map(it => {
       const ed = editByItem.get(Number(it.id_item));
-      const gradeEnv = fmt.safeArr(it.grade); // grade enviada
-      const gradeMax = it.gradeMax || {};     // disponível por tamanho
-      // Inicializa grade-input com o que já está lançado neste retorno (edição) ou 0
-      const gradeInput = {};
-      gradeEnv.forEach(g => { gradeInput[g.tamanho] = ed?.gradeMap?.[g.tamanho] || 0; });
+      const gradeEnv = fmt.safeArr(it.grade);
+      const gradeMax = it.gradeMax || {};
+      // No modo edição, a grade lançada na BD é a grade BOAS — para reconstruir
+      // a "grade retornada total" original, somamos refugo+conserto distribuídos
+      // sobre os mesmos maiores tamanhos. Aqui assumimos que o operador deve
+      // re-informar a grade retornada total. Para simplificar, em edição
+      // pré-carregamos gradeRetornada = gradeBoas + (refugo+conserto)
+      // distribuídos da forma inversa (no maior). Como é heurística, é igual
+      // ao que o usuário veria na tela ao salvar.
+      const gradeBoasEdit = ed?.gradeMap || {};
+      const gradeRetornada = {};
+      gradeEnv.forEach(g => { gradeRetornada[g.tamanho] = gradeBoasEdit[g.tamanho] || 0; });
+      // Re-distribui refugo+conserto de volta nos maiores tamanhos para reconstruir o total
+      if (ed && (ed.qtd_refugo + ed.qtd_conserto) > 0) {
+        const ord = gradeEnv.map(g => g.tamanho);
+        // Adiciona de volta no MAIOR tamanho que tinha no envio (gradeMax + boas)
+        const cap = {}; // capacidade restante no envio = enviado - já usado
+        ord.forEach(t => {
+          const env = (gradeMax[t] || 0) + (gradeBoasEdit[t] || 0); // máx absoluto que pode ter no retorno
+          cap[t] = Math.max(0, env - (gradeRetornada[t] || 0));
+        });
+        // distribui (ref+con) começando do maior cap
+        let falta = ed.qtd_refugo + ed.qtd_conserto;
+        while (falta > 0) {
+          let alvo = null, mx = 0;
+          for (const t of ord) {
+            if (cap[t] > mx) { mx = cap[t]; alvo = t; }
+          }
+          if (!alvo) break;
+          const add = Math.min(falta, cap[alvo]);
+          gradeRetornada[alvo] = (gradeRetornada[alvo] || 0) + add;
+          cap[alvo] -= add;
+          falta -= add;
+        }
+      }
       return {
         id_item: Number(it.id_item),
         cod_ref: it.cod_ref || '',
@@ -5090,15 +5153,15 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
         cor: it.cor || '',
         desc_servico: it.desc_servico || '',
         preco_unit: Number(it.preco_unit) || 0,
-        qtd_enviada: fmt.safeNum(it.qtd_total),
+        qtd_enviada: fmt.safeNum(it.qtd_enviada || it.qtd_total),
         qtd_disponivel: fmt.safeNum(it.qtd_disponivel),
-        gradeEnv,
-        gradeMax,
-        gradeInput,
+        gradeEnv,                    // [{tamanho, qtd}] ordenado
+        ordemTam: gradeEnv.map(g => g.tamanho),
+        gradeMax,                    // máx disponível por tamanho (já desconta retornos anteriores)
+        gradeRetornada,              // INPUT do usuário (total retornado por tamanho)
         qtd_refugo: ed?.qtd_refugo || 0,
         qtd_conserto: ed?.qtd_conserto || 0,
         observacao: ed?.observacao || '',
-        // boa é derivado da soma da grade — não precisa input separado
       };
     }),
   };
@@ -5108,11 +5171,9 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     ? `Editar Retorno · Remessa ${rem.num_controle}`
     : `Registrar Retorno · Remessa ${rem.num_controle}`;
   const dtVal = editing ? (retEdit.dt_retorno || dayjs().format('YYYY-MM-DD')) : dayjs().format('YYYY-MM-DD');
-  const valVal = editing && retEdit.valor_pago != null ? retEdit.valor_pago : '';
   const dtpVal = editing ? (retEdit.dt_pagamento || '') : '';
   const obsVal = editing ? (retEdit.observacao || '') : '';
 
-  // Paleta de cor para o badge da cor
   const colorBadge = (cor) => {
     if (!cor) return '<span class="text-slate-400">—</span>';
     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-slate-100 border border-slate-300">
@@ -5136,32 +5197,44 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
       <div><label>Data retorno *</label><input type="date" id="m-dtr" value="${dtVal}" /></div>
       <div><label>Data pagamento</label><input type="date" id="m-dtp" value="${dtpVal}" /></div>
-      <div><label>Valor pago total (R$) <span class="text-xs text-slate-400">(opcional — auto = soma dos itens)</span></label>
-        <input type="number" step="0.01" id="m-val" value="${valVal}" placeholder="auto" />
-      </div>
       <div class="md:col-span-3"><label>Observação geral</label>
         <input id="m-obs" value="${String(obsVal).replace(/"/g, '&quot;')}" />
       </div>
     </div>
 
+    <div class="bg-blue-50 border border-blue-200 p-2 rounded text-xs text-blue-800 mb-2">
+      <i class="fas fa-circle-info mr-1"></i>
+      <b>Como funciona:</b> informe na grade o <b>total que retornou de cada tamanho</b> (boas + refugo + conserto).
+      Ao digitar refugo / conserto, o sistema desconta automaticamente do <b>tamanho com maior quantidade</b>.
+      O <b>valor pago</b> é calculado apenas sobre as peças <b>boas</b> — refugo e conserto são informativos
+      e <u>não reduzem o pagamento</u>.
+    </div>
+
     <div class="text-sm font-semibold mb-2 text-slate-700">
       <i class="fas fa-boxes-stacked mr-1"></i>Itens da remessa
-      <span class="text-xs text-slate-500 font-normal">(preencha o retorno por item / cor / tamanho)</span>
     </div>
     <div id="ret-items-wrap" class="space-y-3"></div>
 
-    <div class="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded flex items-center justify-between">
-      <div class="text-sm">
-        <div><b>Total geral retornado:</b> <span id="tg-qtd">0</span> pç
-          (boas <span id="tg-boa">0</span> · refugo <span id="tg-ref">0</span> · conserto <span id="tg-con">0</span>)
+    <div class="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="text-sm space-y-1">
+          <div class="flex flex-wrap gap-x-4 gap-y-1">
+            <span><b>Boas:</b> <span id="tg-boa" class="font-mono">0</span></span>
+            <span><b>Refugo:</b> <span id="tg-ref" class="font-mono text-amber-700">0</span></span>
+            <span><b>Conserto:</b> <span id="tg-con" class="font-mono text-orange-700">0</span></span>
+            <span><b>Retornado:</b> <span id="tg-qtd" class="font-mono">0</span> pç</span>
+          </div>
+          <div class="text-base font-semibold text-emerald-800">
+            <i class="fas fa-money-bill-wave mr-1"></i>Pago: R$ <span id="tg-val">0,00</span>
+            <span class="text-xs text-slate-500 font-normal ml-1">(boas × preço unitário)</span>
+          </div>
         </div>
-        <div class="text-xs text-slate-600 mt-1">Valor calculado: R$ <span id="tg-val">0,00</span></div>
-      </div>
-      <div class="flex gap-2">
-        <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
-        <button id="m-save" class="btn btn-primary">
-          <i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}
-        </button>
+        <div class="flex gap-2">
+          <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+          <button id="m-save" class="btn btn-primary">
+            <i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -5195,43 +5268,52 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       </div>
 
       ${semSaldo ? `<div class="text-xs text-slate-500 italic">Item já totalmente retornado.</div>` : `
-      <div class="grid grid-cols-5 md:grid-cols-12 gap-2 items-end">
-        <div class="col-span-5 md:col-span-9">
-          <div class="text-xs text-slate-500 mb-1">Grade retornada
-            <span class="text-slate-400">(máx por tamanho = enviado − retornos anteriores)</span>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">
+          Grade retornada (total) <span class="text-slate-400">— máx por tamanho = enviado − retornos anteriores</span>
+        </div>
+        <div class="grid grid-cols-5 md:grid-cols-10 gap-1 mb-2">
+          ${it.gradeEnv.map(g => {
+            const max = fmt.safeNum(it.gradeMax[g.tamanho]);
+            const cur = fmt.safeNum(it.gradeRetornada[g.tamanho]);
+            return `<div class="text-center" data-tam-wrap="${g.tamanho}">
+              <div class="text-[10px] font-mono text-slate-500">${g.tamanho}
+                <span class="text-slate-400">(${max})</span>
+              </div>
+              <input data-role="grade" data-tam="${g.tamanho}" data-max="${max}"
+                     type="number" min="0" max="${max}" value="${cur}"
+                     class="text-center ret-grade-in" />
+              <div class="text-[10px] font-semibold text-emerald-700" data-role="boa-tam">
+                ${fmt.int(cur)}<span class="text-slate-400 font-normal"> boas</span>
+              </div>
+              <div class="text-[10px] text-red-600 hidden" data-role="reduz-tam">
+                <i class="fas fa-arrow-down-long"></i> <span data-role="reduz-val">0</span>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+          <div>
+            <label class="text-xs text-amber-700"><i class="fas fa-triangle-exclamation mr-1"></i>Refugo</label>
+            <input data-role="refugo" type="number" min="0" value="${it.qtd_refugo}" class="ret-side-in border-amber-300" />
           </div>
-          <div class="grid grid-cols-5 md:grid-cols-10 gap-1">
-            ${it.gradeEnv.map(g => {
-              const max = fmt.safeNum(it.gradeMax[g.tamanho]);
-              const cur = fmt.safeNum(it.gradeInput[g.tamanho]);
-              return `<div class="text-center">
-                <div class="text-[10px] font-mono text-slate-500">${g.tamanho}
-                  <span class="text-slate-400">(${max})</span>
-                </div>
-                <input data-role="grade" data-tam="${g.tamanho}" data-max="${max}"
-                       type="number" min="0" max="${max}" value="${cur}"
-                       class="text-center ret-grade-in" />
-              </div>`;
-            }).join('')}
+          <div>
+            <label class="text-xs text-orange-700"><i class="fas fa-screwdriver mr-1"></i>Conserto</label>
+            <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in border-orange-300" />
+          </div>
+          <div class="md:col-span-2 text-xs text-slate-600 self-center">
+            <div>Retornado: <b data-role="tot-qtd">0</b> pç
+              <span class="text-slate-400">(boas <b data-role="tot-boa">0</b>)</span>
+            </div>
+            <div class="text-emerald-700 font-semibold">Pago: R$ <span data-role="tot-val">0,00</span></div>
+          </div>
+          <div class="md:col-span-2">
+            <input data-role="obs" placeholder="Observação do item (opcional)"
+                   value="${String(it.observacao || '').replace(/"/g, '&quot;')}" />
           </div>
         </div>
-        <div class="col-span-2 md:col-span-1">
-          <label class="text-xs">Refugo</label>
-          <input data-role="refugo" type="number" min="0" value="${it.qtd_refugo}" class="ret-side-in" />
-        </div>
-        <div class="col-span-2 md:col-span-1">
-          <label class="text-xs">Conserto</label>
-          <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in" />
-        </div>
-        <div class="col-span-1 md:col-span-1 text-right">
-          <div class="text-[10px] text-slate-500">Total item</div>
-          <div class="text-sm font-bold" data-role="tot-qtd">0</div>
-          <div class="text-[10px] text-emerald-700 font-semibold" data-role="tot-val">R$ 0,00</div>
-        </div>
-        <div class="col-span-5 md:col-span-12">
-          <input data-role="obs" placeholder="Observação do item (opcional)"
-                 value="${String(it.observacao || '').replace(/"/g, '&quot;')}" />
-        </div>
+        <div class="text-xs text-red-600 mt-1 hidden" data-role="err"></div>
       </div>`}
     `;
     return cardEl;
@@ -5245,96 +5327,184 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     state.items.forEach((it, i) => {
       const cardEl = itemsWrap.querySelector(`[data-idx="${i}"]`);
       if (!cardEl) return;
-      let boa = 0;
+      const errEl = cardEl.querySelector('[data-role="err"]');
+
+      // 1) Lê grade retornada (total que voltou por tamanho) e clampa em [0, máx]
+      const gradeRet = {};
       cardEl.querySelectorAll('input[data-role="grade"]').forEach(inp => {
-        const v = fmt.safeNum(inp.value);
         const max = fmt.safeNum(inp.dataset.max);
-        // marca visualmente se exceder o máximo
+        let v = fmt.safeNum(inp.value);
+        if (v < 0) v = 0;
+        // visual: borda vermelha se exceder o máx (não trunca o input do usuário)
         inp.classList.toggle('border-red-500', v > max);
-        boa += v;
-        it.gradeInput[inp.dataset.tam] = v;
+        gradeRet[inp.dataset.tam] = v;
+        it.gradeRetornada[inp.dataset.tam] = v;
       });
+      const totalGrade = Object.values(gradeRet).reduce((a, v) => a + v, 0);
+
+      // 2) Refugo / Conserto solicitados
       const refInp = cardEl.querySelector('input[data-role="refugo"]');
       const conInp = cardEl.querySelector('input[data-role="conserto"]');
-      const ref = refInp ? fmt.safeNum(refInp.value) : 0;
-      const con = conInp ? fmt.safeNum(conInp.value) : 0;
+      let ref = refInp ? Math.max(0, fmt.safeNum(refInp.value)) : 0;
+      let con = conInp ? Math.max(0, fmt.safeNum(conInp.value)) : 0;
+
+      // 3) VALIDAÇÃO: refugo+conserto não podem exceder o total da grade retornada
+      let errMsg = '';
+      if (ref + con > totalGrade) {
+        errMsg = `Refugo + Conserto (${ref + con}) excede o total retornado (${totalGrade}).`;
+      }
+
+      // 4) Distribui refugo + conserto começando pelo MAIOR tamanho
+      const totalReduzir = Math.min(ref + con, totalGrade);
+      const { gradeAjustada, desconto } = _distribuirReducao(gradeRet, it.ordemTam, totalReduzir);
+
+      // 5) Renderiza por tamanho: boas final, indicador de redução
+      cardEl.querySelectorAll('[data-tam-wrap]').forEach(wrap => {
+        const tam = wrap.dataset.tamWrap;
+        const boaTam = gradeAjustada[tam] || 0;
+        const redTam = desconto[tam] || 0;
+        const boaEl = wrap.querySelector('[data-role="boa-tam"]');
+        const redEl = wrap.querySelector('[data-role="reduz-tam"]');
+        const redVal = wrap.querySelector('[data-role="reduz-val"]');
+        if (boaEl) boaEl.innerHTML = `${fmt.int(boaTam)}<span class="text-slate-400 font-normal"> boas</span>`;
+        if (redEl) {
+          if (redTam > 0) {
+            redEl.classList.remove('hidden');
+            if (redVal) redVal.textContent = fmt.int(redTam);
+          } else {
+            redEl.classList.add('hidden');
+          }
+        }
+      });
+
+      // 6) Persiste no estado
       it.qtd_refugo = ref;
       it.qtd_conserto = con;
       const obsInp = cardEl.querySelector('input[data-role="obs"]');
       if (obsInp) it.observacao = obsInp.value;
+      it._gradeBoa = gradeAjustada;     // para gravar no payload
+      it._totalGrade = totalGrade;       // para validação no submit
 
-      const totItem = boa + ref + con;
+      const boa = totalGrade - totalReduzir;
       const valItem = boa * it.preco_unit;
+      const totRet = totalGrade;
+
+      // 7) Validação adicional: total > disponível
+      if (!errMsg && totRet > it.qtd_disponivel) {
+        errMsg = `Quantidade inválida: ${totRet} excede o disponível (${it.qtd_disponivel}).`;
+      }
+
+      // 8) UI: erro
+      if (errEl) {
+        if (errMsg) {
+          errEl.classList.remove('hidden');
+          errEl.innerHTML = `<i class="fas fa-circle-exclamation mr-1"></i>${errMsg}`;
+        } else {
+          errEl.classList.add('hidden');
+          errEl.textContent = '';
+        }
+      }
+
+      // 9) Card visual (vermelho se erro)
+      cardEl.classList.toggle('border-red-400', !!errMsg);
+      cardEl.classList.toggle('bg-red-50', !!errMsg);
 
       const totQtdEl = cardEl.querySelector('[data-role="tot-qtd"]');
+      const totBoaEl = cardEl.querySelector('[data-role="tot-boa"]');
       const totValEl = cardEl.querySelector('[data-role="tot-val"]');
-      if (totQtdEl) {
-        totQtdEl.textContent = fmt.int(totItem);
-        totQtdEl.classList.toggle('text-red-600', totItem > it.qtd_disponivel);
-      }
-      if (totValEl) totValEl.textContent = `R$ ${fmt.num(valItem)}`;
+      if (totQtdEl) totQtdEl.textContent = fmt.int(totRet);
+      if (totBoaEl) totBoaEl.textContent = fmt.int(boa);
+      if (totValEl) totValEl.textContent = fmt.num(valItem);
 
-      tBoa += boa; tRef += ref; tCon += con; tVal += valItem;
+      tBoa += boa; tRef += Math.min(ref, totalGrade); tCon += Math.min(con, Math.max(0, totalGrade - ref));
+      tVal += valItem;
     });
-    const tQtd = tBoa + tRef + tCon;
-    card.querySelector('#tg-qtd').textContent = fmt.int(tQtd);
+
     card.querySelector('#tg-boa').textContent = fmt.int(tBoa);
     card.querySelector('#tg-ref').textContent = fmt.int(tRef);
     card.querySelector('#tg-con').textContent = fmt.int(tCon);
+    card.querySelector('#tg-qtd').textContent = fmt.int(tBoa + tRef + tCon);
     card.querySelector('#tg-val').textContent = fmt.num(tVal);
   }
 
-  // Bind global de inputs
   itemsWrap.addEventListener('input', recalc);
   recalc();
 
   card.querySelector('#m-cancel').onclick = () => m.remove();
   card.querySelector('#m-save').onclick = async () => {
-    // Monta payload por item
+    // Monta payload por item — usa _gradeBoa (já com refugo/conserto descontados)
     const itensPayload = [];
-    state.items.forEach((it, i) => {
+    let blocked = false;
+    state.items.forEach((it) => {
       if (it.qtd_disponivel <= 0) return;
-      const grade = Object.entries(it.gradeInput)
+      const totalGrade = it._totalGrade || 0;
+      const ref = fmt.safeNum(it.qtd_refugo);
+      const con = fmt.safeNum(it.qtd_conserto);
+
+      // Consistência: refugo + conserto não podem exceder o total retornado
+      if (ref + con > totalGrade) {
+        toast(`Item ${it.cod_ref}/${it.cor}: Quantidade inválida — Refugo + Conserto (${ref + con}) excede o total retornado (${totalGrade}).`, 'error');
+        blocked = true; return;
+      }
+
+      // Total retornado não pode exceder disponível
+      if (totalGrade > it.qtd_disponivel) {
+        toast(`Item ${it.cod_ref}/${it.cor}: Quantidade inválida — excede o total disponível (${it.qtd_disponivel}).`, 'error');
+        blocked = true; return;
+      }
+
+      // Validação por tamanho: cada tamanho da grade retornada ≤ máx
+      for (const t of it.ordemTam) {
+        const v = fmt.safeNum(it.gradeRetornada[t]);
+        const max = fmt.safeNum(it.gradeMax[t]);
+        if (v > max) {
+          toast(`Item ${it.cod_ref}/${it.cor} tam ${t}: ${v} excede o disponível (${max}).`, 'error');
+          blocked = true; return;
+        }
+      }
+
+      // Grade BOAS = grade retornada − distribuição(refugo + conserto)
+      const gradeBoa = it._gradeBoa || {};
+      const grade = Object.entries(gradeBoa)
         .map(([tamanho, qtd]) => ({ tamanho, qtd: fmt.safeNum(qtd) }))
         .filter(g => g.qtd > 0);
       const qtdBoa = grade.reduce((a, g) => a + g.qtd, 0);
-      const qtdRef = fmt.safeNum(it.qtd_refugo);
-      const qtdCon = fmt.safeNum(it.qtd_conserto);
-      const tot = qtdBoa + qtdRef + qtdCon;
-      if (tot <= 0) return;
-      // Validação local: total não excede disponível
-      if (tot > it.qtd_disponivel) {
-        toast(`Item ${it.cod_ref}/${it.cor}: total ${tot} excede disponível (${it.qtd_disponivel})`, 'error');
-        throw new Error('valid');
+
+      const totItem = qtdBoa + ref + con;
+      if (totItem <= 0) return;
+
+      // Consistência final: grade boas + refugo + conserto = total retornado
+      if (qtdBoa + ref + con !== totalGrade) {
+        toast(`Item ${it.cod_ref}/${it.cor}: inconsistência interna na grade.`, 'error');
+        blocked = true; return;
       }
-      // Validação local: cada tamanho ≤ máx
-      for (const g of grade) {
-        const max = fmt.safeNum(it.gradeMax[g.tamanho]);
-        if (g.qtd > max) {
-          toast(`Item ${it.cod_ref}/${it.cor} tam ${g.tamanho}: ${g.qtd} excede ${max}`, 'error');
-          throw new Error('valid');
-        }
-      }
+
       itensPayload.push({
         id_item: it.id_item,
         qtd_boa: qtdBoa,
-        qtd_refugo: qtdRef,
-        qtd_conserto: qtdCon,
+        qtd_refugo: ref,
+        qtd_conserto: con,
+        // valor enviado explicitamente — backend prioriza esse valor (boas × preço)
+        valor: qtdBoa * it.preco_unit,
         grade,
         observacao: it.observacao || null,
       });
     });
 
+    if (blocked) return;
     if (itensPayload.length === 0) {
       toast('Informe ao menos 1 item com quantidade retornada > 0', 'error');
       return;
     }
 
+    // Valor pago total = soma dos valores por item (boas × preço)
+    const valorPagoTotal = itensPayload.reduce((a, x) => a + (x.valor || 0), 0);
+
     const body = {
       id_remessa: idRemessa,
       dt_retorno: card.querySelector('#m-dtr').value,
       dt_pagamento: card.querySelector('#m-dtp').value || null,
-      valor_pago: card.querySelector('#m-val').value || null,
+      valor_pago: valorPagoTotal,
       observacao: card.querySelector('#m-obs').value.trim(),
       itens: itensPayload,
     };
@@ -5349,9 +5519,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       }
       m.remove();
       if (onSave) onSave();
-    } catch (e) {
-      if (e?.message === 'valid') return; // validação local, toast já mostrado
-    }
+    } catch {}
   };
 }
 
