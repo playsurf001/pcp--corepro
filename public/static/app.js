@@ -225,17 +225,24 @@ function renderLayout() {
           <span id="today">${dayjs().format('DD/MM/YYYY')}</span>
           <span class="text-slate-300">|</span>
           ${Theme.toggleButtonHTML()}
-          <div class="relative">
-            <button id="user-btn" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-100" aria-label="Menu do usuário">
+          <div class="user-menu-wrap">
+            <button id="user-btn" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-100" aria-label="Menu do usuário" aria-haspopup="menu" aria-expanded="false">
               <span id="topbar-avatar">${avatarHTML(u, '')}</span>
               <span class="text-slate-700 hidden sm:inline"><b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span></span>
               <i class="fas fa-caret-down text-xs"></i>
             </button>
-            <div id="user-menu" class="hidden absolute right-0 mt-1 w-56 bg-white border rounded shadow-lg z-50">
-              <button id="btn-perfil" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50"><i class="fas fa-user-circle mr-2"></i>Meu perfil</button>
-              <button id="btn-trocar-senha" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50"><i class="fas fa-key mr-2"></i>Trocar senha</button>
-              <div class="border-t my-1"></div>
-              <button id="btn-logout" class="w-full text-left px-4 py-2 text-sm hover:bg-red-50 text-red-600"><i class="fas fa-sign-out-alt mr-2"></i>Sair</button>
+            <div id="user-menu" class="user-dropdown is-hidden" role="menu" aria-labelledby="user-btn">
+              <div class="user-dropdown-header">
+                <div id="user-dropdown-avatar">${avatarHTML(u, 'sm')}</div>
+                <div class="min-w-0 flex-1">
+                  <div class="nome">${u.nome || '—'}</div>
+                  <div class="perfil">${u.perfil || ''}</div>
+                </div>
+              </div>
+              <button id="btn-perfil" class="user-dropdown-item" role="menuitem"><i class="fas fa-user-circle"></i><span>Meu perfil</span></button>
+              <button id="btn-trocar-senha" class="user-dropdown-item" role="menuitem"><i class="fas fa-key"></i><span>Trocar senha</span></button>
+              <div class="user-dropdown-sep"></div>
+              <button id="btn-logout" class="user-dropdown-item is-danger" role="menuitem"><i class="fas fa-sign-out-alt"></i><span>Sair</span></button>
             </div>
           </div>
         </div>
@@ -278,20 +285,63 @@ function renderLayout() {
     if (window.innerWidth < 1024) closeSidebar();
   }));
 
-  // ----- Menu de usuário (topbar) -----
+  // ----- Menu de usuário (topbar) — dropdown FIXED com posicionamento dinâmico -----
   const btn = $('#user-btn'), menu = $('#user-menu');
-  btn.onclick = (ev) => { ev.stopPropagation(); menu.classList.toggle('hidden'); };
+
+  /** Posiciona o menu (position:fixed) alinhado ao botão (right-edge), abaixo dele.
+   *  Mobile: fixa no canto direito da tela com margem. */
+  function positionUserMenu() {
+    const r = btn.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const menuW = Math.min(240, vw - 16);
+    menu.style.width = menuW + 'px';
+    // top = bottom do botão + 6px
+    menu.style.top = (r.bottom + 6) + 'px';
+    // right alinhado ao botão (mas nunca colado na borda esquerda)
+    let right = Math.max(8, vw - r.right);
+    if (vw < 480) right = 8; // mobile: cola direita
+    menu.style.right = right + 'px';
+    menu.style.left = 'auto';
+  }
+
+  function openUserMenu() {
+    positionUserMenu();
+    menu.classList.remove('is-hidden');
+    menu.classList.add('is-open');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+  function closeUserMenu() {
+    menu.classList.add('is-hidden');
+    menu.classList.remove('is-open');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+  function toggleUserMenu() {
+    menu.classList.contains('is-open') ? closeUserMenu() : openUserMenu();
+  }
+
+  btn.addEventListener('click', (ev) => { ev.stopPropagation(); toggleUserMenu(); });
+  // Click-fora fecha
   document.addEventListener('click', (e) => {
-    if (!btn.contains(e.target) && !menu.contains(e.target)) menu.classList.add('hidden');
+    if (!menu.classList.contains('is-open')) return;
+    if (!btn.contains(e.target) && !menu.contains(e.target)) closeUserMenu();
   });
+  // ESC fecha
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && menu.classList.contains('is-open')) closeUserMenu();
+  });
+  // Reposiciona em scroll/resize (menu fixed precisa acompanhar o botão)
+  window.addEventListener('scroll', () => { if (menu.classList.contains('is-open')) positionUserMenu(); }, true);
+  window.addEventListener('resize', () => { if (menu.classList.contains('is-open')) positionUserMenu(); });
+
   $('#btn-logout').onclick = async () => {
+    closeUserMenu();
     try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
     AUTH.clearToken(); AUTH.clearUser();
     location.hash = '';
     renderLogin('Sessão encerrada.');
   };
-  $('#btn-trocar-senha').onclick = () => { menu.classList.add('hidden'); openTrocarSenha(false); };
-  $('#btn-perfil').onclick = () => { menu.classList.add('hidden'); navigate('perfil'); };
+  $('#btn-trocar-senha').onclick = () => { closeUserMenu(); openTrocarSenha(false); };
+  $('#btn-perfil').onclick = () => { closeUserMenu(); navigate('perfil'); };
   // Theme toggle (sistema dual light/dark)
   Theme.bindToggle('#theme-toggle-btn');
 }
@@ -300,6 +350,7 @@ function renderLayout() {
 function refreshUserUI() {
   const u = state.user || {};
   const slot = $('#topbar-avatar'); if (slot) slot.innerHTML = avatarHTML(u, '');
+  const ddSlot = $('#user-dropdown-avatar'); if (ddSlot) ddSlot.innerHTML = avatarHTML(u, 'sm');
   const sb = $('.sidebar-user'); if (sb) {
     const av = sb.querySelector('.avatar-img,.avatar-fallback');
     if (av) av.outerHTML = avatarHTML(u, '');
@@ -309,6 +360,13 @@ function refreshUserUI() {
   const ub = $('#user-btn'); if (ub) {
     const span = ub.querySelector('span.text-slate-700');
     if (span) span.innerHTML = `<b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span>`;
+  }
+  // Atualiza header do dropdown (nome/perfil)
+  const dd = $('#user-menu'); if (dd) {
+    const ddNome = dd.querySelector('.user-dropdown-header .nome');
+    const ddPerf = dd.querySelector('.user-dropdown-header .perfil');
+    if (ddNome) ddNome.textContent = u.nome || '—';
+    if (ddPerf) ddPerf.textContent = u.perfil || '';
   }
 }
 window.refreshUserUI = refreshUserUI;
