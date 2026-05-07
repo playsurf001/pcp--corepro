@@ -150,6 +150,9 @@ const NAV = [
   { id: 'usuarios', label: 'Usuários', icon: 'fa-user-shield', group: 'Sistema', adminOnly: true },
   { id: 'parametros', label: 'Parâmetros', icon: 'fa-sliders-h', group: 'Sistema', adminOnly: true },
   { id: 'auditoria', label: 'Auditoria', icon: 'fa-history', group: 'Sistema', adminOnly: true },
+
+  // ==== Conta (visível a todos) — não aparece no menu lateral, só pelo topo/sidebar-user ====
+  // Marcado para não duplicar no NAV principal: agente acessa via topbar/sidebar-user.
 ];
 
 /**
@@ -160,9 +163,23 @@ const NAV = [
 function isAdmin() { return state.user?.perfil === 'admin'; }
 function podeAcessar(item) {
   if (!item) return false;
+  // 'perfil' é sempre acessível ao usuário autenticado
+  if (item && item.id === 'perfil') return true;
   if (isAdmin()) return true;
   return !!item.tercOnly;
 }
+
+/* Helpers de avatar (compartilhados pelo sidebar/topbar/perfil) */
+function avatarHTML(user, size /* 'sm'|'md'|'lg'|'' */) {
+  const cls = size ? ` ${size}` : '';
+  const u = user || {};
+  if (u.avatar_data) {
+    return `<img class="avatar-img${cls}" src="${u.avatar_data}" alt="${(u.nome||'').replace(/"/g,'&quot;')}" />`;
+  }
+  const ini = (u.nome || u.login || '?').trim().charAt(0).toUpperCase();
+  return `<span class="avatar-fallback${cls}" aria-hidden="true">${ini}</span>`;
+}
+window.avatarHTML = avatarHTML;
 
 function renderLayout() {
   const groups = {};
@@ -171,7 +188,8 @@ function renderLayout() {
 
   $('#app').innerHTML = `
   <div class="flex h-screen">
-    <aside id="sidebar" class="sidebar">
+    <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+    <aside id="sidebar" class="sidebar" aria-label="Menu principal">
       <a href="#dashboard" data-route="dashboard" class="sidebar-brand" title="CorePro — Dashboard">
         <img src="/static/logo-full.png" alt="CorePro" />
         <span class="sidebar-tagline">Onde sistemas se tornam negócio</span>
@@ -188,22 +206,35 @@ function renderLayout() {
           </div>
         `).join('')}
       </nav>
+      <a href="#perfil" data-route="perfil" class="sidebar-user" title="Editar perfil">
+        ${avatarHTML(u, '')}
+        <div class="flex-1 min-w-0">
+          <div class="nome">${u.nome || '—'}</div>
+          <div class="perfil">${u.perfil || ''}</div>
+        </div>
+        <i class="fas fa-cog text-xs opacity-60"></i>
+      </a>
     </aside>
     <div class="flex-1 flex flex-col overflow-hidden">
-      <header id="topbar" class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
-        <h2 id="page-title" class="text-lg font-semibold text-slate-800">Dashboard</h2>
+      <header id="topbar" class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between gap-3">
+        <button id="btn-hamburger" class="btn-hamburger" aria-label="Abrir menu" aria-controls="sidebar" aria-expanded="false">
+          <i class="fas fa-bars"></i>
+        </button>
+        <h2 id="page-title" class="text-lg font-semibold text-slate-800 flex-1 min-w-0">Dashboard</h2>
         <div class="text-sm text-slate-500 flex items-center gap-3">
           <span id="today">${dayjs().format('DD/MM/YYYY')}</span>
           <span class="text-slate-300">|</span>
           ${Theme.toggleButtonHTML()}
           <div class="relative">
-            <button id="user-btn" class="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-slate-100">
-              <i class="fas fa-user-circle text-brand text-lg"></i>
-              <span class="text-slate-700"><b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span></span>
+            <button id="user-btn" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-100" aria-label="Menu do usuário">
+              <span id="topbar-avatar">${avatarHTML(u, '')}</span>
+              <span class="text-slate-700 hidden sm:inline"><b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span></span>
               <i class="fas fa-caret-down text-xs"></i>
             </button>
-            <div id="user-menu" class="hidden absolute right-0 mt-1 w-52 bg-white border rounded shadow-lg z-50">
+            <div id="user-menu" class="hidden absolute right-0 mt-1 w-56 bg-white border rounded shadow-lg z-50">
+              <button id="btn-perfil" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50"><i class="fas fa-user-circle mr-2"></i>Meu perfil</button>
               <button id="btn-trocar-senha" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50"><i class="fas fa-key mr-2"></i>Trocar senha</button>
+              <div class="border-t my-1"></div>
               <button id="btn-logout" class="w-full text-left px-4 py-2 text-sm hover:bg-red-50 text-red-600"><i class="fas fa-sign-out-alt mr-2"></i>Sair</button>
             </div>
           </div>
@@ -213,13 +244,43 @@ function renderLayout() {
     </div>
   </div>`;
 
+  // ----- Hambúrguer + Drawer (mobile/tablet) -----
+  const sidebar = $('#sidebar');
+  const backdrop = $('#sidebar-backdrop');
+  const burger = $('#btn-hamburger');
+  function openSidebar() {
+    sidebar.classList.add('open');
+    backdrop.classList.add('open');
+    burger.setAttribute('aria-expanded', 'true');
+  }
+  function closeSidebar() {
+    sidebar.classList.remove('open');
+    backdrop.classList.remove('open');
+    burger.setAttribute('aria-expanded', 'false');
+  }
+  burger.addEventListener('click', () => {
+    sidebar.classList.contains('open') ? closeSidebar() : openSidebar();
+  });
+  backdrop.addEventListener('click', closeSidebar);
+  // Fechar com ESC
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sidebar.classList.contains('open')) closeSidebar();
+  });
+  // Fechar ao redimensionar para desktop
+  window.addEventListener('resize', () => {
+    if (window.innerWidth >= 1024 && sidebar.classList.contains('open')) closeSidebar();
+  });
+
+  // Cliques em itens do menu — navegam e fecham drawer no mobile
   $$('[data-route]').forEach((a) => a.addEventListener('click', (ev) => {
     ev.preventDefault();
     navigate(a.dataset.route);
+    if (window.innerWidth < 1024) closeSidebar();
   }));
 
+  // ----- Menu de usuário (topbar) -----
   const btn = $('#user-btn'), menu = $('#user-menu');
-  btn.onclick = () => menu.classList.toggle('hidden');
+  btn.onclick = (ev) => { ev.stopPropagation(); menu.classList.toggle('hidden'); };
   document.addEventListener('click', (e) => {
     if (!btn.contains(e.target) && !menu.contains(e.target)) menu.classList.add('hidden');
   });
@@ -229,10 +290,28 @@ function renderLayout() {
     location.hash = '';
     renderLogin('Sessão encerrada.');
   };
-  $('#btn-trocar-senha').onclick = () => openTrocarSenha(false);
+  $('#btn-trocar-senha').onclick = () => { menu.classList.add('hidden'); openTrocarSenha(false); };
+  $('#btn-perfil').onclick = () => { menu.classList.add('hidden'); navigate('perfil'); };
   // Theme toggle (sistema dual light/dark)
   Theme.bindToggle('#theme-toggle-btn');
 }
+
+/** Reaplica avatar/nome em sidebar e topbar (chamado após salvar perfil) */
+function refreshUserUI() {
+  const u = state.user || {};
+  const slot = $('#topbar-avatar'); if (slot) slot.innerHTML = avatarHTML(u, '');
+  const sb = $('.sidebar-user'); if (sb) {
+    const av = sb.querySelector('.avatar-img,.avatar-fallback');
+    if (av) av.outerHTML = avatarHTML(u, '');
+    const nome = sb.querySelector('.nome'); if (nome) nome.textContent = u.nome || '—';
+    const perf = sb.querySelector('.perfil'); if (perf) perf.textContent = u.perfil || '';
+  }
+  const ub = $('#user-btn'); if (ub) {
+    const span = ub.querySelector('span.text-slate-700');
+    if (span) span.innerHTML = `<b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span>`;
+  }
+}
+window.refreshUserUI = refreshUserUI;
 
 /**
  * Rota inicial padrão.
@@ -5044,30 +5123,37 @@ async function TERC_openColecoesModal(onSave) {
 // Em modo edit: pré-preenche valores, NÃO subtrai a si mesmo do gradeMax e usa PUT.
 /**
  * Distribui uma quantidade (refugo + conserto) sobre a grade
- * SEMPRE começando pelo tamanho com MAIOR quantidade disponível.
+ * SEMPRE começando pelo tamanho com MENOR quantidade > 0.
  * Retorna um mapa { tamanho: qtd_descontada } e o total que sobrou (não distribuído).
  *
  * Regras:
  *  - Nunca gera valor negativo.
- *  - Sempre reduz primeiro o maior. Empate: ordem da grade enviada.
+ *  - Sempre reduz primeiro o MENOR (>0). Empate por valor: ordem da grade enviada.
+ *  - Quando o menor zerar, passa para o próximo menor (>0).
  *  - Se sobrar quantidade (> que a soma da grade), retorna 'sobra'.
+ *
+ * Exemplo: { P:3, M:3, G:3, GG:1 }, reduzir 2:
+ *   1ª iteração: menor>0 = GG(1) → tira 1 → GG=0, falta=1
+ *   2ª iteração: menores>0 são P/M/G (todos =3); P vem primeiro na ordem → tira 1 de P → P=2
+ *   resultado: { P:2, M:3, G:3, GG:0 }, total = 8
  */
 function _distribuirReducao(gradeAtual, ordemTamanhos, qtdReduzir) {
   const restante = { ...gradeAtual };
   const desconto = {};
   let falta = Math.max(0, qtdReduzir | 0);
   while (falta > 0) {
-    // encontra tamanho com MAIOR quantidade restante (>0)
-    let alvo = null, max = 0;
+    // encontra tamanho com MENOR quantidade restante (>0)
+    let alvo = null, min = Infinity;
     for (const t of ordemTamanhos) {
       const v = restante[t] || 0;
-      if (v > max) { max = v; alvo = t; }
+      if (v > 0 && v < min) { min = v; alvo = t; }
     }
     if (!alvo) break; // nada mais para tirar
-    const tirar = Math.min(falta, max);
-    restante[alvo] -= tirar;
-    desconto[alvo] = (desconto[alvo] || 0) + tirar;
-    falta -= tirar;
+    // tira 1 por iteração para respeitar precisão "de 1 em 1"
+    // (garante o comportamento: zera o menor, depois passa para o próximo)
+    restante[alvo] -= 1;
+    desconto[alvo] = (desconto[alvo] || 0) + 1;
+    falta -= 1;
   }
   return { gradeAjustada: restante, desconto, sobra: falta };
 }
@@ -5105,47 +5191,15 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   }
 
   // Estado local da UI
-  // gradeRetornada = grade TOTAL que voltou (boas + refugo + conserto)
-  // refugo/conserto saem AUTOMATICAMENTE dos maiores tamanhos
-  // gradeBoas = gradeRetornada − distribuição(refugo + conserto)
+  // REGRA NOVA: a grade do retorno é SEMPRE igual à grade ENVIADA (soma = total enviado).
+  // Refugo e conserto APENAS redistribuem a grade — não alteram total nem valor.
+  // Pagamento = total_enviado × preço_unit (sempre integral).
   const state = {
     items: itensRem.map(it => {
       const ed = editByItem.get(Number(it.id_item));
       const gradeEnv = fmt.safeArr(it.grade);
-      const gradeMax = it.gradeMax || {};
-      // No modo edição, a grade lançada na BD é a grade BOAS — para reconstruir
-      // a "grade retornada total" original, somamos refugo+conserto distribuídos
-      // sobre os mesmos maiores tamanhos. Aqui assumimos que o operador deve
-      // re-informar a grade retornada total. Para simplificar, em edição
-      // pré-carregamos gradeRetornada = gradeBoas + (refugo+conserto)
-      // distribuídos da forma inversa (no maior). Como é heurística, é igual
-      // ao que o usuário veria na tela ao salvar.
-      const gradeBoasEdit = ed?.gradeMap || {};
-      const gradeRetornada = {};
-      gradeEnv.forEach(g => { gradeRetornada[g.tamanho] = gradeBoasEdit[g.tamanho] || 0; });
-      // Re-distribui refugo+conserto de volta nos maiores tamanhos para reconstruir o total
-      if (ed && (ed.qtd_refugo + ed.qtd_conserto) > 0) {
-        const ord = gradeEnv.map(g => g.tamanho);
-        // Adiciona de volta no MAIOR tamanho que tinha no envio (gradeMax + boas)
-        const cap = {}; // capacidade restante no envio = enviado - já usado
-        ord.forEach(t => {
-          const env = (gradeMax[t] || 0) + (gradeBoasEdit[t] || 0); // máx absoluto que pode ter no retorno
-          cap[t] = Math.max(0, env - (gradeRetornada[t] || 0));
-        });
-        // distribui (ref+con) começando do maior cap
-        let falta = ed.qtd_refugo + ed.qtd_conserto;
-        while (falta > 0) {
-          let alvo = null, mx = 0;
-          for (const t of ord) {
-            if (cap[t] > mx) { mx = cap[t]; alvo = t; }
-          }
-          if (!alvo) break;
-          const add = Math.min(falta, cap[alvo]);
-          gradeRetornada[alvo] = (gradeRetornada[alvo] || 0) + add;
-          cap[alvo] -= add;
-          falta -= add;
-        }
-      }
+      // gradeEnviadaMap: { tamanho: qtd } — base imutável (vem da remessa)
+      const gradeEnviadaMap = Object.fromEntries(gradeEnv.map(g => [g.tamanho, fmt.safeNum(g.qtd)]));
       return {
         id_item: Number(it.id_item),
         cod_ref: it.cod_ref || '',
@@ -5155,10 +5209,9 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
         preco_unit: Number(it.preco_unit) || 0,
         qtd_enviada: fmt.safeNum(it.qtd_enviada || it.qtd_total),
         qtd_disponivel: fmt.safeNum(it.qtd_disponivel),
-        gradeEnv,                    // [{tamanho, qtd}] ordenado
+        gradeEnv,                                // [{tamanho, qtd}] ordenado (referência)
+        gradeEnviadaMap,                         // base imutável para distribuir
         ordemTam: gradeEnv.map(g => g.tamanho),
-        gradeMax,                    // máx disponível por tamanho (já desconta retornos anteriores)
-        gradeRetornada,              // INPUT do usuário (total retornado por tamanho)
         qtd_refugo: ed?.qtd_refugo || 0,
         qtd_conserto: ed?.qtd_conserto || 0,
         observacao: ed?.observacao || '',
@@ -5204,10 +5257,8 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
     <div class="bg-blue-50 border border-blue-200 p-2 rounded text-xs text-blue-800 mb-2">
       <i class="fas fa-circle-info mr-1"></i>
-      <b>Como funciona:</b> informe na grade o <b>total que retornou de cada tamanho</b> (boas + refugo + conserto).
-      Ao digitar refugo / conserto, o sistema desconta automaticamente do <b>tamanho com maior quantidade</b>.
-      O <b>valor pago</b> é calculado apenas sobre as peças <b>boas</b> — refugo e conserto são informativos
-      e <u>não reduzem o pagamento</u>.
+      O <b>valor é calculado com base no total enviado</b>. Refugo e conserto
+      <b>não reduzem o pagamento</b>, apenas ajustam a distribuição da grade retornada.
     </div>
 
     <div class="text-sm font-semibold mb-2 text-slate-700">
@@ -5270,21 +5321,19 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       ${semSaldo ? `<div class="text-xs text-slate-500 italic">Item já totalmente retornado.</div>` : `
       <div>
         <div class="text-xs text-slate-500 mb-1">
-          Grade retornada (total) <span class="text-slate-400">— máx por tamanho = enviado − retornos anteriores</span>
+          Grade retornada <span class="text-slate-400">— soma = total enviado (${fmt.int(it.qtd_enviada)} pç). Refugo/Conserto redistribuem do menor tamanho.</span>
         </div>
         <div class="grid grid-cols-5 md:grid-cols-10 gap-1 mb-2">
           ${it.gradeEnv.map(g => {
-            const max = fmt.safeNum(it.gradeMax[g.tamanho]);
-            const cur = fmt.safeNum(it.gradeRetornada[g.tamanho]);
+            const env = fmt.safeNum(g.qtd);
             return `<div class="text-center" data-tam-wrap="${g.tamanho}">
               <div class="text-[10px] font-mono text-slate-500">${g.tamanho}
-                <span class="text-slate-400">(${max})</span>
+                <span class="text-slate-400">(env ${env})</span>
               </div>
-              <input data-role="grade" data-tam="${g.tamanho}" data-max="${max}"
-                     type="number" min="0" max="${max}" value="${cur}"
-                     class="text-center ret-grade-in" />
-              <div class="text-[10px] font-semibold text-emerald-700" data-role="boa-tam">
-                ${fmt.int(cur)}<span class="text-slate-400 font-normal"> boas</span>
+              <div class="px-1 py-1 rounded border border-slate-200 bg-slate-50 text-center font-semibold text-sm"
+                   data-role="boa-tam-num">${fmt.int(env)}</div>
+              <div class="text-[10px] font-semibold text-emerald-700" data-role="boa-tam-lbl">
+                <span class="text-slate-400 font-normal">boas</span>
               </div>
               <div class="text-[10px] text-red-600 hidden" data-role="reduz-tam">
                 <i class="fas fa-arrow-down-long"></i> <span data-role="reduz-val">0</span>
@@ -5303,10 +5352,10 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
             <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in border-orange-300" />
           </div>
           <div class="md:col-span-2 text-xs text-slate-600 self-center">
-            <div>Retornado: <b data-role="tot-qtd">0</b> pç
-              <span class="text-slate-400">(boas <b data-role="tot-boa">0</b>)</span>
+            <div>Total: <b data-role="tot-qtd">${fmt.int(it.qtd_enviada)}</b> pç
+              <span class="text-slate-400">(boas <b data-role="tot-boa">${fmt.int(it.qtd_enviada)}</b>)</span>
             </div>
-            <div class="text-emerald-700 font-semibold">Pago: R$ <span data-role="tot-val">0,00</span></div>
+            <div class="text-emerald-700 font-semibold">Pago: R$ <span data-role="tot-val">${fmt.num(it.qtd_enviada * it.preco_unit)}</span></div>
           </div>
           <div class="md:col-span-2">
             <input data-role="obs" placeholder="Observação do item (opcional)"
@@ -5321,52 +5370,61 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
   state.items.forEach((it, i) => itemsWrap.appendChild(renderItem(it, i)));
 
-  // Recalcula totais por item e total geral
+  // Recalcula a grade ajustada (refugo/conserto saem do menor tamanho) e os totais.
+  // REGRAS:
+  //  - Grade retornada (soma) = total enviado, sempre. Não há input de grade.
+  //  - Pagamento = total_enviado × preço_unit (refugo/conserto NÃO descontam).
+  //  - Refugo + conserto > total_enviado → erro.
+  //  - Distribuição: tira primeiro do MENOR tamanho (>0).
   function recalc() {
-    let tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
+    let tEnv = 0, tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
     state.items.forEach((it, i) => {
       const cardEl = itemsWrap.querySelector(`[data-idx="${i}"]`);
       if (!cardEl) return;
       const errEl = cardEl.querySelector('[data-role="err"]');
 
-      // 1) Lê grade retornada (total que voltou por tamanho) e clampa em [0, máx]
-      const gradeRet = {};
-      cardEl.querySelectorAll('input[data-role="grade"]').forEach(inp => {
-        const max = fmt.safeNum(inp.dataset.max);
-        let v = fmt.safeNum(inp.value);
-        if (v < 0) v = 0;
-        // visual: borda vermelha se exceder o máx (não trunca o input do usuário)
-        inp.classList.toggle('border-red-500', v > max);
-        gradeRet[inp.dataset.tam] = v;
-        it.gradeRetornada[inp.dataset.tam] = v;
-      });
-      const totalGrade = Object.values(gradeRet).reduce((a, v) => a + v, 0);
+      // Item sem saldo (já 100% retornado) — pula
+      if (it.qtd_disponivel <= 0) return;
 
-      // 2) Refugo / Conserto solicitados
+      // 1) Refugo / Conserto solicitados
       const refInp = cardEl.querySelector('input[data-role="refugo"]');
       const conInp = cardEl.querySelector('input[data-role="conserto"]');
       let ref = refInp ? Math.max(0, fmt.safeNum(refInp.value)) : 0;
       let con = conInp ? Math.max(0, fmt.safeNum(conInp.value)) : 0;
 
-      // 3) VALIDAÇÃO: refugo+conserto não podem exceder o total da grade retornada
+      const totalEnviado = it.qtd_enviada;
+      const totalReduzir = ref + con;
+
+      // 2) VALIDAÇÃO: refugo + conserto não podem exceder o total enviado
       let errMsg = '';
-      if (ref + con > totalGrade) {
-        errMsg = `Refugo + Conserto (${ref + con}) excede o total retornado (${totalGrade}).`;
+      if (totalReduzir > totalEnviado) {
+        errMsg = 'Refugo + conserto excede o total enviado.';
       }
 
-      // 4) Distribui refugo + conserto começando pelo MAIOR tamanho
-      const totalReduzir = Math.min(ref + con, totalGrade);
-      const { gradeAjustada, desconto } = _distribuirReducao(gradeRet, it.ordemTam, totalReduzir);
+      // 3) Distribui (refugo + conserto) na grade enviada — tira do MENOR tamanho primeiro.
+      //    Se houver erro de excesso, ainda calculamos o que cabe para feedback visual.
+      const reduzirAplicado = Math.min(totalReduzir, totalEnviado);
+      const { gradeAjustada, desconto } = _distribuirReducao(
+        it.gradeEnviadaMap, it.ordemTam, reduzirAplicado
+      );
 
-      // 5) Renderiza por tamanho: boas final, indicador de redução
+      // 4) Renderiza por tamanho: número final + indicador de redução
       cardEl.querySelectorAll('[data-tam-wrap]').forEach(wrap => {
         const tam = wrap.dataset.tamWrap;
-        const boaTam = gradeAjustada[tam] || 0;
+        const finalTam = gradeAjustada[tam] || 0;
         const redTam = desconto[tam] || 0;
-        const boaEl = wrap.querySelector('[data-role="boa-tam"]');
+        const numEl = wrap.querySelector('[data-role="boa-tam-num"]');
         const redEl = wrap.querySelector('[data-role="reduz-tam"]');
         const redVal = wrap.querySelector('[data-role="reduz-val"]');
-        if (boaEl) boaEl.innerHTML = `${fmt.int(boaTam)}<span class="text-slate-400 font-normal"> boas</span>`;
+        if (numEl) {
+          numEl.textContent = fmt.int(finalTam);
+          // destaque visual quando há redução
+          numEl.classList.toggle('bg-amber-50', redTam > 0);
+          numEl.classList.toggle('border-amber-300', redTam > 0);
+          numEl.classList.toggle('text-amber-800', redTam > 0);
+          numEl.classList.toggle('bg-slate-50', redTam === 0);
+          numEl.classList.toggle('border-slate-200', redTam === 0);
+        }
         if (redEl) {
           if (redTam > 0) {
             redEl.classList.remove('hidden');
@@ -5377,24 +5435,19 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
         }
       });
 
-      // 6) Persiste no estado
+      // 5) Persiste no estado
       it.qtd_refugo = ref;
       it.qtd_conserto = con;
       const obsInp = cardEl.querySelector('input[data-role="obs"]');
       if (obsInp) it.observacao = obsInp.value;
-      it._gradeBoa = gradeAjustada;     // para gravar no payload
-      it._totalGrade = totalGrade;       // para validação no submit
+      it._gradeBoa = gradeAjustada;        // grade BOA por tamanho (após redistribuição)
+      it._totalEnviado = totalEnviado;     // total enviado (= total retornado)
 
-      const boa = totalGrade - totalReduzir;
-      const valItem = boa * it.preco_unit;
-      const totRet = totalGrade;
+      // 6) Cálculos finais — pagamento sempre = total_enviado × preço (refugo/conserto NÃO descontam)
+      const boa = totalEnviado - reduzirAplicado;
+      const valItem = totalEnviado * it.preco_unit;
 
-      // 7) Validação adicional: total > disponível
-      if (!errMsg && totRet > it.qtd_disponivel) {
-        errMsg = `Quantidade inválida: ${totRet} excede o disponível (${it.qtd_disponivel}).`;
-      }
-
-      // 8) UI: erro
+      // 7) UI: erro
       if (errEl) {
         if (errMsg) {
           errEl.classList.remove('hidden');
@@ -5405,25 +5458,28 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
         }
       }
 
-      // 9) Card visual (vermelho se erro)
+      // 8) Card visual (vermelho se erro)
       cardEl.classList.toggle('border-red-400', !!errMsg);
       cardEl.classList.toggle('bg-red-50', !!errMsg);
 
       const totQtdEl = cardEl.querySelector('[data-role="tot-qtd"]');
       const totBoaEl = cardEl.querySelector('[data-role="tot-boa"]');
       const totValEl = cardEl.querySelector('[data-role="tot-val"]');
-      if (totQtdEl) totQtdEl.textContent = fmt.int(totRet);
+      if (totQtdEl) totQtdEl.textContent = fmt.int(totalEnviado);
       if (totBoaEl) totBoaEl.textContent = fmt.int(boa);
       if (totValEl) totValEl.textContent = fmt.num(valItem);
 
-      tBoa += boa; tRef += Math.min(ref, totalGrade); tCon += Math.min(con, Math.max(0, totalGrade - ref));
+      tEnv += totalEnviado;
+      tBoa += boa;
+      tRef += ref;
+      tCon += con;
       tVal += valItem;
     });
 
     card.querySelector('#tg-boa').textContent = fmt.int(tBoa);
     card.querySelector('#tg-ref').textContent = fmt.int(tRef);
     card.querySelector('#tg-con').textContent = fmt.int(tCon);
-    card.querySelector('#tg-qtd').textContent = fmt.int(tBoa + tRef + tCon);
+    card.querySelector('#tg-qtd').textContent = fmt.int(tEnv);
     card.querySelector('#tg-val').textContent = fmt.num(tVal);
   }
 
@@ -5432,60 +5488,48 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
   card.querySelector('#m-cancel').onclick = () => m.remove();
   card.querySelector('#m-save').onclick = async () => {
-    // Monta payload por item — usa _gradeBoa (já com refugo/conserto descontados)
+    // Monta payload por item segundo a NOVA regra:
+    //  - Grade retornada (soma) = total ENVIADO do item, sempre.
+    //  - Refugo/Conserto apenas redistribuem a grade (saem do MENOR tamanho).
+    //  - qtd_boa = total_enviado − (refugo + conserto)
+    //  - valor_pago = total_enviado × preço_unit (refugo/conserto NÃO descontam)
     const itensPayload = [];
     let blocked = false;
     state.items.forEach((it) => {
       if (it.qtd_disponivel <= 0) return;
-      const totalGrade = it._totalGrade || 0;
+      const totalEnviado = fmt.safeNum(it.qtd_enviada);
       const ref = fmt.safeNum(it.qtd_refugo);
       const con = fmt.safeNum(it.qtd_conserto);
 
-      // Consistência: refugo + conserto não podem exceder o total retornado
-      if (ref + con > totalGrade) {
-        toast(`Item ${it.cod_ref}/${it.cor}: Quantidade inválida — Refugo + Conserto (${ref + con}) excede o total retornado (${totalGrade}).`, 'error');
+      // 1) Refugo + Conserto não podem exceder o total enviado
+      if (ref + con > totalEnviado) {
+        toast(`Item ${it.cod_ref}/${it.cor}: Refugo + conserto excede o total enviado.`, 'error');
         blocked = true; return;
       }
 
-      // Total retornado não pode exceder disponível
-      if (totalGrade > it.qtd_disponivel) {
-        toast(`Item ${it.cod_ref}/${it.cor}: Quantidade inválida — excede o total disponível (${it.qtd_disponivel}).`, 'error');
-        blocked = true; return;
-      }
-
-      // Validação por tamanho: cada tamanho da grade retornada ≤ máx
-      for (const t of it.ordemTam) {
-        const v = fmt.safeNum(it.gradeRetornada[t]);
-        const max = fmt.safeNum(it.gradeMax[t]);
-        if (v > max) {
-          toast(`Item ${it.cod_ref}/${it.cor} tam ${t}: ${v} excede o disponível (${max}).`, 'error');
-          blocked = true; return;
-        }
-      }
-
-      // Grade BOAS = grade retornada − distribuição(refugo + conserto)
+      // 2) Grade BOA já calculada por recalc() (refugo/conserto subtraídos do menor tamanho)
       const gradeBoa = it._gradeBoa || {};
       const grade = Object.entries(gradeBoa)
         .map(([tamanho, qtd]) => ({ tamanho, qtd: fmt.safeNum(qtd) }))
         .filter(g => g.qtd > 0);
       const qtdBoa = grade.reduce((a, g) => a + g.qtd, 0);
 
-      const totItem = qtdBoa + ref + con;
-      if (totItem <= 0) return;
-
-      // Consistência final: grade boas + refugo + conserto = total retornado
-      if (qtdBoa + ref + con !== totalGrade) {
-        toast(`Item ${it.cod_ref}/${it.cor}: inconsistência interna na grade.`, 'error');
+      // 3) Consistência: qtd_boa + refugo + conserto = total enviado
+      if (qtdBoa + ref + con !== totalEnviado) {
+        toast(`Item ${it.cod_ref}/${it.cor}: inconsistência interna na grade (${qtdBoa}+${ref}+${con}≠${totalEnviado}).`, 'error');
         blocked = true; return;
       }
+
+      // 4) Valor sempre = total_enviado × preço (refugo/conserto não reduzem)
+      const valorItem = totalEnviado * Number(it.preco_unit || 0);
 
       itensPayload.push({
         id_item: it.id_item,
         qtd_boa: qtdBoa,
         qtd_refugo: ref,
         qtd_conserto: con,
-        // valor enviado explicitamente — backend prioriza esse valor (boas × preço)
-        valor: qtdBoa * it.preco_unit,
+        // backend respeita este valor: total_enviado × preço (não boas × preço)
+        valor: valorItem,
         grade,
         observacao: it.observacao || null,
       });
@@ -7081,6 +7125,227 @@ ROUTES.terc_importador = async (main) => {
 };
 
 /* ============================================================
+ * PERFIL DO USUÁRIO — edição de dados pessoais e foto/avatar
+ * ============================================================ */
+ROUTES.perfil = async (main) => {
+  let p;
+  try { p = (await api('get', '/auth/perfil')).data; }
+  catch { main.innerHTML = '<div class="card p-6 text-red-600">Falha ao carregar perfil.</div>'; return; }
+
+  // Estado local p/ avatar
+  let novoAvatar = null;       // data URL pendente (se trocou)
+  let removerAvatar = false;
+  let avatarPreview = p.avatar_data || null;
+
+  function renderHeader() {
+    return `
+      <div class="page-header mb-4">
+        <h1 class="text-xl font-bold text-slate-800"><i class="fas fa-user-circle mr-2 text-brand"></i>Meu Perfil</h1>
+        <p class="text-sm text-slate-500">Gerencie seus dados pessoais, foto e senha de acesso.</p>
+      </div>`;
+  }
+
+  function avatarBoxHTML() {
+    const u = { ...p, avatar_data: avatarPreview };
+    return `
+      <div class="profile-avatar-box">
+        <div id="prof-av-slot">${avatarHTML(u, 'lg')}</div>
+        <div class="actions">
+          <button id="prof-av-pick" class="btn btn-secondary btn-sm" type="button">
+            <i class="fas fa-camera mr-1"></i>Trocar foto
+          </button>
+          <button id="prof-av-rem" class="btn btn-danger btn-sm" type="button" ${avatarPreview ? '' : 'disabled'}>
+            <i class="fas fa-trash mr-1"></i>Remover
+          </button>
+          <input id="prof-av-file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp" class="hidden" />
+        </div>
+        <div class="text-xs text-slate-500 text-center" style="max-width:200px;">
+          JPG, PNG ou WebP. Máx ~2 MB. Redimensionada para 256×256px automaticamente.
+        </div>
+      </div>`;
+  }
+
+  main.innerHTML = `
+    ${renderHeader()}
+    <div class="profile-grid">
+      ${avatarBoxHTML()}
+      <div>
+        <div class="profile-section">
+          <h4><i class="fas fa-id-card mr-2 text-brand"></i>Dados pessoais</h4>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label>Nome <span class="text-red-500">*</span></label>
+              <input id="prof-nome" type="text" value="${(p.nome||'').replace(/"/g,'&quot;')}" maxlength="120" required />
+            </div>
+            <div>
+              <label>Login <span class="text-red-500">*</span></label>
+              <input id="prof-login" type="text" value="${(p.login||'').replace(/"/g,'&quot;')}" maxlength="60" pattern="[a-zA-Z0-9_.\\-]+" required />
+              <div class="text-xs text-slate-500 mt-1">Letras, números, ponto, hífen e underscore.</div>
+            </div>
+            <div>
+              <label>E-mail</label>
+              <input id="prof-email" type="email" value="${(p.email||'').replace(/"/g,'&quot;')}" maxlength="160" placeholder="seu@email.com" />
+            </div>
+            <div>
+              <label>Perfil</label>
+              <input type="text" value="${p.perfil || ''}" disabled class="bg-slate-100" />
+            </div>
+          </div>
+          <div class="flex justify-end gap-2 mt-3">
+            <button id="prof-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar dados</button>
+          </div>
+        </div>
+
+        <div class="profile-section">
+          <h4><i class="fas fa-key mr-2 text-amber-600"></i>Alterar senha</h4>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label>Senha atual <span class="text-red-500">*</span></label>
+              <input id="pwa" type="password" autocomplete="current-password" />
+            </div>
+            <div>
+              <label>Nova senha (mín. 6) <span class="text-red-500">*</span></label>
+              <input id="pwn" type="password" autocomplete="new-password" />
+            </div>
+            <div>
+              <label>Confirmar nova <span class="text-red-500">*</span></label>
+              <input id="pwc" type="password" autocomplete="new-password" />
+            </div>
+          </div>
+          <div class="flex justify-end gap-2 mt-3">
+            <button id="pw-save" class="btn btn-primary"><i class="fas fa-shield-halved mr-1"></i>Atualizar senha</button>
+          </div>
+        </div>
+
+        <div class="profile-section">
+          <h4><i class="fas fa-circle-info mr-2 text-slate-500"></i>Informações da conta</h4>
+          <div class="text-sm text-slate-600 grid grid-cols-1 md:grid-cols-2 gap-2">
+            <div><b>ID:</b> ${p.id_usuario}</div>
+            <div><b>Criado em:</b> ${p.dt_criacao ? dayjs(p.dt_criacao).format('DD/MM/YYYY HH:mm') : '—'}</div>
+            <div><b>Último login:</b> ${p.ultimo_login ? dayjs(p.ultimo_login).format('DD/MM/YYYY HH:mm') : '—'}</div>
+            <div><b>Avatar atualizado:</b> ${p.avatar_atualizado ? dayjs(p.avatar_atualizado).format('DD/MM/YYYY HH:mm') : '—'}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ===== Avatar: pick / preview / redimensionar / remover =====
+  const fileInput = $('#prof-av-file');
+  $('#prof-av-pick').onclick = () => fileInput.click();
+  $('#prof-av-rem').onclick = () => {
+    if (!avatarPreview) return;
+    avatarPreview = null;
+    novoAvatar = null;
+    removerAvatar = true;
+    $('#prof-av-slot').innerHTML = avatarHTML({ ...p, avatar_data: null }, 'lg');
+    $('#prof-av-rem').disabled = true;
+  };
+  fileInput.onchange = async (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    if (!/^image\/(png|jpe?g|webp)$/i.test(f.type)) {
+      toast('Formato inválido. Use JPG, PNG ou WebP.', 'error'); return;
+    }
+    if (f.size > 5 * 1024 * 1024) {
+      toast('Imagem muito grande. Máx 5 MB antes do redimensionamento.', 'error'); return;
+    }
+    try {
+      const dataUrl = await _resizeImageToDataURL(f, 256, 256, 0.88);
+      novoAvatar = dataUrl;
+      avatarPreview = dataUrl;
+      removerAvatar = false;
+      $('#prof-av-slot').innerHTML = avatarHTML({ ...p, avatar_data: dataUrl }, 'lg');
+      $('#prof-av-rem').disabled = false;
+    } catch {
+      toast('Não foi possível processar a imagem.', 'error');
+    } finally {
+      fileInput.value = '';
+    }
+  };
+
+  // ===== Salvar dados pessoais (+ avatar se houver) =====
+  $('#prof-save').onclick = async () => {
+    const nome = $('#prof-nome').value.trim();
+    const login = $('#prof-login').value.trim();
+    const email = $('#prof-email').value.trim();
+    if (!nome) { toast('Informe seu nome.', 'warning'); return; }
+    if (!login || login.length < 3) { toast('Login inválido (mín. 3 caracteres).', 'warning'); return; }
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(login)) { toast('Login com caracteres inválidos.', 'warning'); return; }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('E-mail inválido.', 'warning'); return; }
+
+    const body = { nome, login, email };
+    if (removerAvatar) body.remover_avatar = true;
+    else if (novoAvatar) body.avatar_data = novoAvatar;
+
+    try {
+      const r = await api('put', '/auth/perfil', body);
+      const upd = r.data || {};
+      // Sincroniza estado global
+      Object.assign(p, upd);
+      if (state.user) {
+        state.user.nome = upd.nome;
+        state.user.login = upd.login;
+        state.user.email = upd.email;
+        state.user.avatar_data = upd.avatar_data;
+        state.user.avatar_mime = upd.avatar_mime;
+        AUTH.setUser(state.user);
+      }
+      novoAvatar = null;
+      removerAvatar = false;
+      avatarPreview = upd.avatar_data || null;
+      refreshUserUI();
+      toast('Perfil atualizado com sucesso!', 'success');
+    } catch {/* api() já mostra o erro */}
+  };
+
+  // ===== Alterar senha =====
+  $('#pw-save').onclick = async () => {
+    const sa = $('#pwa').value, sn = $('#pwn').value, sc = $('#pwc').value;
+    if (!sa || !sn || !sc) { toast('Preencha todos os campos de senha.', 'warning'); return; }
+    if (sn !== sc) { toast('A confirmação não confere.', 'error'); return; }
+    if (sn.length < 6) { toast('Nova senha precisa de pelo menos 6 caracteres.', 'error'); return; }
+    if (sn === sa) { toast('A nova senha deve ser diferente da atual.', 'warning'); return; }
+    try {
+      await api('put', '/auth/perfil/senha', { senha_atual: sa, senha_nova: sn, senha_confirma: sc });
+      $('#pwa').value = ''; $('#pwn').value = ''; $('#pwc').value = '';
+      toast('Senha alterada com sucesso.', 'success');
+    } catch {/* api() já mostra o erro */}
+  };
+};
+
+// Helper: redimensiona uma imagem (File) para data URL JPEG/PNG cabendo em maxW × maxH
+function _resizeImageToDataURL(file, maxW, maxH, quality) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const ratio = Math.min(maxW / img.width, maxH / img.height, 1);
+        const w = Math.round(img.width * ratio);
+        const h = Math.round(img.height * ratio);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        // Mantém PNG (com transparência) só se origem for PNG; resto vira JPEG (menor)
+        const isPng = /image\/png/i.test(file.type);
+        const out = isPng
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', quality || 0.88);
+        resolve(out);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ============================================================
  * TELA DE LOGIN
  * ============================================================ */
 function renderLogin(msg) {
@@ -7122,8 +7387,16 @@ function renderLogin(msg) {
         senha: $('#login-senha').value,
       });
       AUTH.setToken(r.data.data.token);
-      AUTH.setUser(r.data.data.usuario);
-      state.user = r.data.data.usuario;
+      // Busca perfil completo (com avatar/email) — fallback p/ resposta do login
+      let usuario = r.data.data.usuario;
+      try {
+        const me = await axios.get(API + '/auth/me', {
+          headers: { Authorization: 'Bearer ' + r.data.data.token }
+        });
+        if (me.data?.data) usuario = { ...usuario, ...me.data.data };
+      } catch {}
+      AUTH.setUser(usuario);
+      state.user = usuario;
       if (state.user.trocar_senha) {
         renderTrocarSenhaObrigatoria();
       } else {

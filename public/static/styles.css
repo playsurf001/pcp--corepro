@@ -1491,3 +1491,274 @@ canvas { transition: filter 0.3s; }
   .avoid-break { page-break-inside: avoid; }
   .rep-kpi { break-inside: avoid; }
 }
+
+/* ============================================================
+ * RESPONSIVIDADE GLOBAL (mobile/tablet/desktop)
+ * - Sidebar vira "drawer" (hambúrguer) em < 1024px
+ * - Tabelas com rolagem horizontal sem perder cabeçalho
+ * - Formulários em coluna única no mobile
+ * - Modais full-screen no mobile
+ * ============================================================ */
+
+/* Hambúrguer — escondido por padrão (desktop) */
+.btn-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  background: transparent;
+  border: 1px solid var(--border-1);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.15s ease;
+  flex-shrink: 0;
+}
+.btn-hamburger:hover { background: var(--surface-2); }
+.btn-hamburger:active { transform: scale(0.94); }
+.btn-hamburger i { font-size: 18px; }
+
+/* Backdrop do drawer (escuro, animado) — só visível no mobile com .open */
+.sidebar-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(2, 6, 23, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 45;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.sidebar-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ===== Avatar (topbar/sidebar/perfil) ===== */
+.avatar-img,
+.avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: linear-gradient(135deg, #3B82F6, #8B5CF6);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  border: 2px solid rgba(255,255,255,0.15);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.avatar-img.lg, .avatar-fallback.lg { width: 96px; height: 96px; font-size: 36px; border-width: 3px; }
+.avatar-img.md, .avatar-fallback.md { width: 56px; height: 56px; font-size: 22px; }
+.avatar-img.sm, .avatar-fallback.sm { width: 28px; height: 28px; font-size: 11px; }
+
+/* Avatar exibido na sidebar (rodapé) */
+.sidebar-user {
+  margin-top: auto;
+  padding: 12px 14px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  display: flex; align-items: center; gap: 10px;
+  font-size: 0.82rem;
+  color: #CBD5F5;
+}
+.sidebar-user .nome {
+  font-weight: 600;
+  color: #fff;
+  font-size: 0.86rem;
+  line-height: 1.1;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-user .perfil {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+
+/* ===== TABELAS RESPONSIVAS ===== */
+/* Wrapper genérico: dá scroll horizontal e mantém shadow */
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 8px;
+  border: 1px solid var(--border-1);
+  background: var(--surface-1);
+}
+.table-wrap > table { min-width: 100%; border-collapse: collapse; }
+.table-wrap > table thead { position: sticky; top: 0; z-index: 1; background: var(--surface-2); }
+
+/* Aplica wrapper automaticamente a todas as <table> dentro de .card / #main-content
+ * (envolvido por JS quando renderizar — usa overflow-x:auto direto também) */
+#main-content table { max-width: 100%; }
+#main-content .card { overflow-x: auto; }
+
+/* ============================================================
+ * BREAKPOINT TABLET (≤ 1024px) — sidebar recolhível como drawer
+ * ============================================================ */
+@media (max-width: 1023px) {
+  /* Sidebar vira drawer fixo deslizante */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 280px;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 4px 0 20px rgba(0,0,0,0.35);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  /* Hambúrguer aparece */
+  .btn-hamburger { display: inline-flex; }
+
+  /* Topbar mais compacto, com gap menor */
+  #topbar {
+    padding: 0.6rem 0.9rem !important;
+    gap: 0.5rem;
+  }
+  #topbar h2#page-title {
+    font-size: 1rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Conteúdo principal usa toda a largura */
+  #main-content { padding: 0.9rem !important; }
+  #app > div.flex.h-screen { display: block; height: auto; }
+  #app .flex-1.flex.flex-col.overflow-hidden { height: 100vh; overflow: hidden; }
+}
+
+/* ============================================================
+ * BREAKPOINT MOBILE (≤ 640px)
+ * ============================================================ */
+@media (max-width: 640px) {
+  /* Sidebar drawer um pouco mais estreito */
+  .sidebar { width: 84vw; max-width: 320px; }
+
+  /* Topbar: oculta data, simplifica o nome do usuário */
+  #topbar #today { display: none; }
+  #topbar .text-slate-300 { display: none; } /* separador visual */
+  #topbar #user-btn span:not(.text-xs) { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #topbar #user-btn span.text-xs { display: none; } /* esconde "(perfil)" no mobile */
+
+  /* Cards/grids: forçar 1 coluna em containers comuns */
+  #main-content .grid.grid-cols-2,
+  #main-content .grid.grid-cols-3,
+  #main-content .grid.grid-cols-4 { grid-template-columns: 1fr !important; gap: 0.6rem; }
+
+  #main-content .grid.md\:grid-cols-2,
+  #main-content .grid.md\:grid-cols-3,
+  #main-content .grid.md\:grid-cols-4,
+  #main-content .grid.md\:grid-cols-5,
+  #main-content .grid.md\:grid-cols-6,
+  #main-content .grid.lg\:grid-cols-2,
+  #main-content .grid.lg\:grid-cols-3,
+  #main-content .grid.lg\:grid-cols-4 { grid-template-columns: 1fr !important; }
+
+  /* Inputs e botões com largura total */
+  #main-content input,
+  #main-content select,
+  #main-content textarea { width: 100%; max-width: 100%; box-sizing: border-box; }
+  #main-content .btn { font-size: 0.85rem; padding: 0.55rem 0.9rem; }
+
+  /* KPI cards mais compactos */
+  .kpi-card, .kpi { padding: 0.85rem !important; }
+
+  /* Tabelas: scroll horizontal forçado e fontes menores */
+  #main-content table { font-size: 0.78rem; min-width: 540px; }
+  #main-content table th,
+  #main-content table td {
+    padding: 0.4rem 0.55rem !important;
+    white-space: nowrap;
+  }
+
+  /* Modais ocupam quase a tela toda */
+  .modal {
+    width: 96vw !important;
+    max-width: 96vw !important;
+    max-height: 92vh;
+    padding: 1rem !important;
+    border-radius: 12px;
+  }
+  .modal h3 { font-size: 1rem; }
+  .modal .grid.grid-cols-2,
+  .modal .grid.grid-cols-3,
+  .modal .grid.grid-cols-4 { grid-template-columns: 1fr !important; }
+
+  /* Botões de modal em coluna */
+  .modal .flex.justify-end.gap-2,
+  .modal .flex.gap-2 { flex-wrap: wrap; }
+  .modal .flex.justify-end.gap-2 .btn,
+  .modal .flex.gap-2 .btn { flex: 1 1 auto; min-width: 130px; }
+
+  /* Login */
+  .login-card { padding: 1.5rem 1.2rem; }
+  .login-logo img { max-width: 180px; }
+
+  /* Page header compacto */
+  .page-header h1 { font-size: 1.1rem !important; }
+  .page-header p { font-size: 0.78rem !important; }
+}
+
+/* ============================================================
+ * BREAKPOINT MOBILE PEQUENO (≤ 380px)
+ * ============================================================ */
+@media (max-width: 380px) {
+  #main-content { padding: 0.6rem !important; }
+  #topbar #user-btn span { display: none; }
+  .modal { padding: 0.8rem !important; }
+}
+
+/* ============================================================
+ * MELHORIAS GERAIS — transições suaves, foco acessível
+ * ============================================================ */
+.btn, .nav-item, input, select, textarea, .card {
+  -webkit-tap-highlight-color: transparent;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid rgba(59, 130, 246, 0.45);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ============================================================
+ * PERFIL — tela de configuração de conta
+ * ============================================================ */
+.profile-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+@media (max-width: 768px) {
+  .profile-grid { grid-template-columns: 1fr; }
+}
+.profile-avatar-box {
+  display: flex; flex-direction: column; align-items: center; gap: 0.75rem;
+  padding: 1rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border-1);
+  border-radius: 12px;
+}
+.profile-avatar-box .avatar-img,
+.profile-avatar-box .avatar-fallback { width: 128px; height: 128px; font-size: 44px; }
+.profile-avatar-box .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.profile-section { background: var(--surface-1); border: 1px solid var(--border-1); border-radius: 12px; padding: 1.1rem; margin-bottom: 1rem; }
+.profile-section h4 { font-size: 0.95rem; font-weight: 700; margin-bottom: 0.75rem; color: var(--text-1); }

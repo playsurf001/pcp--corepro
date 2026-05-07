@@ -109,9 +109,147 @@ app.get('/auth/me', async (c) => {
       login: sess.login,
       nome: sess.nome,
       perfil: sess.perfil,
+      email: sess.email || null,
+      avatar_data: sess.avatar_data || null,
+      avatar_mime: sess.avatar_mime || null,
       trocar_senha: !!sess.trocar_senha,
     })
   );
+});
+
+/* ========= PERFIL — GET (dados completos do usuário logado) ========= */
+app.get('/auth/perfil', async (c) => {
+  const user = c.get('user') as any;
+  if (!user) return fail('Não autenticado.', 401);
+  const u = await c.env.DB.prepare(
+    `SELECT id_usuario, login, nome, email, perfil, avatar_data, avatar_mime,
+            avatar_atualizado, ultimo_login, dt_criacao
+       FROM usuarios WHERE id_usuario=?`
+  ).bind(user.id_usuario).first<any>();
+  if (!u) return fail('Usuário não encontrado.', 404);
+  return c.json(ok(u));
+});
+
+/* ========= PERFIL — PUT (atualiza nome / login / email / avatar) =========
+ * Body: { nome?, login?, email?, avatar_data?, avatar_mime?, remover_avatar? }
+ * Validações:
+ *  - login não pode duplicar (case-insensitive)
+ *  - email não pode duplicar (case-insensitive) quando informado
+ *  - avatar_data: aceita data:image/(png|jpeg|jpg|webp);base64,... limitado a ~2 MB
+ */
+app.put('/auth/perfil', async (c) => {
+  const user = c.get('user') as any;
+  if (!user) return fail('Não autenticado.', 401);
+  const b = await c.req.json<any>();
+
+  const sets: string[] = [];
+  const vals: any[] = [];
+
+  // nome
+  if (b.nome !== undefined) {
+    const nome = String(b.nome || '').trim();
+    if (!nome) return fail('Nome não pode ser vazio.');
+    if (nome.length > 120) return fail('Nome muito longo (máx 120).');
+    sets.push('nome = ?'); vals.push(nome);
+  }
+
+  // login
+  if (b.login !== undefined) {
+    const login = String(b.login || '').trim();
+    if (!login) return fail('Login não pode ser vazio.');
+    if (login.length < 3) return fail('Login deve ter pelo menos 3 caracteres.');
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(login)) return fail('Login só pode conter letras, números, ponto, underscore e hífen.');
+    // Checa duplicidade
+    const dup = await c.env.DB.prepare(
+      `SELECT id_usuario FROM usuarios WHERE lower(login)=lower(?) AND id_usuario<>?`
+    ).bind(login, user.id_usuario).first<any>();
+    if (dup) return fail('Login já está em uso por outro usuário.', 409);
+    sets.push('login = ?'); vals.push(login);
+  }
+
+  // email
+  if (b.email !== undefined) {
+    const email = String(b.email || '').trim();
+    if (email) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('E-mail inválido.');
+      if (email.length > 160) return fail('E-mail muito longo.');
+      const dup = await c.env.DB.prepare(
+        `SELECT id_usuario FROM usuarios WHERE lower(email)=lower(?) AND id_usuario<>?`
+      ).bind(email, user.id_usuario).first<any>();
+      if (dup) return fail('E-mail já está em uso por outro usuário.', 409);
+      sets.push('email = ?'); vals.push(email);
+    } else {
+      sets.push('email = NULL');
+    }
+  }
+
+  // avatar (upload ou remoção)
+  if (b.remover_avatar) {
+    sets.push('avatar_data = NULL');
+    sets.push('avatar_mime = NULL');
+    sets.push("avatar_atualizado = datetime('now')");
+  } else if (b.avatar_data !== undefined && b.avatar_data !== null && b.avatar_data !== '') {
+    const data = String(b.avatar_data);
+    // Validação: tem que ser data URL base64 de imagem permitida
+    const m = data.match(/^data:(image\/(?:png|jpe?g|webp));base64,([A-Za-z0-9+/=]+)$/i);
+    if (!m) return fail('Avatar inválido. Use JPG, PNG ou WebP em base64 (data URL).');
+    const mime = m[1].toLowerCase().replace('image/jpg', 'image/jpeg');
+    // Limite: ~2 MB já em base64 (1 byte vira ~1.37 caracteres). 3 MB de base64 ≈ 2.2 MB binário
+    if (data.length > 3_000_000) return fail('Imagem muito grande (máx ~2 MB). Reduza no cliente antes de enviar.');
+    sets.push('avatar_data = ?'); vals.push(data);
+    sets.push('avatar_mime = ?'); vals.push(mime);
+    sets.push("avatar_atualizado = datetime('now')");
+  }
+
+  if (sets.length === 0) return fail('Nada para atualizar.');
+
+  vals.push(user.id_usuario);
+  await c.env.DB.prepare(
+    `UPDATE usuarios SET ${sets.join(', ')} WHERE id_usuario=?`
+  ).bind(...vals).run();
+
+  await audit(c.env.DB, 'AUTH', 'UPD_PERFIL', user.login, '', '', sets.join(';'));
+
+  // Retorna perfil atualizado (sem dados sensíveis)
+  const u = await c.env.DB.prepare(
+    `SELECT id_usuario, login, nome, email, perfil, avatar_data, avatar_mime,
+            avatar_atualizado, ultimo_login, dt_criacao
+       FROM usuarios WHERE id_usuario=?`
+  ).bind(user.id_usuario).first<any>();
+  return c.json(ok(u));
+});
+
+/* ========= PERFIL — PUT senha (alterna do trocar-senha mas com confirmação) =========
+ * Body: { senha_atual, senha_nova, senha_confirma }
+ */
+app.put('/auth/perfil/senha', async (c) => {
+  const user = c.get('user') as any;
+  if (!user) return fail('Não autenticado.', 401);
+  const b = await c.req.json<any>();
+  const sa = String(b.senha_atual || '');
+  const sn = String(b.senha_nova || '');
+  const sc = String(b.senha_confirma || '');
+  if (!sa || !sn || !sc) return fail('Preencha senha atual, nova e confirmação.');
+  if (sn !== sc) return fail('Nova senha e confirmação não conferem.');
+  if (sn.length < 6) return fail('Nova senha deve ter pelo menos 6 caracteres.');
+  if (sn === sa) return fail('A nova senha deve ser diferente da senha atual.');
+
+  const u = await c.env.DB.prepare(
+    `SELECT senha_hash, senha_salt FROM usuarios WHERE id_usuario=?`
+  ).bind(user.id_usuario).first<any>();
+  if (!u) return fail('Usuário não encontrado.', 404);
+
+  const h = await hashSenha(u.senha_salt, sa);
+  if (h !== u.senha_hash) return fail('Senha atual incorreta.');
+
+  const salt = randomHex(16);
+  const novaHash = await hashSenha(salt, sn);
+  await c.env.DB.prepare(
+    `UPDATE usuarios SET senha_hash=?, senha_salt=?, trocar_senha=0 WHERE id_usuario=?`
+  ).bind(novaHash, salt, user.id_usuario).run();
+
+  await audit(c.env.DB, 'AUTH', 'UPD_SENHA', user.login);
+  return c.json(ok({ message: 'Senha alterada com sucesso.' }));
 });
 
 /* ========= TROCAR SENHA ========= */

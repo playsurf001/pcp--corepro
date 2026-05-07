@@ -52,7 +52,9 @@ export async function validarSessao(db: D1Database, token: string) {
   if (!token) return null;
   const r = await db
     .prepare(
-      `SELECT s.token, s.dt_expira, u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha
+      `SELECT s.token, s.dt_expira,
+              u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
+              u.email, u.avatar_data, u.avatar_mime
        FROM sessoes s
        JOIN usuarios u ON u.id_usuario = s.id_usuario
        WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
