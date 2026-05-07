@@ -238,7 +238,7 @@
       body: `
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           ${UI.kpi({ label:'Peças (mês)', value: fmt.int(m.pecas), icon:'fa-cubes', accent:'blue' })}
-          ${UI.kpi({ label:'Refugo (mês)', value: fmt.int(m.refugo), icon:'fa-recycle', accent:'rose' })}
+          ${UI.kpi({ label:'Falta (mês)', value: fmt.int(m.refugo), icon:'fa-recycle', accent:'rose' })}
           ${UI.kpi({ label:'Eficiência', value: fmt.pct(m.efic), icon:'fa-gauge-high', accent:'purple', progress: Math.min(100, (m.efic||0)*100) })}
           ${UI.kpi({ label:'Meta diária', value: fmt.int(c.meta_diaria), icon:'fa-bullseye', accent:'amber', sub:'peças/dia' })}
         </div>
@@ -250,7 +250,7 @@
               <thead class="bg-slate-100"><tr>
                 <th class="p-2 text-left">Dia</th>
                 <th class="p-2 text-right">Peças</th>
-                <th class="p-2 text-right">Refugo</th>
+                <th class="p-2 text-right">Falta</th>
                 <th class="p-2 text-right">Horas</th>
                 <th class="p-2 text-right">Efic.</th>
               </tr></thead>
@@ -438,7 +438,7 @@
             <th class="p-2 text-left">Operação</th>
             <th class="p-2 text-left">Operador</th>
             <th class="p-2 text-right">Boa</th>
-            <th class="p-2 text-right">Refugo</th>
+            <th class="p-2 text-right">Falta</th>
             <th class="p-2 text-right">Retrab.</th>
             <th class="p-2 text-right">Efic.</th>
           </tr></thead>
@@ -539,7 +539,7 @@
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div><label>Peças boas *</label><input type="number" id="fs-boa" min="0" value="0" required/></div>
-            <div><label>Refugo</label><input type="number" id="fs-ref" min="0" value="0"/></div>
+            <div><label>Falta</label><input type="number" id="fs-ref" min="0" value="0"/></div>
             <div><label>Retrabalho</label><input type="number" id="fs-ret" min="0" value="0"/></div>
           </div>
           <div>
@@ -619,7 +619,7 @@
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
         <div class="card p-5 lg:col-span-2">
-          ${UI.section({ title:'Produção diária (peças boas vs refugo)', icon:'fa-chart-line', meta:`${d.dias} dias` })}
+          ${UI.section({ title:'Produção diária (peças boas vs falta)', icon:'fa-chart-line', meta:`${d.dias} dias` })}
           <canvas id="chart-prod-linha" height="240"></canvas>
         </div>
         <div class="card p-5">
@@ -683,7 +683,7 @@
           labels: linha.map(x => fmt.date(x.dia)),
           datasets: [
             { label:'Peças boas', data: linha.map(x=>x.pecas), borderColor: colors.success, backgroundColor:'rgba(16,185,129,0.15)', tension:0.3, fill:true, borderWidth:2 },
-            { label:'Refugo', data: linha.map(x=>x.refugo), borderColor: colors.danger, backgroundColor:'rgba(239,68,68,0.10)', tension:0.3, fill:true, borderWidth:2 },
+            { label:'Falta', data: linha.map(x=>x.refugo), borderColor: colors.danger, backgroundColor:'rgba(239,68,68,0.10)', tension:0.3, fill:true, borderWidth:2 },
           ]
         },
         options: {
@@ -859,7 +859,7 @@
                 <th class="p-2 text-left">Operação</th>
                 <th class="p-2 text-right">Tempo padrão</th>
                 <th class="p-2 text-right">Produzido</th>
-                <th class="p-2 text-right">Refugo</th>
+                <th class="p-2 text-right">Falta</th>
                 <th class="p-2 text-right">Retrab.</th>
                 <th class="p-2 text-right">Colab.</th>
                 <th class="p-2 text-right">Efic. média</th>

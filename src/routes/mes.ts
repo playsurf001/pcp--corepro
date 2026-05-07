@@ -708,7 +708,7 @@ app.get('/alertas', async (c) => {
     });
   }
 
-  // 4) Refugo alto (>5%) nos últimos 7 dias
+  // 4) Falta alta (>5%) nos últimos 7 dias
   const ref = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(qtd_boa),0) AS b, COALESCE(SUM(qtd_refugo),0) AS r
      FROM apontamento_sessao WHERE date(dt_inicio) >= date('now','-7 day')`
@@ -717,7 +717,7 @@ app.get('/alertas', async (c) => {
   if (tot > 0 && toNum(ref?.r, 0) / tot > 0.05) {
     alertas.push({
       tipo: 'warning', icon: 'fa-recycle',
-      titulo: `Refugo alto: ${(toNum(ref?.r, 0) / tot * 100).toFixed(1)}%`,
+      titulo: `Falta alta: ${(toNum(ref?.r, 0) / tot * 100).toFixed(1)}%`,
       desc: 'Acima da meta de 5% nos últimos 7 dias',
       acao: 'dashboard',
     });

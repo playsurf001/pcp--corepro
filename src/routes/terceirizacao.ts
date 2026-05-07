@@ -1379,7 +1379,7 @@ app.post('/terc/remessas', async (c) => {
     }];
   }
 
-  // Validar itens (cada item precisa de id_servico e ao menos 1 qtd > 0)
+  // Validar itens (cada item precisa de id_servico, cor e ao menos 1 qtd > 0)
   const itensValidos: any[] = [];
   for (const it of itens) {
     const idServ = toInt(it.id_servico);
@@ -1387,7 +1387,10 @@ app.post('/terc/remessas', async (c) => {
     const grade: any[] = Array.isArray(it.grade) ? it.grade : [];
     const qtdItem = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
     if (qtdItem <= 0) continue; // ignora item vazio
-    itensValidos.push({ ...it, _grade: grade, _qtd: qtdItem, _idServ: idServ });
+    // Cor obrigatória — não permitir salvar item sem cor
+    const corVal = (it.cor != null ? String(it.cor) : '').trim();
+    if (!corVal) return fail(`Informe a cor do produto${it.cod_ref ? ` (item ${it.cod_ref})` : ''}.`);
+    itensValidos.push({ ...it, cor: corVal, _grade: grade, _qtd: qtdItem, _idServ: idServ });
   }
   if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
 
@@ -1559,7 +1562,10 @@ app.put('/terc/remessas/:id', async (c) => {
     const grade: any[] = Array.isArray(it.grade) ? it.grade : [];
     const qtdItem = grade.reduce((a, g) => a + (toInt(g.qtd) || 0), 0);
     if (qtdItem <= 0) continue;
-    itensValidos.push({ ...it, _grade: grade, _qtd: qtdItem, _idServ: idServ });
+    // Cor obrigatória — não permitir salvar item sem cor
+    const corVal = (it.cor != null ? String(it.cor) : '').trim();
+    if (!corVal) return fail(`Informe a cor do produto${it.cod_ref ? ` (item ${it.cod_ref})` : ''}.`);
+    itensValidos.push({ ...it, cor: corVal, _grade: grade, _qtd: qtdItem, _idServ: idServ });
   }
   if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
 

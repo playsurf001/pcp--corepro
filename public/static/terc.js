@@ -70,7 +70,7 @@ async function carregarTercDash() {
     <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
       ${kpiCard('Retornos', fmtNum(ret.total), 'fa-undo', 'blue', 'no período')}
       ${kpiCard('Peças boas', fmtNum(ret.pecas_boas), 'fa-check-circle', 'green', 'aprovadas')}
-      ${kpiCard('Refugo', fmtNum(ret.pecas_refugo), 'fa-times-circle', 'red', 'peças descartadas')}
+      ${kpiCard('Falta', fmtNum(ret.pecas_refugo), 'fa-times-circle', 'red', 'peças em falta')}
       ${kpiCard('Conserto', fmtNum(ret.pecas_conserto), 'fa-wrench', 'orange', 'encaminhadas')}
     </div>
 
@@ -124,7 +124,7 @@ async function carregarTercDash() {
         labels: r.producao_diaria.map(x => dayjs(x.dia).format('DD/MM')),
         datasets: [
           { label: 'Boa', data: r.producao_diaria.map(x => x.boa), backgroundColor: '#00FF9C' },
-          { label: 'Refugo', data: r.producao_diaria.map(x => x.refugo), backgroundColor: '#FF3B3B' },
+          { label: 'Falta', data: r.producao_diaria.map(x => x.refugo), backgroundColor: '#FF3B3B' },
           { label: 'Conserto', data: r.producao_diaria.map(x => x.conserto), backgroundColor: '#F97316' },
         ]
       },
@@ -552,7 +552,7 @@ async function abrirRemessa(id) {
         <div class="grid grid-cols-4 gap-3 mb-4">
           <div class="card p-3 text-center"><div class="text-xs text-slate-500">Qtd Enviada</div><div class="text-2xl font-bold text-slate-800">${fmtNum(r.qtd_total)}</div></div>
           <div class="card p-3 text-center"><div class="text-xs text-slate-500">Retornada (boa)</div><div class="text-2xl font-bold text-green-600">${fmtNum(t.boa)}</div></div>
-          <div class="card p-3 text-center"><div class="text-xs text-slate-500">Refugo / Conserto</div><div class="text-2xl font-bold text-orange-500">${fmtNum(t.refugo + t.conserto)}</div></div>
+          <div class="card p-3 text-center"><div class="text-xs text-slate-500">Falta / Conserto</div><div class="text-2xl font-bold text-orange-500">${fmtNum(t.refugo + t.conserto)}</div></div>
           <div class="card p-3 text-center"><div class="text-xs text-slate-500">Saldo (pendente)</div><div class="text-2xl font-bold ${r.saldo > 0 ? 'text-red-500' : 'text-green-600'}">${fmtNum(r.saldo)}</div></div>
         </div>
 
@@ -577,7 +577,7 @@ async function abrirRemessa(id) {
         <h4 class="font-semibold text-slate-700 mb-2"><i class="fas fa-history mr-2"></i>Histórico de Retornos</h4>
         <table class="w-full text-sm">
           <thead><tr class="text-left text-slate-500 border-b">
-            <th class="py-2">Data</th><th class="text-right">Boa</th><th class="text-right">Refugo</th><th class="text-right">Conserto</th><th class="text-right">Total</th><th class="text-right">Valor pago</th><th>Obs</th><th></th>
+            <th class="py-2">Data</th><th class="text-right">Boa</th><th class="text-right">Falta</th><th class="text-right">Conserto</th><th class="text-right">Total</th><th class="text-right">Valor pago</th><th>Obs</th><th></th>
           </tr></thead>
           <tbody>${r.retornos.map(ret => `
             <tr class="border-b border-slate-100">
@@ -629,7 +629,7 @@ async function abrirFormRetorno(idRemessa) {
           <div class="grid grid-cols-4 gap-3 mb-3">
             <div class="field"><label>Data retorno *</label><input name="dt_retorno" type="date" required value="${dayjs().format('YYYY-MM-DD')}" /></div>
             <div class="field"><label>Qtd boa *</label><input name="qtd_boa" type="number" min="0" value="0" required /></div>
-            <div class="field"><label>Refugo</label><input name="qtd_refugo" type="number" min="0" value="0" /></div>
+            <div class="field"><label>Falta</label><input name="qtd_refugo" type="number" min="0" value="0" /></div>
             <div class="field"><label>Para conserto</label><input name="qtd_conserto" type="number" min="0" value="0" /></div>
             <div class="field col-span-2"><label>Valor pago (R$)</label><input name="valor_pago" type="number" step="0.01" min="0" value="" placeholder="auto: qtd boa × preço" /></div>
             <div class="field col-span-2"><label>Data pagamento</label><input name="dt_pagamento" type="date" /></div>

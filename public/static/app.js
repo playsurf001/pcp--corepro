@@ -504,7 +504,7 @@ ROUTES.admin_dashboard = async (main) => {
         accent: 'green', sub: 'peças aprovadas'
       })}
       ${UI.kpi({
-        label: 'Refugo', value: fmt.pct(d.refugo_pct), icon: 'fa-recycle',
+        label: 'Falta', value: fmt.pct(d.refugo_pct), icon: 'fa-recycle',
         accent: 'rose',
         trend: { dir: refugo > 3 ? 'down' : 'up', text: refugo > 3 ? 'Alto' : 'OK' },
         sub: 'meta < 3%',
@@ -1833,7 +1833,7 @@ ROUTES.apontamento = async (main) => {
 
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
       ${UI.kpi({ label: 'Peças Boas (hoje)', value: fmt.int(pecasHoje), icon: 'fa-circle-check', accent: 'green', sub: 'aprovadas' })}
-      ${UI.kpi({ label: 'Refugo (hoje)', value: fmt.int(refHoje), icon: 'fa-recycle', accent: 'rose', sub: 'rejeitadas' })}
+      ${UI.kpi({ label: 'Falta (hoje)', value: fmt.int(refHoje), icon: 'fa-recycle', accent: 'rose', sub: 'em falta' })}
       ${UI.kpi({ label: 'Horas Trabalhadas', value: fmt.num(horasHoje, 1), icon: 'fa-clock', accent: 'cyan', sub: 'no dia' })}
       ${UI.kpi({ label: 'Eficiência Média', value: fmt.pct(eficMed), icon: 'fa-gauge-high', accent: 'purple',
         progress: Math.min(100, eficMed * 100),
@@ -1853,7 +1853,7 @@ ROUTES.apontamento = async (main) => {
           <div><label>Operador *</label><input id="a_op_nome" required/></div>
           <div class="grid grid-cols-2 gap-3">
             <div><label>Qtd Boa *</label><input type="number" id="a_boa" min="0" required/></div>
-            <div><label>Refugo</label><input type="number" id="a_ref" min="0" value="0"/></div>
+            <div><label>Falta</label><input type="number" id="a_ref" min="0" value="0"/></div>
           </div>
           <div><label>Horas trabalhadas *</label><input type="number" id="a_hrs" step="0.1" min="0.1" required/></div>
           <button class="btn btn-primary w-full"><i class="fas fa-save mr-1"></i> Registrar</button>
@@ -1870,7 +1870,7 @@ ROUTES.apontamento = async (main) => {
             <th class="p-2 text-left">Operação</th>
             <th class="p-2 text-left">Operador</th>
             <th class="p-2 text-right">Boa</th>
-            <th class="p-2 text-right">Refugo</th>
+            <th class="p-2 text-right">Falta</th>
             <th class="p-2 text-right">Horas</th>
             <th class="p-2 text-right">Efic.</th>
             <th class="p-2 w-10"></th>
@@ -2194,13 +2194,13 @@ async function relExecutivo(ct) {
       <div class="rep-kpi purple"><div class="label">Peças totais</div><div class="value">${relFmt.num(ops.pecas_total)}</div><div class="hint">${relFmt.num(ops.pecas_aberto)} em aberto</div></div>
       <div class="rep-kpi"><div class="label">Prazo médio</div><div class="value">${relFmt.num(ops.prazo_medio, 1)}</div><div class="hint">dias emissão → entrega</div></div>
       <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(prd.producao_boa)}</div><div class="hint">peças aprovadas</div></div>
-      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(prd.refugo)}</div><div class="hint">${relFmt.pct(k.refugo_pct)} do produzido</div></div>
+      <div class="rep-kpi danger"><div class="label">Falta</div><div class="value">${relFmt.num(prd.refugo)}</div><div class="hint">${relFmt.pct(k.refugo_pct)} do produzido</div></div>
       <div class="rep-kpi"><div class="label">Horas trabalhadas</div><div class="value">${relFmt.num(prd.horas_total, 1)}</div><div class="hint">${relFmt.num(prd.total_apont)} apontamentos</div></div>
       <div class="rep-kpi ok"><div class="label">Eficiência real</div><div class="value">${relFmt.pct(prd.efic_media)}</div><div class="hint">média do período</div></div>
     </div>
 
     <div class="rep-grid-2 avoid-break">
-      <div class="rep-chart"><h3>Produção diária (peças boas x refugo)</h3><canvas id="rc-prod"></canvas></div>
+      <div class="rep-chart"><h3>Produção diária (peças boas x falta)</h3><canvas id="rc-prod"></canvas></div>
       <div class="rep-chart"><h3>OPs por Status</h3><canvas id="rc-status"></canvas></div>
     </div>
 
@@ -2231,7 +2231,7 @@ async function relExecutivo(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-hard-hat"></i>Top operadores</h2>
       <table class="rep-table">
-        <thead><tr><th>Operador</th><th class="num">Apontamentos</th><th class="num">Boas</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
+        <thead><tr><th>Operador</th><th class="num">Apontamentos</th><th class="num">Boas</th><th class="num">Falta</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
         <tbody>${r.top_operadores.map(o => `
           <tr><td>${o.operador}</td>
             <td class="num">${relFmt.num(o.apontamentos)}</td>
@@ -2258,7 +2258,7 @@ async function relExecutivo(ct) {
         type: 'bar',
         data: { labels, datasets: [
           { label: 'Boa', data: boa, backgroundColor: '#2563EB', borderRadius: 4 },
-          { label: 'Refugo', data: ref, backgroundColor: '#FF3B3B', borderRadius: 4 },
+          { label: 'Falta', data: ref, backgroundColor: '#FF3B3B', borderRadius: 4 },
         ]},
         options: { plugins: { legend: { labels: { color: '#111827' } } }, scales: { x: { ticks: { color: '#374151' } }, y: { ticks: { color: '#374151' } } } }
       }));
@@ -2303,7 +2303,7 @@ async function relOp(ct) {
 
     <div class="rep-kpis">
       <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(t.producao_boa)}</div><div class="hint">peças aprovadas</div></div>
-      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(t.refugo)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Falta</div><div class="value">${relFmt.num(t.refugo)}</div></div>
       <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(t.horas_total, 1)}</div></div>
       <div class="rep-kpi ${t.pct_concluido >= 1 ? 'ok' : 'purple'}"><div class="label">Concluído</div><div class="value">${relFmt.pct(t.pct_concluido)}</div><div class="hint">${relFmt.num(t.pecas_restantes)} peças restantes</div></div>
     </div>
@@ -2348,7 +2348,7 @@ async function relOp(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-hard-hat"></i>Apontamentos registrados</h2>
       <table class="rep-table">
-        <thead><tr><th>Data</th><th class="center">Seq</th><th>Operação</th><th>Operador</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
+        <thead><tr><th>Data</th><th class="center">Seq</th><th>Operação</th><th>Operador</th><th class="num">Boa</th><th class="num">Falta</th><th class="num">Horas</th><th class="num">Eficiência</th></tr></thead>
         <tbody>${r.apontamentos.map(a => `<tr>
           <td>${relFmt.date(a.data)}</td>
           <td class="center">${a.sequencia || '—'}</td>
@@ -2384,12 +2384,12 @@ async function relProducao(ct) {
     <div class="rep-kpis">
       <div class="rep-kpi"><div class="label">Apontamentos</div><div class="value">${relFmt.num(t.apontamentos)}</div></div>
       <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(t.boa)}</div></div>
-      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(t.refugo)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Falta</div><div class="value">${relFmt.num(t.refugo)}</div></div>
       <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(t.horas, 1)}</div></div>
     </div>
     <div class="rep-kpis">
       <div class="rep-kpi ok"><div class="label">Eficiência média</div><div class="value">${relFmt.pct(t.efic)}</div></div>
-      <div class="rep-kpi warn"><div class="label">% Refugo</div><div class="value">${(t.boa||t.refugo) ? relFmt.pct((Number(t.refugo)||0)/((Number(t.boa)||0)+(Number(t.refugo)||0))) : '—'}</div></div>
+      <div class="rep-kpi warn"><div class="label">% Falta</div><div class="value">${(t.boa||t.refugo) ? relFmt.pct((Number(t.refugo)||0)/((Number(t.boa)||0)+(Number(t.refugo)||0))) : '—'}</div></div>
       <div class="rep-kpi purple"><div class="label">Pçs/hora</div><div class="value">${t.horas>0 ? relFmt.num((Number(t.boa)||0)/(Number(t.horas)||1), 1) : '—'}</div></div>
       <div class="rep-kpi"><div class="label">Período</div><div class="value" style="font-size:13px;line-height:1.4">${relFmt.date(r.periodo.ini)} — ${relFmt.date(r.periodo.fim)}</div></div>
     </div>
@@ -2397,7 +2397,7 @@ async function relProducao(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-clipboard-list"></i>Resumo por OP</h2>
       <table class="rep-table">
-        <thead><tr><th>OP</th><th>Referência</th><th>Cliente</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
+        <thead><tr><th>OP</th><th>Referência</th><th>Cliente</th><th class="num">Boa</th><th class="num">Falta</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
         <tbody>${r.por_op.map(x => `<tr>
           <td><b>${x.num_op}</b></td><td>${x.cod_ref}</td><td>${x.nome_cliente}</td>
           <td class="num">${relFmt.num(x.boa)}</td><td class="num">${relFmt.num(x.refugo)}</td>
@@ -2409,7 +2409,7 @@ async function relProducao(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-hard-hat"></i>Resumo por Operador</h2>
       <table class="rep-table">
-        <thead><tr><th>Operador</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
+        <thead><tr><th>Operador</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Falta</th><th class="num">Horas</th><th class="num">Efic</th></tr></thead>
         <tbody>${r.por_operador.map(x => `<tr>
           <td>${x.operador}</td>
           <td class="num">${relFmt.num(x.apontamentos)}</td>
@@ -2424,7 +2424,7 @@ async function relProducao(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-industry"></i>Resumo por Máquina</h2>
       <table class="rep-table">
-        <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Efic</th></tr></thead>
+        <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th class="num">Apont.</th><th class="num">Boa</th><th class="num">Falta</th><th class="num">Efic</th></tr></thead>
         <tbody>${r.por_maquina.map(x => `<tr>
           <td>${x.cod_maquina}</td><td>${x.desc_maquina}</td><td>${x.tipo || '—'}</td>
           <td class="num">${relFmt.num(x.apontamentos)}</td>
@@ -2483,7 +2483,7 @@ async function relCliente(ct) {
       <div class="rep-kpi purple"><div class="label">Peças encomendadas</div><div class="value">${relFmt.num(ro.pecas)}</div></div>
       <div class="rep-kpi"><div class="label">Prazo médio</div><div class="value">${relFmt.num(ro.prazo_medio,1)}</div><div class="hint">dias</div></div>
       <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(p.boa)}</div></div>
-      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(p.refugo)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Falta</div><div class="value">${relFmt.num(p.refugo)}</div></div>
       <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(p.horas,1)}</div></div>
       <div class="rep-kpi ok"><div class="label">Eficiência média</div><div class="value">${relFmt.pct(p.efic)}</div></div>
     </div>
@@ -2543,7 +2543,7 @@ async function relReferencia(ct) {
       <div class="rep-kpi ok"><div class="label">Peças concluídas</div><div class="value">${relFmt.num(ro.pecas_concluidas)}</div></div>
       <div class="rep-kpi warn"><div class="label">Em aberto</div><div class="value">${relFmt.num(ro.pecas_aberto)}</div><div class="hint">${relFmt.num(ro.atrasadas)} atrasadas</div></div>
       <div class="rep-kpi ok"><div class="label">Produção boa</div><div class="value">${relFmt.num(p.boa)}</div></div>
-      <div class="rep-kpi danger"><div class="label">Refugo</div><div class="value">${relFmt.num(p.refugo)}</div></div>
+      <div class="rep-kpi danger"><div class="label">Falta</div><div class="value">${relFmt.num(p.refugo)}</div></div>
       <div class="rep-kpi"><div class="label">Horas</div><div class="value">${relFmt.num(p.horas, 1)}</div></div>
       <div class="rep-kpi ok"><div class="label">Eficiência</div><div class="value">${relFmt.pct(p.efic)}</div></div>
     </div>
@@ -2560,7 +2560,7 @@ async function relReferencia(ct) {
     <div class="rep-section avoid-break">
       <h2><i class="fas fa-balance-scale"></i>Eficiência por Operação (versão ativa)</h2>
       <table class="rep-table">
-        <thead><tr><th>Cód Op</th><th>Operação</th><th class="num">TP (min)</th><th class="num">Apont</th><th class="num">Boa</th><th class="num">Refugo</th><th class="num">Efic</th></tr></thead>
+        <thead><tr><th>Cód Op</th><th>Operação</th><th class="num">TP (min)</th><th class="num">Apont</th><th class="num">Boa</th><th class="num">Falta</th><th class="num">Efic</th></tr></thead>
         <tbody>${r.efic_por_operacao.map(x => `<tr>
           <td>${x.cod_op}</td><td>${x.desc_op}</td>
           <td class="num">${relFmt.num(x.tempo_padrao, 2)}</td>
@@ -3766,7 +3766,7 @@ ROUTES.dashboard = async (main) => {
               labels,
               datasets: [
                 { label: 'Boas', data: prod.map(p => fmt.safeNum(p?.boa)), backgroundColor: '#10b981' },
-                { label: 'Refugo', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
+                { label: 'Falta', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
                 { label: 'Conserto', data: prod.map(p => fmt.safeNum(p?.conserto)), backgroundColor: '#f59e0b' },
               ],
             },
@@ -5635,7 +5635,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
   // Estado local da UI
   // REGRA NOVA: a grade do retorno é SEMPRE igual à grade ENVIADA (soma = total enviado).
-  // Refugo e conserto APENAS redistribuem a grade — não alteram total nem valor.
+  // Falta e conserto APENAS redistribuem a grade — não alteram total nem valor.
   // Pagamento = total_enviado × preço_unit (sempre integral).
   const state = {
     items: itensRem.map(it => {
@@ -5700,8 +5700,8 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
     <div class="bg-blue-50 border border-blue-200 p-2 rounded text-xs text-blue-800 mb-2">
       <i class="fas fa-circle-info mr-1"></i>
-      O pagamento é calculado pelas <b>peças boas retornadas</b> (total enviado − refugo − conserto) × preço unitário.
-      Refugo e conserto <b>reduzem o pagamento</b> e também redistribuem a grade (sai primeiro do menor tamanho).
+      O pagamento é calculado pelas <b>peças boas retornadas</b> (total enviado − falta − conserto) × preço unitário.
+      Falta e conserto <b>reduzem o pagamento</b> e também redistribuem a grade (sai primeiro do menor tamanho).
     </div>
 
     <div class="text-sm font-semibold mb-2 text-slate-700">
@@ -5716,7 +5716,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
             <span><b>Enviado:</b> <span id="tg-env" class="font-mono">0</span> pç</span>
             <span><b>Quantidade retornada:</b> <span id="tg-qtd" class="font-mono text-blue-700">0</span> pç</span>
             <span><b>Boas:</b> <span id="tg-boa" class="font-mono">0</span></span>
-            <span><b>Refugo:</b> <span id="tg-ref" class="font-mono text-amber-700">0</span></span>
+            <span><b>Falta:</b> <span id="tg-ref" class="font-mono text-amber-700">0</span></span>
             <span><b>Conserto:</b> <span id="tg-con" class="font-mono text-orange-700">0</span></span>
           </div>
           <div class="text-base font-semibold text-emerald-800">
@@ -5765,7 +5765,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       ${semSaldo ? `<div class="text-xs text-slate-500 italic">Item já totalmente retornado.</div>` : `
       <div>
         <div class="text-xs text-slate-500 mb-1">
-          Grade retornada <span class="text-slate-400">— soma = total enviado (${fmt.int(it.qtd_enviada)} pç). Refugo/Conserto redistribuem do menor tamanho.</span>
+          Grade retornada <span class="text-slate-400">— soma = total enviado (${fmt.int(it.qtd_enviada)} pç). Falta/Conserto redistribuem do menor tamanho.</span>
         </div>
         <div class="grid grid-cols-5 md:grid-cols-10 gap-1 mb-2">
           ${it.gradeEnv.map(g => {
@@ -5792,7 +5792,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
             <input data-role="qtd-ret" type="number" min="0" max="${it.qtd_enviada}" value="${it.qtd_enviada - (it.qtd_refugo + it.qtd_conserto)}" class="ret-side-in border-blue-300" title="Quantidade boa retornada (= enviado − refugo − conserto)" />
           </div>
           <div>
-            <label class="text-xs text-amber-700"><i class="fas fa-triangle-exclamation mr-1"></i>Refugo</label>
+            <label class="text-xs text-amber-700"><i class="fas fa-triangle-exclamation mr-1"></i>Falta</label>
             <input data-role="refugo" type="number" min="0" value="${it.qtd_refugo}" class="ret-side-in border-amber-300" />
           </div>
           <div>
@@ -5824,7 +5824,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   //  - Grade retornada = (total_enviado − refugo − conserto), distribuída na grade enviada
   //    removendo primeiro do MENOR tamanho.
   //  - Pagamento = qtd_boas × preço_unit (refugo/conserto DESCONTAM).
-  //  - Refugo + conserto > total_enviado → erro.
+  //  - Falta + conserto > total_enviado → erro.
   //  - Quantidade retornada (peças boas) é exibida explicitamente.
   function recalc(triggerEl) {
     let tEnv = 0, tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
@@ -5836,7 +5836,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       // Item sem saldo (já 100% retornado) — pula
       if (it.qtd_disponivel <= 0) return;
 
-      // 1) Refugo / Conserto / Qtd retornada solicitados
+      // 1) Falta / Conserto / Qtd retornada solicitados
       const refInp = cardEl.querySelector('input[data-role="refugo"]');
       const conInp = cardEl.querySelector('input[data-role="conserto"]');
       const qtdRetInp = cardEl.querySelector('input[data-role="qtd-ret"]');
@@ -5869,7 +5869,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       // 2) VALIDAÇÃO: refugo + conserto não podem exceder o total enviado
       let errMsg = '';
       if (totalReduzir > totalEnviado) {
-        errMsg = 'Refugo + conserto excede o total enviado.';
+        errMsg = 'Falta + conserto excede o total enviado.';
       }
 
       // 3) Distribui (refugo + conserto) na grade enviada — tira do MENOR tamanho primeiro.
@@ -5978,9 +5978,9 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       const ref = fmt.safeNum(it.qtd_refugo);
       const con = fmt.safeNum(it.qtd_conserto);
 
-      // 1) Refugo + Conserto não podem exceder o total enviado
+      // 1) Falta + Conserto não podem exceder o total enviado
       if (ref + con > totalEnviado) {
-        toast(`Item ${it.cod_ref}/${it.cor}: Refugo + conserto excede o total enviado.`, 'error');
+        toast(`Item ${it.cod_ref}/${it.cor}: Falta + conserto excede o total enviado.`, 'error');
         blocked = true; return;
       }
 
@@ -6160,7 +6160,7 @@ async function TERC_openRemDetalhe(id) {
         ${fmt.safeArr(r.retornos).length ? `
           <table class="w-full text-sm">
             <thead class="bg-slate-100"><tr>
-              <th class="text-left p-2">Data</th><th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+              <th class="text-left p-2">Data</th><th class="text-right p-2">Boas</th><th class="text-right p-2">Falta</th><th class="text-right p-2">Conserto</th>
               <th class="text-right p-2">Total</th><th class="text-right p-2">Valor pago</th><th class="text-left p-2">Obs</th><th class="text-center p-2 no-print">Ações</th>
             </tr></thead>
             <tbody>
@@ -6318,7 +6318,7 @@ ROUTES.terc_retornos = async (main) => {
     $('#kpis').innerHTML = [
       kpi('Retornos', fmt.int(rows.length), 'text-brand'),
       kpi('Peças boas', fmt.int(tot.boa), 'text-emerald-600'),
-      kpi('Peças refugo', fmt.int(tot.refugo), 'text-red-600'),
+      kpi('Peças em falta', fmt.int(tot.refugo), 'text-red-600'),
       kpi('Valor pago', TERC.fmtBRL(tot.valor), 'text-indigo-600'),
     ].join('');
 
@@ -6327,7 +6327,7 @@ ROUTES.terc_retornos = async (main) => {
         <thead class="bg-slate-100"><tr>
           <th class="text-left p-2">Data</th><th class="text-right p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th>
           <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
-          <th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Boas</th><th class="text-right p-2">Falta</th><th class="text-right p-2">Conserto</th>
           <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th><th class="text-center p-2">Pagto</th>
           <th class="text-center p-2 no-print">Ações</th>
         </tr></thead>
@@ -6452,7 +6452,7 @@ ROUTES.terc_central = async (main) => {
       window._tercAccApi?.refreshSummary('retornos', `
         <span class="acc-summary-pill"><i class="fas fa-truck-arrow-right text-brand"></i><b>${fmt.int(kr.total)}</b> retornos</span>
         <span class="acc-summary-pill"><i class="fas fa-circle-check text-emerald-600"></i><b>${fmt.int(kr.pecas_boas)}</b> boas</span>
-        <span class="acc-summary-pill"><i class="fas fa-times-circle text-red-600"></i><b>${fmt.int(kr.pecas_refugo)}</b> refugo</span>
+        <span class="acc-summary-pill"><i class="fas fa-times-circle text-red-600"></i><b>${fmt.int(kr.pecas_refugo)}</b> falta</span>
       `);
 
       window._tercAccApi?.refreshSummary('produtos', `
@@ -6619,7 +6619,7 @@ async function renderTercDashboardBlock(body) {
             type: 'bar',
             data: { labels: prod.map(p => { const d = dayjs(p?.dia); return d.isValid() ? d.format('DD/MM') : '?'; }), datasets: [
               { label: 'Boas', data: prod.map(p => fmt.safeNum(p?.boa)), backgroundColor: '#10b981' },
-              { label: 'Refugo', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
+              { label: 'Falta', data: prod.map(p => fmt.safeNum(p?.refugo)), backgroundColor: '#ef4444' },
               { label: 'Conserto', data: prod.map(p => fmt.safeNum(p?.conserto)), backgroundColor: '#f59e0b' },
             ] },
             options: { responsive: true, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } },
@@ -6810,7 +6810,7 @@ async function renderTercRetornosBlock(body) {
     body.querySelector('#kpis').innerHTML = [
       kpi('Retornos', fmt.int(rows.length), 'text-brand'),
       kpi('Peças boas', fmt.int(tot.boa), 'text-emerald-600'),
-      kpi('Peças refugo', fmt.int(tot.refugo), 'text-red-600'),
+      kpi('Peças em falta', fmt.int(tot.refugo), 'text-red-600'),
       kpi('Valor pago', TERC.fmtBRL(tot.valor), 'text-indigo-600'),
     ].join('');
     body.querySelector('#tbl').innerHTML = `
@@ -6818,7 +6818,7 @@ async function renderTercRetornosBlock(body) {
         <thead class="bg-slate-100"><tr>
           <th class="text-left p-2">Data</th><th class="text-right p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th>
           <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
-          <th class="text-right p-2">Boas</th><th class="text-right p-2">Refugo</th><th class="text-right p-2">Conserto</th>
+          <th class="text-right p-2">Boas</th><th class="text-right p-2">Falta</th><th class="text-right p-2">Conserto</th>
           <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th>
         </tr></thead>
         <tbody>

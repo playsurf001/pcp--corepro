@@ -250,7 +250,7 @@ app.post('/apontamentos', async (c) => {
   const qR = toInt(b.qtd_refugo);
   const hrs = toNum(b.horas_trab);
   if (qB < 0) return fail('Qtde Boa inválida.');
-  if (qR < 0) return fail('Refugo inválido.');
+  if (qR < 0) return fail('Falta inválida.');
   if (hrs <= 0) return fail('Horas trabalhadas deve ser > 0.');
 
   // Busca seq_item pela sequência dentro da versão ativa da OP
@@ -545,7 +545,7 @@ app.get('/dashboard/mes', async (c) => {
       acao: 'apontamento',
     });
   }
-  // 3) Refugo alto na semana
+  // 3) Falta alta na semana
   const refSem = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(qtd_boa),0) AS boa, COALESCE(SUM(qtd_refugo),0) AS ref
      FROM apontamento WHERE date(data) >= date('now','-7 day')`
@@ -555,7 +555,7 @@ app.get('/dashboard/mes', async (c) => {
   if (pctRefSem > 0.05) {
     alertas.push({
       tipo: 'warning', icon: 'fa-recycle',
-      titulo: `Refugo alto: ${(pctRefSem * 100).toFixed(1)}%`,
+      titulo: `Falta alta: ${(pctRefSem * 100).toFixed(1)}%`,
       desc: 'Acima da meta de 5% nos últimos 7 dias.',
       acao: 'relatorios',
     });
