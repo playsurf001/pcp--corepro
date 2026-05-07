@@ -4429,8 +4429,8 @@ async function TERC_openRemModal(id, onSave) {
         <select id="m-col">${TERC.optColecoes(r.id_colecao)}</select></div>
       <div class="col-span-1"><label>Data saída *</label>
         <input type="date" id="m-dts" value="${r.dt_saida || ''}" /></div>
-      <div class="col-span-2"><label>Nº OP</label>
-        <input id="m-op" value="${r.num_op || ''}" placeholder="opcional" /></div>
+      <div class="col-span-2"><label>Nº OP *</label>
+        <input id="m-op" value="${r.num_op || ''}" placeholder="ex.: 1234" required /></div>
     </div>
 
     <!-- Bloco AVANÇADO (oculto por padrão) -->
@@ -5097,7 +5097,7 @@ async function TERC_openRemModal(id, onSave) {
     _clearAllInvalid();
     const errs = [];
 
-    // 1) Cabeçalho: Terceirizado + Data saída obrigatórios
+    // 1) Cabeçalho: Terceirizado, Data saída e Nº OP obrigatórios
     if (!$('#m-terc').value) {
       _markInvalid($('#m-terc'), 'Selecione o terceirizado.');
       errs.push('Terceirizado é obrigatório');
@@ -5105,6 +5105,12 @@ async function TERC_openRemModal(id, onSave) {
     if (!$('#m-dts').value) {
       _markInvalid($('#m-dts'), 'Informe a data de saída.');
       errs.push('Data de saída é obrigatória');
+    }
+    // Nº OP obrigatório — não pode ser vazio nem somente espaços
+    const opVal = ($('#m-op')?.value || '').trim();
+    if (!opVal) {
+      _markInvalid($('#m-op'), 'Informe o Nº da OP.');
+      errs.push('Nº OP é obrigatório');
     }
 
     // 2) Itens: cada item precisa de Produto, Serviço, Referência, Cor, Preço > 0 e Grade preenchida
@@ -5134,19 +5140,20 @@ async function TERC_openRemModal(id, onSave) {
           _markInvalid(wrap.querySelector('[data-f="serv"]'), 'Selecione o serviço.');
           cardHasErr = true;
         }
-        // Referência
+        // Referência (auto-preenchida mas obrigatória — não pode ser apagada)
         if (!it.cod_ref || !String(it.cod_ref).trim()) {
-          _markInvalid(wrap.querySelector('[data-f="ref"]'), 'Referência é obrigatória.');
+          _markInvalid(wrap.querySelector('[data-f="ref"]'), 'Informe a referência.');
           cardHasErr = true;
         }
-        // Cor
+        // Cor (selecionar OU digitar)
         if (!it.cor || !String(it.cor).trim()) {
-          _markInvalid(wrap.querySelector('[data-f="cor"]'), 'Informe a cor.');
+          _markInvalid(wrap.querySelector('[data-f="cor"]'), 'Informe a cor do produto.');
           cardHasErr = true;
         }
-        // Preço unitário > 0
-        if (!Number(it.preco_unit) || Number(it.preco_unit) <= 0) {
-          _markInvalid(wrap.querySelector('[data-f="preco"]'), 'Preço unitário deve ser maior que zero.');
+        // Valor unitário (não pode ser vazio, zero ou negativo)
+        const precoNum = Number(it.preco_unit);
+        if (!precoNum || isNaN(precoNum) || precoNum <= 0) {
+          _markInvalid(wrap.querySelector('[data-f="preco"]'), 'Informe um valor válido.');
           cardHasErr = true;
         }
         // Grade
@@ -5781,6 +5788,10 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
         <div class="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
           <div>
+            <label class="text-xs text-blue-700"><i class="fas fa-rotate-left mr-1"></i>Qtd retornada</label>
+            <input data-role="qtd-ret" type="number" min="0" max="${it.qtd_enviada}" value="${it.qtd_enviada - (it.qtd_refugo + it.qtd_conserto)}" class="ret-side-in border-blue-300" title="Quantidade boa retornada (= enviado − refugo − conserto)" />
+          </div>
+          <div>
             <label class="text-xs text-amber-700"><i class="fas fa-triangle-exclamation mr-1"></i>Refugo</label>
             <input data-role="refugo" type="number" min="0" value="${it.qtd_refugo}" class="ret-side-in border-amber-300" />
           </div>
@@ -5788,15 +5799,14 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
             <label class="text-xs text-orange-700"><i class="fas fa-screwdriver mr-1"></i>Conserto</label>
             <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in border-orange-300" />
           </div>
-          <div class="md:col-span-2 text-xs text-slate-600 self-center">
-            <div>Enviado: <b>${fmt.int(it.qtd_enviada)}</b> pç</div>
-            <div>Quantidade retornada: <b data-role="tot-boa" class="text-blue-700">${fmt.int(it.qtd_enviada)}</b> pç
-              <span class="text-slate-400">(boas)</span>
+          <div class="md:col-span-3 text-xs text-slate-600 self-center">
+            <div>Enviado: <b>${fmt.int(it.qtd_enviada)}</b> pç · Quantidade retornada: <b data-role="tot-boa" class="text-blue-700">${fmt.int(it.qtd_enviada - (it.qtd_refugo + it.qtd_conserto))}</b> pç</div>
+            <div class="text-emerald-700 font-semibold">Total pago: R$ <span data-role="tot-val">${fmt.num((it.qtd_enviada - (it.qtd_refugo + it.qtd_conserto)) * it.preco_unit)}</span>
+              <span class="text-xs text-slate-500 font-normal ml-1">(retornadas × preço)</span>
             </div>
-            <div class="text-emerald-700 font-semibold">Total pago: R$ <span data-role="tot-val">${fmt.num(it.qtd_enviada * it.preco_unit)}</span></div>
             <div class="text-[11px] text-slate-400" data-role="tot-qtd-hidden" style="display:none">${fmt.int(it.qtd_enviada)}</div>
           </div>
-          <div class="md:col-span-2">
+          <div class="md:col-span-6">
             <input data-role="obs" placeholder="Observação do item (opcional)"
                    value="${String(it.observacao || '').replace(/"/g, '&quot;')}" />
           </div>
@@ -5816,7 +5826,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   //  - Pagamento = qtd_boas × preço_unit (refugo/conserto DESCONTAM).
   //  - Refugo + conserto > total_enviado → erro.
   //  - Quantidade retornada (peças boas) é exibida explicitamente.
-  function recalc() {
+  function recalc(triggerEl) {
     let tEnv = 0, tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
     state.items.forEach((it, i) => {
       const cardEl = itemsWrap.querySelector(`[data-idx="${i}"]`);
@@ -5826,13 +5836,34 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       // Item sem saldo (já 100% retornado) — pula
       if (it.qtd_disponivel <= 0) return;
 
-      // 1) Refugo / Conserto solicitados
+      // 1) Refugo / Conserto / Qtd retornada solicitados
       const refInp = cardEl.querySelector('input[data-role="refugo"]');
       const conInp = cardEl.querySelector('input[data-role="conserto"]');
+      const qtdRetInp = cardEl.querySelector('input[data-role="qtd-ret"]');
       let ref = refInp ? Math.max(0, fmt.safeNum(refInp.value)) : 0;
       let con = conInp ? Math.max(0, fmt.safeNum(conInp.value)) : 0;
 
       const totalEnviado = it.qtd_enviada;
+
+      // Edição bidirecional: se o usuário alterou "Qtd retornada" diretamente,
+      // recalculamos refugo automaticamente (mantendo conserto inalterado).
+      // Regra: qtd_ret = total_enviado − refugo − conserto
+      const isQtdRetEdit = triggerEl && qtdRetInp && triggerEl === qtdRetInp;
+      if (isQtdRetEdit) {
+        let qtdRet = Math.max(0, Math.min(totalEnviado, fmt.safeNum(qtdRetInp.value)));
+        // refugo absorve a diferença; se conserto for maior que (total − qtdRet), zera refugo e ajusta conserto
+        let novoRef = totalEnviado - qtdRet - con;
+        if (novoRef < 0) {
+          // conserto maior que disponível: ajusta conserto para caber
+          novoRef = 0;
+          con = totalEnviado - qtdRet;
+          if (con < 0) con = 0;
+          if (conInp) conInp.value = String(con);
+        }
+        ref = novoRef;
+        if (refInp) refInp.value = String(ref);
+      }
+
       const totalReduzir = ref + con;
 
       // 2) VALIDAÇÃO: refugo + conserto não podem exceder o total enviado
@@ -5907,6 +5938,13 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       if (totBoaEl) totBoaEl.textContent = fmt.int(boa);
       if (totValEl) totValEl.textContent = fmt.num(valItem);
 
+      // Sincroniza o input "Qtd retornada" quando refugo/conserto mudaram
+      // (mas não sobrescreve enquanto o próprio campo está sendo editado)
+      const qtdRetInp2 = cardEl.querySelector('input[data-role="qtd-ret"]');
+      if (qtdRetInp2 && qtdRetInp2 !== triggerEl) {
+        qtdRetInp2.value = String(boa);
+      }
+
       tEnv += totalEnviado;
       tBoa += boa;
       tRef += ref;
@@ -5923,7 +5961,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     if (tgEnvEl) tgEnvEl.textContent = fmt.int(tEnv);
   }
 
-  itemsWrap.addEventListener('input', recalc);
+  itemsWrap.addEventListener('input', (ev) => recalc(ev.target));
   recalc();
 
   card.querySelector('#m-cancel').onclick = () => m.remove();
