@@ -1921,3 +1921,61 @@ input:focus, select:focus, textarea:focus {
 @media print {
   .user-dropdown { display: none !important; }
 }
+
+/* ============================================================
+ * Validação visual de campos obrigatórios (Nova Remessa, etc.)
+ * ============================================================ */
+.field-invalid,
+input.field-invalid,
+select.field-invalid,
+textarea.field-invalid {
+  border-color: #ef4444 !important;
+  background-color: #fef2f2 !important;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12) !important;
+  animation: fieldShake 0.25s ease-in-out;
+}
+[data-theme="dark"] .field-invalid,
+[data-theme="dark"] input.field-invalid,
+[data-theme="dark"] select.field-invalid,
+[data-theme="dark"] textarea.field-invalid {
+  border-color: #f87171 !important;
+  background-color: rgba(239, 68, 68, 0.08) !important;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18) !important;
+}
+.field-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: #dc2626;
+  margin-top: 4px;
+  line-height: 1.2;
+  animation: fadeIn 0.2s ease-out;
+}
+[data-theme="dark"] .field-error { color: #fca5a5; }
+[data-card-error] {
+  border-color: #ef4444 !important;
+  background: #fef2f2 !important;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+[data-theme="dark"] [data-card-error] {
+  border-color: #f87171 !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+}
+@keyframes fieldShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+
+/* Campos da grade dinâmica (gerados conforme grade selecionada) */
+.grade-dynamic-input {
+  width: 100%;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.grade-dynamic-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+  gap: 8px;
+}

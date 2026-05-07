@@ -1470,11 +1470,12 @@ app.post('/terc/remessas', async (c) => {
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
-         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
       .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, toInt(it.grade_num, 1),
-        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++).run();
+        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
+        toInt(it.id_grade_tamanho) || null).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
       if (toInt(g.qtd) > 0) {
@@ -1628,11 +1629,12 @@ app.put('/terc/remessas/:id', async (c) => {
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
-         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`)
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao, id_grade_tamanho)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?)`)
       .bind(id, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, toInt(it.grade_num, 1),
-        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++).run();
+        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
+        toInt(it.id_grade_tamanho) || null).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
       if (toInt(g.qtd) > 0) {
@@ -2795,6 +2797,158 @@ app.post('/terc/importar/remessas', async (c) => {
     precos_criados: precosCriados,
     erros: erros.slice(0, 100),
   }));
+});
+
+/* =================================================================
+ * GRADES DE TAMANHO DINÂMICAS (CRUD)
+ * Tabela: terc_grades_tamanho
+ * Campos: id_grade, nome, tamanhos (CSV), descricao, is_default, ativo
+ * ================================================================= */
+
+// Helper: normaliza CSV de tamanhos (trim + dedupe + valida)
+function _normalizaTamanhos(raw: any): string {
+  if (!raw) return '';
+  let arr: string[] = [];
+  if (Array.isArray(raw)) arr = raw.map((x) => String(x).trim()).filter(Boolean);
+  else arr = String(raw).split(/[,;|]/).map((x) => x.trim()).filter(Boolean);
+  // dedupe preservando ordem
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of arr) {
+    const k = t.toUpperCase();
+    if (!seen.has(k)) { seen.add(k); out.push(t); }
+  }
+  return out.join(',');
+}
+
+// LIST — apenas ativos por padrão; ?incluir_inativos=1 para listar todos
+app.get('/terc/grades-tamanho', async (c) => {
+  const incluirInativos = c.req.query('incluir_inativos') === '1';
+  const sql = incluirInativos
+    ? `SELECT * FROM terc_grades_tamanho ORDER BY is_default DESC, nome ASC`
+    : `SELECT * FROM terc_grades_tamanho WHERE ativo=1 ORDER BY is_default DESC, nome ASC`;
+  const r = await c.env.DB.prepare(sql).all<any>();
+  return c.json(ok(r.results || []));
+});
+
+// GET single
+app.get('/terc/grades-tamanho/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const r = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!r) return fail('Grade não encontrada', 404);
+  return c.json(ok(r));
+});
+
+// CREATE
+app.post('/terc/grades-tamanho', async (c) => {
+  const b = await c.req.json();
+  const nome = String(b.nome || '').trim();
+  const tamanhos = _normalizaTamanhos(b.tamanhos);
+  if (!nome) return fail('Nome da grade é obrigatório');
+  if (!tamanhos) return fail('Informe ao menos 1 tamanho (ex.: PP,P,M,G,GG)');
+
+  // Nome único
+  const ex = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE nome=?').bind(nome).first<any>();
+  if (ex) return fail('Já existe uma grade com este nome');
+
+  const isDefault = b.is_default ? 1 : 0;
+  // Se este vai ser o default, zera o flag dos outros
+  if (isDefault) {
+    await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=0 WHERE is_default=1').run();
+  }
+
+  const r = await c.env.DB.prepare(`
+    INSERT INTO terc_grades_tamanho (nome, tamanhos, descricao, is_default, ativo, criado_por)
+    VALUES (?, ?, ?, ?, 1, ?)`)
+    .bind(nome, tamanhos, b.descricao || null, isDefault, getUser(c)).run();
+  return c.json(ok({ id_grade: r.meta.last_row_id, nome, tamanhos, is_default: isDefault }));
+});
+
+// UPDATE
+app.put('/terc/grades-tamanho/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json();
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!cur) return fail('Grade não encontrada', 404);
+
+  const nome = b.nome != null ? String(b.nome).trim() : cur.nome;
+  const tamanhos = b.tamanhos != null ? _normalizaTamanhos(b.tamanhos) : cur.tamanhos;
+  const descricao = b.descricao != null ? b.descricao : cur.descricao;
+  const ativo = b.ativo != null ? (b.ativo ? 1 : 0) : cur.ativo;
+  const isDefault = b.is_default != null ? (b.is_default ? 1 : 0) : cur.is_default;
+
+  if (!nome) return fail('Nome da grade é obrigatório');
+  if (!tamanhos) return fail('Informe ao menos 1 tamanho');
+
+  // Nome único (excluindo o próprio)
+  const ex = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE nome=? AND id_grade<>?').bind(nome, id).first<any>();
+  if (ex) return fail('Já existe outra grade com este nome');
+
+  if (isDefault && !cur.is_default) {
+    await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=0 WHERE is_default=1').run();
+  }
+
+  await c.env.DB.prepare(`
+    UPDATE terc_grades_tamanho
+       SET nome=?, tamanhos=?, descricao=?, is_default=?, ativo=?, dt_alteracao=CURRENT_TIMESTAMP
+     WHERE id_grade=?`)
+    .bind(nome, tamanhos, descricao, isDefault, ativo, id).run();
+
+  return c.json(ok({ id_grade: id, nome, tamanhos, is_default: isDefault, ativo }));
+});
+
+// DUPLICATE — cria uma cópia com sufixo "(cópia)"
+app.post('/terc/grades-tamanho/:id/duplicar', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!cur) return fail('Grade não encontrada', 404);
+
+  // Encontra um nome único
+  let novoNome = `${cur.nome} (cópia)`;
+  let i = 1;
+  while (true) {
+    const ex = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE nome=?').bind(novoNome).first<any>();
+    if (!ex) break;
+    i++;
+    novoNome = `${cur.nome} (cópia ${i})`;
+  }
+
+  const r = await c.env.DB.prepare(`
+    INSERT INTO terc_grades_tamanho (nome, tamanhos, descricao, is_default, ativo, criado_por)
+    VALUES (?, ?, ?, 0, 1, ?)`)
+    .bind(novoNome, cur.tamanhos, cur.descricao || null, getUser(c)).run();
+
+  return c.json(ok({ id_grade: r.meta.last_row_id, nome: novoNome, tamanhos: cur.tamanhos }));
+});
+
+// SET DEFAULT
+app.post('/terc/grades-tamanho/:id/default', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!cur) return fail('Grade não encontrada', 404);
+  if (!cur.ativo) return fail('Grade está inativa — ative antes de marcar como padrão');
+  await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=0 WHERE is_default=1').run();
+  await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=1, dt_alteracao=CURRENT_TIMESTAMP WHERE id_grade=?').bind(id).run();
+  return c.json(ok({ id_grade: id, is_default: 1 }));
+});
+
+// DELETE — soft delete (marca ativo=0); se for default, transfere o flag p/ outra
+app.delete('/terc/grades-tamanho/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!cur) return fail('Grade não encontrada', 404);
+
+  // Hard delete se não estiver em uso (sempre soft por segurança aqui)
+  await c.env.DB.prepare('UPDATE terc_grades_tamanho SET ativo=0, is_default=0, dt_alteracao=CURRENT_TIMESTAMP WHERE id_grade=?').bind(id).run();
+
+  // Se era a default, promove a próxima ativa
+  if (cur.is_default) {
+    const next = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE ativo=1 ORDER BY id_grade ASC LIMIT 1').first<any>();
+    if (next) {
+      await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=1 WHERE id_grade=?').bind(next.id_grade).run();
+    }
+  }
+  return c.json(ok({ id_grade: id, deleted: true }));
 });
 
 export default app;

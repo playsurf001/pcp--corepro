@@ -113,6 +113,7 @@ const NAV = [
   { id: 'terc_produtos', label: 'Produtos', icon: 'fa-tshirt', group: 'Terceirização', tercOnly: true },
   { id: 'terc_precos', label: 'Preços / Coleção', icon: 'fa-money-bill-wave', group: 'Terceirização', tercOnly: true },
   { id: 'terc_importador', label: 'Importação', icon: 'fa-file-excel', group: 'Terceirização', tercOnly: true },
+  { id: 'terc_grades_tamanho', label: 'Grades de Tamanho', icon: 'fa-ruler-combined', group: 'Terceirização', tercOnly: true },
 
   // ==== ADMIN — Gestão ====
   { id: 'admin_dashboard', label: 'Dashboard MES', icon: 'fa-tachometer-alt', group: 'Gestão', adminOnly: true },
@@ -4268,7 +4269,49 @@ function TERC_normCorPt(s) {
 async function TERC_openRemModal(id, onSave) {
   const edit = !!id;
   await TERC.load();
-  const TAMANHOS = ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'];
+  // Lista "universal" usada como fallback quando nenhuma grade dinâmica está disponível.
+  // Inclui todos os tamanhos comuns para acomodar remessas legadas.
+  const TAMANHOS_FALLBACK = ['PP', 'P', 'M', 'G', 'GG', 'EG', 'XG', 'UN', 'TAM1', 'TAM2'];
+
+  // ---- Carrega grades de tamanho dinâmicas ----
+  let GRADES_TAMANHO = [];
+  let GRADE_DEFAULT = null;
+  try {
+    const rg = await api('get', '/terc/grades-tamanho', null, { silent: true });
+    GRADES_TAMANHO = fmt.safeArr(rg?.data).filter(g => g.ativo);
+    GRADE_DEFAULT = GRADES_TAMANHO.find(g => g.is_default) || GRADES_TAMANHO[0] || null;
+  } catch {}
+
+  // Helpers de grade dinâmica
+  function _gradeTamanhosArray(g) {
+    if (!g || !g.tamanhos) return [];
+    return String(g.tamanhos).split(',').map(t => t.trim()).filter(Boolean);
+  }
+  // Tamanhos visíveis para um item: prioriza id_grade_tamanho do item;
+  // se ausente, usa os tamanhos da grade padrão; em última instância usa fallback
+  // mesclado com tamanhos já existentes na grade do item (modo edição).
+  function _itemTamanhos(it) {
+    let arr = [];
+    if (it.id_grade_tamanho) {
+      const g = GRADES_TAMANHO.find(x => x.id_grade == it.id_grade_tamanho);
+      arr = _gradeTamanhosArray(g);
+    }
+    if (arr.length === 0 && GRADE_DEFAULT) arr = _gradeTamanhosArray(GRADE_DEFAULT);
+    if (arr.length === 0) arr = TAMANHOS_FALLBACK.slice();
+    // Inclui tamanhos pré-existentes (edição de remessa antiga)
+    Object.keys(it.grade || {}).forEach(t => {
+      if (Number(it.grade[t]) > 0 && !arr.includes(t)) arr.push(t);
+    });
+    return arr;
+  }
+  // Lista global de tamanhos (união de todas as grades + fallback) — usada para
+  // garantir que ao salvar nenhum tamanho seja perdido caso o usuário troque de grade.
+  function _allKnownTamanhos() {
+    const set = new Set(TAMANHOS_FALLBACK);
+    GRADES_TAMANHO.forEach(g => _gradeTamanhosArray(g).forEach(t => set.add(t)));
+    return Array.from(set);
+  }
+  const TAMANHOS = _allKnownTamanhos();
 
   // ---- Carrega dados da remessa (edição) ou usa defaults (nova) ----
   let r = {
@@ -4312,6 +4355,21 @@ async function TERC_openRemModal(id, onSave) {
     } else if (over.grade && typeof over.grade === 'object') {
       Object.assign(grade, over.grade);
     }
+    // Detecta a grade de tamanho usada por este item:
+    //  - Se vier explícito do backend (id_grade_tamanho) usa ele.
+    //  - Senão, tenta casar pelos tamanhos já presentes com alguma grade cadastrada.
+    //  - Senão, usa a default.
+    let idGrade = over.id_grade_tamanho || null;
+    if (!idGrade && Object.keys(grade).length > 0) {
+      const tamsItem = Object.keys(grade).filter(t => Number(grade[t]) > 0).map(t => t.toUpperCase()).sort().join(',');
+      const match = GRADES_TAMANHO.find(g => {
+        const ts = _gradeTamanhosArray(g).map(t => t.toUpperCase()).sort().join(',');
+        return ts === tamsItem;
+      });
+      if (match) idGrade = match.id_grade;
+    }
+    if (!idGrade && GRADE_DEFAULT) idGrade = GRADE_DEFAULT.id_grade;
+
     return {
       uid: _uid++,
       id_item: over.id_item || null,
@@ -4323,6 +4381,7 @@ async function TERC_openRemModal(id, onSave) {
       preco_unit: Number(over.preco_unit || 0),
       tempo_peca: Number(over.tempo_peca || 0),
       grade,
+      id_grade_tamanho: idGrade,
       _qtdRetornada: Number(over._qtdRetornada || 0),
       _precoTag: '',
     };
@@ -4428,8 +4487,11 @@ async function TERC_openRemModal(id, onSave) {
         <span>Total: <b id="tot-valor" class="text-emerald-700">R$ 0,00</b></span>
         <span class="text-slate-500">Previsão: <b id="tot-prev">—</b></span>
       </div>
-      <div class="flex gap-2">
+      <div class="flex gap-2 flex-wrap">
         <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="m-rascunho" class="btn btn-secondary" title="Salva o estado atual no navegador para continuar depois">
+          <i class="fas fa-bookmark mr-1"></i>Salvar rascunho
+        </button>
         <button id="m-save" class="btn btn-primary">
           <i class="fas fa-save mr-1"></i>Salvar remessa
         </button>
@@ -4438,6 +4500,72 @@ async function TERC_openRemModal(id, onSave) {
   `;
   m.appendChild(card);
   document.body.appendChild(m);
+
+  // ---- RASCUNHO LOCAL (localStorage) ----
+  // Cada sessão de Nova Remessa pode salvar/recuperar 1 rascunho.
+  // Edição de remessa existente NÃO usa rascunho (escopo: novas).
+  const RASCUNHO_KEY = 'corepro:remessa:rascunho';
+  function _coletarEstado() {
+    return {
+      ts: Date.now(),
+      cabecalho: {
+        num_op: $('#m-op')?.value || '',
+        id_terc: $('#m-terc')?.value || '',
+        id_colecao: $('#m-col')?.value || '',
+        dt_saida: $('#m-dts')?.value || '',
+        dt_inicio: $('#m-dti')?.value || '',
+        qtd_pessoas: $('#m-pess')?.value || '',
+        min_trab_dia: $('#m-min')?.value || '',
+        efic_pct: $('#m-ef')?.value || '',
+        prazo_dias: $('#m-pz')?.value || '',
+        status: $('#m-status')?.value || 'AguardandoEnvio',
+        observacao: $('#m-obs')?.value || '',
+      },
+      itens: itens.map(it => ({
+        id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
+        id_servico: it.id_servico, cor: it.cor,
+        preco_unit: it.preco_unit, tempo_peca: it.tempo_peca,
+        grade: it.grade, id_grade_tamanho: it.id_grade_tamanho,
+      })),
+    };
+  }
+  function _aplicarEstado(s) {
+    if (!s || !s.cabecalho) return;
+    const h = s.cabecalho;
+    if ($('#m-op'))    $('#m-op').value    = h.num_op || '';
+    if ($('#m-terc'))  $('#m-terc').value  = h.id_terc || '';
+    if ($('#m-col'))   $('#m-col').value   = h.id_colecao || '';
+    if ($('#m-dts'))   $('#m-dts').value   = h.dt_saida || '';
+    if ($('#m-dti'))   $('#m-dti').value   = h.dt_inicio || '';
+    if ($('#m-pess'))  $('#m-pess').value  = h.qtd_pessoas || 1;
+    if ($('#m-min'))   $('#m-min').value   = h.min_trab_dia || 480;
+    if ($('#m-ef'))    $('#m-ef').value    = h.efic_pct || 0.8;
+    if ($('#m-pz'))    $('#m-pz').value    = h.prazo_dias || 0;
+    if ($('#m-status'))$('#m-status').value= h.status || 'AguardandoEnvio';
+    if ($('#m-obs'))   $('#m-obs').value   = h.observacao || '';
+    if (Array.isArray(s.itens) && s.itens.length > 0) {
+      itens = s.itens.map(it => newItem(it));
+      mountItens();
+    }
+  }
+  // Oferece restaurar rascunho ao abrir Nova Remessa
+  if (!edit) {
+    try {
+      const raw = localStorage.getItem(RASCUNHO_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        const ageMin = Math.round((Date.now() - (data.ts || 0)) / 60000);
+        setTimeout(() => {
+          if (confirm(`Existe um rascunho salvo há ${ageMin} min. Deseja recuperá-lo?`)) {
+            _aplicarEstado(data);
+            toast('Rascunho recuperado', 'success');
+          } else {
+            localStorage.removeItem(RASCUNHO_KEY);
+          }
+        }, 200);
+      }
+    } catch {}
+  }
 
   // ---- Toggle modo avançado ----
   $('#m-adv').onchange = (e) => $('#m-advanced').classList.toggle('hidden', !e.target.checked);
@@ -4479,7 +4607,10 @@ async function TERC_openRemModal(id, onSave) {
           <i class="fas fa-tshirt mr-1 text-brand"></i>
           Produto <span class="text-xs text-slate-500" data-role="cor-label">${corBadge}</span>
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 flex-wrap">
+          <button type="button" class="btn btn-secondary btn-sm" data-act="dup-item" title="Duplicar este item (mesma grade e cor)">
+            <i class="fas fa-copy mr-1"></i>Duplicar
+          </button>
           <button type="button" class="btn btn-secondary btn-sm" data-act="add-cor" title="Duplicar este produto com outra cor">
             <i class="fas fa-palette mr-1"></i>+ Cor
           </button>
@@ -4517,12 +4648,26 @@ async function TERC_openRemModal(id, onSave) {
           <input type="number" step="0.01" data-f="tempo" value="${Number(it.tempo_peca || 0)}" /></div>
 
         <div class="col-span-12">
-          <label class="font-semibold">Grade *</label>
-          <div class="grid grid-cols-5 md:grid-cols-10 gap-2 mt-1" data-f="grade">
-            ${TAMANHOS.map(t => `
+          <div class="flex flex-wrap items-end justify-between gap-2 mb-1">
+            <label class="font-semibold mb-0">Grade *</label>
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-slate-500 mb-0">Grade de tamanho:</label>
+              <select data-f="grade-tipo" class="text-xs" style="min-width:160px">
+                ${GRADES_TAMANHO.length === 0
+                  ? '<option value="">— sem grades cadastradas —</option>'
+                  : GRADES_TAMANHO.map(g => `<option value="${g.id_grade}" ${g.id_grade == it.id_grade_tamanho ? 'selected' : ''}>${(g.nome || '').replace(/</g,'&lt;')} (${g.tamanhos})</option>`).join('')
+                }
+              </select>
+              <button type="button" class="btn btn-secondary btn-sm" data-act="copy-grade" title="Copiar grade deste item para os demais">
+                <i class="fas fa-clone"></i>
+              </button>
+            </div>
+          </div>
+          <div class="grade-dynamic-wrap" data-f="grade">
+            ${_itemTamanhos(it).map(t => `
               <div class="text-center">
                 <div class="text-xs font-mono text-slate-500">${t}</div>
-                <input data-tam="${t}" type="number" min="0" value="${it.grade[t] || 0}" class="text-center grade-in-x" />
+                <input data-tam="${t}" type="number" min="0" value="${it.grade[t] || 0}" class="text-center grade-in-x grade-dynamic-input" />
               </div>`).join('')}
           </div>
           <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
@@ -4680,21 +4825,45 @@ async function TERC_openRemModal(id, onSave) {
     fTempo.addEventListener('input', () => { it.tempo_peca = Number(fTempo.value || 0); recalcAll(); });
 
     // ---- Grade: atualiza estado + recalcula ----
-    wrap.querySelectorAll('.grade-in-x').forEach(inp => {
-      inp.addEventListener('input', () => {
-        it.grade[inp.dataset.tam] = Number(inp.value || 0);
-        recalcItem();
+    function bindGradeInputs() {
+      wrap.querySelectorAll('.grade-in-x').forEach(inp => {
+        inp.addEventListener('input', () => {
+          it.grade[inp.dataset.tam] = Number(inp.value || 0);
+          recalcItem();
+        });
+        inp.addEventListener('change', () => { _lastKey = ''; autoLookup(); });
       });
-      inp.addEventListener('change', () => { _lastKey = ''; autoLookup(); });
-    });
+    }
+    bindGradeInputs();
+
+    // ---- Seletor de Grade dinâmica ----
+    const fGradeTipo = wrap.querySelector('[data-f="grade-tipo"]');
+    if (fGradeTipo) {
+      fGradeTipo.addEventListener('change', () => {
+        const idG = Number(fGradeTipo.value) || null;
+        it.id_grade_tamanho = idG;
+        // Re-renderiza apenas o container da grade (preserva valores existentes)
+        const gradeWrap = wrap.querySelector('[data-f="grade"]');
+        if (gradeWrap) {
+          gradeWrap.innerHTML = _itemTamanhos(it).map(t => `
+            <div class="text-center">
+              <div class="text-xs font-mono text-slate-500">${t}</div>
+              <input data-tam="${t}" type="number" min="0" value="${it.grade[t] || 0}" class="text-center grade-in-x grade-dynamic-input" />
+            </div>`).join('');
+          bindGradeInputs();
+          recalcItem();
+        }
+      });
+    }
 
     // ---- Botões do card ----
     wrap.querySelector('[data-act="add-cor"]').onclick = () => {
-      // Clona produto, mantém serviço/preço, mas zera grade e cor
+      // Clona produto, mantém serviço/preço/grade-tipo, mas zera grade e cor
       const clone = newItem({
         id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
         id_servico: it.id_servico, cor: '', preco_unit: it.preco_unit,
         tempo_peca: it.tempo_peca, grade: {},
+        id_grade_tamanho: it.id_grade_tamanho,
       });
       itens.push(clone);
       mountItens();
@@ -4704,6 +4873,47 @@ async function TERC_openRemModal(id, onSave) {
         if (last) last.querySelector('[data-f="cor"]')?.focus();
       }, 30);
     };
+    // ---- Duplicar item completo (mesmo produto, cor, preço e grade) ----
+    const fDupBtn = wrap.querySelector('[data-act="dup-item"]');
+    if (fDupBtn) {
+      fDupBtn.onclick = () => {
+        const clone = newItem({
+          id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
+          id_servico: it.id_servico, cor: it.cor, preco_unit: it.preco_unit,
+          tempo_peca: it.tempo_peca, grade: { ...(it.grade || {}) },
+          id_grade_tamanho: it.id_grade_tamanho,
+        });
+        itens.push(clone);
+        mountItens();
+        toast('Item duplicado', 'success');
+      };
+    }
+    // ---- Copiar grade deste item para todos os outros ----
+    const fCopyGradeBtn = wrap.querySelector('[data-act="copy-grade"]');
+    if (fCopyGradeBtn) {
+      fCopyGradeBtn.onclick = () => {
+        if (itens.length < 2) {
+          toast('Adicione outro item antes de copiar a grade', 'warning');
+          return;
+        }
+        const sourceGrade = { ...(it.grade || {}) };
+        const sourceGradeId = it.id_grade_tamanho;
+        let count = 0;
+        itens.forEach(other => {
+          if (other.uid === it.uid) return;
+          if (other._qtdRetornada > 0) return; // não sobrescreve item com retornos
+          other.grade = { ...sourceGrade };
+          other.id_grade_tamanho = sourceGradeId;
+          count++;
+        });
+        if (count === 0) {
+          toast('Nenhum item disponível para receber a grade', 'warning');
+          return;
+        }
+        mountItens();
+        toast(`Grade copiada para ${count} item(ns)`, 'success');
+      };
+    }
     wrap.querySelector('[data-act="remove"]').onclick = () => {
       if (it._qtdRetornada > 0) {
         toast('Não é possível remover: este item já tem retornos registrados', 'warning');
@@ -4719,7 +4929,8 @@ async function TERC_openRemModal(id, onSave) {
 
     // ---- Recalcula totais deste card ----
     function recalcItem() {
-      const total = TAMANHOS.reduce((a, t) => a + (Number(it.grade[t] || 0)), 0);
+      // Soma considerando todos os tamanhos conhecidos no estado (não só os visíveis)
+      const total = Object.keys(it.grade || {}).reduce((a, t) => a + (Number(it.grade[t] || 0)), 0);
       const valor = total * Number(it.preco_unit || 0);
       wrap.querySelector('[data-role="tot-pcs"]').textContent = fmt.int(total);
       wrap.querySelector('[data-role="tot-val"]').textContent = TERC.fmtBRL(valor);
@@ -4798,29 +5009,184 @@ async function TERC_openRemModal(id, onSave) {
   // ---- Cancelar ----
   $('#m-cancel').onclick = () => m.remove();
 
+  // ---- Salvar rascunho (localStorage) ----
+  const btnRas = $('#m-rascunho');
+  if (btnRas) {
+    btnRas.onclick = () => {
+      try {
+        const data = _coletarEstado();
+        localStorage.setItem(RASCUNHO_KEY, JSON.stringify(data));
+        toast('Rascunho salvo no navegador', 'success');
+      } catch (e) {
+        toast('Falha ao salvar rascunho', 'error');
+      }
+    };
+  }
+
+  // ---- Helpers de validação visual ----
+  // Marca um campo como inválido com borda vermelha + mensagem amigável abaixo
+  function _markInvalid(input, msg) {
+    if (!input) return;
+    input.classList.add('field-invalid');
+    // Procura ou cria o elemento de erro logo após o input
+    let errEl = input.parentElement?.querySelector(':scope > .field-error');
+    if (!errEl) {
+      errEl = document.createElement('div');
+      errEl.className = 'field-error text-xs text-red-600 mt-1';
+      errEl.style.cssText = 'display:flex;align-items:center;gap:4px';
+      input.parentElement?.appendChild(errEl);
+    }
+    errEl.innerHTML = `<i class="fas fa-circle-exclamation"></i><span>${msg}</span>`;
+  }
+  function _clearAllInvalid() {
+    card.querySelectorAll('.field-invalid').forEach(el => el.classList.remove('field-invalid'));
+    card.querySelectorAll('.field-error').forEach(el => el.remove());
+    card.querySelectorAll('[data-card-error]').forEach(el => {
+      el.removeAttribute('data-card-error');
+      el.style.borderColor = '';
+      el.style.background = '';
+    });
+  }
+  function _scrollToFirstError() {
+    const first = card.querySelector('.field-invalid, [data-card-error]');
+    if (first) {
+      try { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch {}
+      try { first.focus({ preventScroll: true }); } catch {}
+    }
+  }
+  function _markCardError(itemUid) {
+    const w = card.querySelector(`[data-uid="${itemUid}"]`);
+    if (!w) return;
+    w.setAttribute('data-card-error', '1');
+    w.style.borderColor = '#ef4444';
+    w.style.background = '#fef2f2';
+  }
+
+  // ---- Cancelar ----
+  // (já definido acima, evitamos sobrescrever)
+
+  // ---- Limpa erro automaticamente quando o usuário começa a corrigir ----
+  card.addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains('field-invalid')) {
+      t.classList.remove('field-invalid');
+      const err = t.parentElement?.querySelector(':scope > .field-error');
+      if (err) err.remove();
+    }
+    // Se o item-card estava marcado e agora algum input dentro dele foi editado, removemos a borda
+    const wrap = t.closest('[data-card-error]');
+    if (wrap && !wrap.querySelector('.field-invalid')) {
+      wrap.removeAttribute('data-card-error');
+      wrap.style.borderColor = '';
+      wrap.style.background = '';
+    }
+  });
+  card.addEventListener('change', (ev) => {
+    const t = ev.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains('field-invalid')) {
+      t.classList.remove('field-invalid');
+      const err = t.parentElement?.querySelector(':scope > .field-error');
+      if (err) err.remove();
+    }
+  });
+
   // ---- SALVAR (1 requisição em lote) ----
   $('#m-save').onclick = async () => {
-    if (!$('#m-terc').value) { toast('Selecione o terceirizado', 'warning'); return; }
-    if (!$('#m-dts').value) { toast('Informe a data de saída', 'warning'); return; }
+    _clearAllInvalid();
+    const errs = [];
 
-    // Constrói itens enviáveis (validações)
+    // 1) Cabeçalho: Terceirizado + Data saída obrigatórios
+    if (!$('#m-terc').value) {
+      _markInvalid($('#m-terc'), 'Selecione o terceirizado.');
+      errs.push('Terceirizado é obrigatório');
+    }
+    if (!$('#m-dts').value) {
+      _markInvalid($('#m-dts'), 'Informe a data de saída.');
+      errs.push('Data de saída é obrigatória');
+    }
+
+    // 2) Itens: cada item precisa de Produto, Serviço, Referência, Cor, Preço > 0 e Grade preenchida
     const itensBody = [];
     for (const it of itens) {
+      const wrap = card.querySelector(`[data-uid="${it.uid}"]`);
       const grade = TAMANHOS
         .map(t => ({ tamanho: t, qtd: Number(it.grade[t] || 0) }))
         .filter(g => g.qtd > 0);
       const totalItem = grade.reduce((a, g) => a + g.qtd, 0);
-      // Item totalmente vazio: ignora silenciosamente
-      if (totalItem === 0 && !it.cod_ref && !it.cor && !it.id_servico) continue;
-      // Validações por item
-      if (!it.id_servico) { toast('Cada produto precisa de um serviço', 'warning'); return; }
-      if (!it.cod_ref) { toast('Cada produto precisa de uma referência', 'warning'); return; }
-      if (totalItem === 0) { toast('Item sem quantidade na grade — preencha ou remova', 'warning'); return; }
-      // Proteção: não permitir qtd menor que retornado
-      if (it._qtdRetornada > 0 && totalItem < it._qtdRetornada) {
-        toast(`Item ${it.cod_ref}/${it.cor || '?'}: total (${totalItem}) < retornado (${it._qtdRetornada})`, 'warning');
-        return;
+
+      // Item totalmente vazio: ignora silenciosamente (caso usuário tenha clicado +Add e desistido)
+      if (
+        totalItem === 0 && !it.cod_ref && !it.cor && !it.id_servico
+        && !it.id_produto && !Number(it.preco_unit)
+      ) continue;
+
+      let cardHasErr = false;
+      if (wrap) {
+        // Produto
+        if (!it.id_produto) {
+          _markInvalid(wrap.querySelector('[data-f="prod"]'), 'Selecione o produto.');
+          cardHasErr = true;
+        }
+        // Serviço
+        if (!it.id_servico) {
+          _markInvalid(wrap.querySelector('[data-f="serv"]'), 'Selecione o serviço.');
+          cardHasErr = true;
+        }
+        // Referência
+        if (!it.cod_ref || !String(it.cod_ref).trim()) {
+          _markInvalid(wrap.querySelector('[data-f="ref"]'), 'Referência é obrigatória.');
+          cardHasErr = true;
+        }
+        // Cor
+        if (!it.cor || !String(it.cor).trim()) {
+          _markInvalid(wrap.querySelector('[data-f="cor"]'), 'Informe a cor.');
+          cardHasErr = true;
+        }
+        // Preço unitário > 0
+        if (!Number(it.preco_unit) || Number(it.preco_unit) <= 0) {
+          _markInvalid(wrap.querySelector('[data-f="preco"]'), 'Preço unitário deve ser maior que zero.');
+          cardHasErr = true;
+        }
+        // Grade
+        if (totalItem === 0) {
+          const gradeEl = wrap.querySelector('[data-f="grade"]');
+          if (gradeEl) {
+            // Marca o container da grade
+            gradeEl.classList.add('field-invalid');
+            let errEl = gradeEl.parentElement?.querySelector(':scope > .field-error');
+            if (!errEl) {
+              errEl = document.createElement('div');
+              errEl.className = 'field-error text-xs text-red-600 mt-1';
+              errEl.innerHTML = '<i class="fas fa-circle-exclamation"></i> Preencha a grade com pelo menos 1 peça.';
+              gradeEl.parentElement?.appendChild(errEl);
+            }
+          }
+          cardHasErr = true;
+        }
+        // Não permitir qtd menor que retornado (na edição)
+        if (it._qtdRetornada > 0 && totalItem > 0 && totalItem < it._qtdRetornada) {
+          const gradeEl = wrap.querySelector('[data-f="grade"]');
+          if (gradeEl) {
+            gradeEl.classList.add('field-invalid');
+            let errEl = gradeEl.parentElement?.querySelector(':scope > .field-error');
+            if (!errEl) {
+              errEl = document.createElement('div');
+              errEl.className = 'field-error text-xs text-red-600 mt-1';
+              gradeEl.parentElement?.appendChild(errEl);
+            }
+            errEl.innerHTML = `<i class="fas fa-circle-exclamation"></i> Total (${totalItem}) menor que o já retornado (${it._qtdRetornada}).`;
+          }
+          cardHasErr = true;
+        }
       }
+      if (cardHasErr) {
+        _markCardError(it.uid);
+        errs.push(`Item ${it.cod_ref || '(sem ref)'} / ${it.cor || '(sem cor)'}`);
+        continue;
+      }
+
       itensBody.push({
         id_item: it.id_item || null,
         id_produto: it.id_produto || null,
@@ -4831,9 +5197,19 @@ async function TERC_openRemModal(id, onSave) {
         preco_unit: Number(it.preco_unit || 0),
         tempo_peca: Number(it.tempo_peca || 0),
         grade,
+        id_grade_tamanho: it.id_grade_tamanho || null,
       });
     }
-    if (itensBody.length === 0) { toast('Adicione pelo menos 1 produto com grade preenchida', 'warning'); return; }
+
+    if (errs.length > 0) {
+      toast(`Corrija os campos destacados (${errs.length} erro(s)).`, 'error');
+      _scrollToFirstError();
+      return;
+    }
+    if (itensBody.length === 0) {
+      toast('Adicione pelo menos 1 produto com grade preenchida', 'warning');
+      return;
+    }
 
     const body = {
       num_controle,
@@ -4855,6 +5231,8 @@ async function TERC_openRemModal(id, onSave) {
       if (edit) await api('put', '/terc/remessas/' + id, body);
       else await api('post', '/terc/remessas', body);
       toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
+      // Limpa rascunho local após salvar com sucesso
+      try { localStorage.removeItem(RASCUNHO_KEY); } catch {}
       m.remove();
       if (onSave) onSave();
     } catch {}
@@ -5315,8 +5693,8 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
     <div class="bg-blue-50 border border-blue-200 p-2 rounded text-xs text-blue-800 mb-2">
       <i class="fas fa-circle-info mr-1"></i>
-      O <b>valor é calculado com base no total enviado</b>. Refugo e conserto
-      <b>não reduzem o pagamento</b>, apenas ajustam a distribuição da grade retornada.
+      O pagamento é calculado pelas <b>peças boas retornadas</b> (total enviado − refugo − conserto) × preço unitário.
+      Refugo e conserto <b>reduzem o pagamento</b> e também redistribuem a grade (sai primeiro do menor tamanho).
     </div>
 
     <div class="text-sm font-semibold mb-2 text-slate-700">
@@ -5328,13 +5706,14 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       <div class="flex items-center justify-between gap-3 flex-wrap">
         <div class="text-sm space-y-1">
           <div class="flex flex-wrap gap-x-4 gap-y-1">
+            <span><b>Enviado:</b> <span id="tg-env" class="font-mono">0</span> pç</span>
+            <span><b>Quantidade retornada:</b> <span id="tg-qtd" class="font-mono text-blue-700">0</span> pç</span>
             <span><b>Boas:</b> <span id="tg-boa" class="font-mono">0</span></span>
             <span><b>Refugo:</b> <span id="tg-ref" class="font-mono text-amber-700">0</span></span>
             <span><b>Conserto:</b> <span id="tg-con" class="font-mono text-orange-700">0</span></span>
-            <span><b>Retornado:</b> <span id="tg-qtd" class="font-mono">0</span> pç</span>
           </div>
           <div class="text-base font-semibold text-emerald-800">
-            <i class="fas fa-money-bill-wave mr-1"></i>Pago: R$ <span id="tg-val">0,00</span>
+            <i class="fas fa-money-bill-wave mr-1"></i>Total pago: R$ <span id="tg-val">0,00</span>
             <span class="text-xs text-slate-500 font-normal ml-1">(boas × preço unitário)</span>
           </div>
         </div>
@@ -5410,10 +5789,12 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
             <input data-role="conserto" type="number" min="0" value="${it.qtd_conserto}" class="ret-side-in border-orange-300" />
           </div>
           <div class="md:col-span-2 text-xs text-slate-600 self-center">
-            <div>Total: <b data-role="tot-qtd">${fmt.int(it.qtd_enviada)}</b> pç
-              <span class="text-slate-400">(boas <b data-role="tot-boa">${fmt.int(it.qtd_enviada)}</b>)</span>
+            <div>Enviado: <b>${fmt.int(it.qtd_enviada)}</b> pç</div>
+            <div>Quantidade retornada: <b data-role="tot-boa" class="text-blue-700">${fmt.int(it.qtd_enviada)}</b> pç
+              <span class="text-slate-400">(boas)</span>
             </div>
-            <div class="text-emerald-700 font-semibold">Pago: R$ <span data-role="tot-val">${fmt.num(it.qtd_enviada * it.preco_unit)}</span></div>
+            <div class="text-emerald-700 font-semibold">Total pago: R$ <span data-role="tot-val">${fmt.num(it.qtd_enviada * it.preco_unit)}</span></div>
+            <div class="text-[11px] text-slate-400" data-role="tot-qtd-hidden" style="display:none">${fmt.int(it.qtd_enviada)}</div>
           </div>
           <div class="md:col-span-2">
             <input data-role="obs" placeholder="Observação do item (opcional)"
@@ -5429,11 +5810,12 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   state.items.forEach((it, i) => itemsWrap.appendChild(renderItem(it, i)));
 
   // Recalcula a grade ajustada (refugo/conserto saem do menor tamanho) e os totais.
-  // REGRAS:
-  //  - Grade retornada (soma) = total enviado, sempre. Não há input de grade.
-  //  - Pagamento = total_enviado × preço_unit (refugo/conserto NÃO descontam).
+  // REGRAS (regra B):
+  //  - Grade retornada = (total_enviado − refugo − conserto), distribuída na grade enviada
+  //    removendo primeiro do MENOR tamanho.
+  //  - Pagamento = qtd_boas × preço_unit (refugo/conserto DESCONTAM).
   //  - Refugo + conserto > total_enviado → erro.
-  //  - Distribuição: tira primeiro do MENOR tamanho (>0).
+  //  - Quantidade retornada (peças boas) é exibida explicitamente.
   function recalc() {
     let tEnv = 0, tBoa = 0, tRef = 0, tCon = 0, tVal = 0;
     state.items.forEach((it, i) => {
@@ -5501,9 +5883,9 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       it._gradeBoa = gradeAjustada;        // grade BOA por tamanho (após redistribuição)
       it._totalEnviado = totalEnviado;     // total enviado (= total retornado)
 
-      // 6) Cálculos finais — pagamento sempre = total_enviado × preço (refugo/conserto NÃO descontam)
+      // 6) Cálculos finais — pagamento = qtd_boas × preço (refugo/conserto descontam)
       const boa = totalEnviado - reduzirAplicado;
-      const valItem = totalEnviado * it.preco_unit;
+      const valItem = boa * Number(it.preco_unit || 0);
 
       // 7) UI: erro
       if (errEl) {
@@ -5520,10 +5902,8 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       cardEl.classList.toggle('border-red-400', !!errMsg);
       cardEl.classList.toggle('bg-red-50', !!errMsg);
 
-      const totQtdEl = cardEl.querySelector('[data-role="tot-qtd"]');
       const totBoaEl = cardEl.querySelector('[data-role="tot-boa"]');
       const totValEl = cardEl.querySelector('[data-role="tot-val"]');
-      if (totQtdEl) totQtdEl.textContent = fmt.int(totalEnviado);
       if (totBoaEl) totBoaEl.textContent = fmt.int(boa);
       if (totValEl) totValEl.textContent = fmt.num(valItem);
 
@@ -5537,8 +5917,10 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     card.querySelector('#tg-boa').textContent = fmt.int(tBoa);
     card.querySelector('#tg-ref').textContent = fmt.int(tRef);
     card.querySelector('#tg-con').textContent = fmt.int(tCon);
-    card.querySelector('#tg-qtd').textContent = fmt.int(tEnv);
+    card.querySelector('#tg-qtd').textContent = fmt.int(tBoa);
     card.querySelector('#tg-val').textContent = fmt.num(tVal);
+    const tgEnvEl = card.querySelector('#tg-env');
+    if (tgEnvEl) tgEnvEl.textContent = fmt.int(tEnv);
   }
 
   itemsWrap.addEventListener('input', recalc);
@@ -5546,11 +5928,10 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
 
   card.querySelector('#m-cancel').onclick = () => m.remove();
   card.querySelector('#m-save').onclick = async () => {
-    // Monta payload por item segundo a NOVA regra:
-    //  - Grade retornada (soma) = total ENVIADO do item, sempre.
-    //  - Refugo/Conserto apenas redistribuem a grade (saem do MENOR tamanho).
+    // Monta payload por item segundo a regra B:
     //  - qtd_boa = total_enviado − (refugo + conserto)
-    //  - valor_pago = total_enviado × preço_unit (refugo/conserto NÃO descontam)
+    //  - Grade retornada (soma) = qtd_boa, distribuída removendo primeiro do MENOR tamanho.
+    //  - valor_pago = qtd_boa × preço_unit (refugo/conserto DESCONTAM)
     const itensPayload = [];
     let blocked = false;
     state.items.forEach((it) => {
@@ -5578,15 +5959,15 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
         blocked = true; return;
       }
 
-      // 4) Valor sempre = total_enviado × preço (refugo/conserto não reduzem)
-      const valorItem = totalEnviado * Number(it.preco_unit || 0);
+      // 4) Valor pago = qtd_boa × preço (refugo/conserto reduzem o pagamento)
+      const valorItem = qtdBoa * Number(it.preco_unit || 0);
 
       itensPayload.push({
         id_item: it.id_item,
         qtd_boa: qtdBoa,
         qtd_refugo: ref,
         qtd_conserto: con,
-        // backend respeita este valor: total_enviado × preço (não boas × preço)
+        // backend respeita este valor: qtd_boa × preço (refugo/conserto descontam)
         valor: valorItem,
         grade,
         observacao: it.observacao || null,
@@ -7180,6 +7561,233 @@ ROUTES.terc_importador = async (main) => {
       $('#result').innerHTML = '<div class="p-3 bg-red-50 text-red-700 rounded">Erro: ' + (e.message || e) + '</div>';
     }
   };
+};
+
+/* ============================================================
+ * GRADES DE TAMANHO DINÂMICAS — CRUD em Configurações
+ * Permite criar/editar/duplicar/excluir grades e definir a padrão.
+ * Cada grade tem nome + lista CSV de tamanhos (ex.: "PP,P,M,G,GG").
+ * ============================================================ */
+ROUTES.terc_grades_tamanho = async (main) => {
+  main.innerHTML = `
+    <div class="page-header mb-4 flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h1 class="text-xl font-bold text-slate-800">
+          <i class="fas fa-ruler-combined mr-2 text-brand"></i>Grades de Tamanho
+        </h1>
+        <p class="text-sm text-slate-500">
+          Cadastre as grades que aparecerão ao criar uma remessa. A grade padrão é usada por novas remessas.
+        </p>
+      </div>
+      <div class="flex gap-2">
+        <button id="g-novo" class="btn btn-success">
+          <i class="fas fa-plus mr-1"></i>Nova Grade
+        </button>
+      </div>
+    </div>
+    <div id="grades-list" class="card p-0 overflow-x-auto"></div>
+  `;
+
+  async function load() {
+    const wrap = $('#grades-list');
+    wrap.innerHTML = '<div class="p-6 text-center text-slate-500"><i class="fas fa-spinner fa-spin mr-2"></i>Carregando…</div>';
+    try {
+      const r = await api('get', '/terc/grades-tamanho?incluir_inativos=1');
+      const lst = fmt.safeArr(r.data);
+      if (lst.length === 0) {
+        wrap.innerHTML = '<div class="p-6 text-center text-slate-500">Nenhuma grade cadastrada. Clique em "Nova Grade" para começar.</div>';
+        return;
+      }
+      wrap.innerHTML = `
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+            <tr>
+              <th class="p-3 text-left">Nome</th>
+              <th class="p-3 text-left">Tamanhos</th>
+              <th class="p-3 text-left">Descrição</th>
+              <th class="p-3 text-center">Padrão</th>
+              <th class="p-3 text-center">Status</th>
+              <th class="p-3 text-right">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${lst.map((g) => `
+              <tr class="border-t hover:bg-slate-50" data-id="${g.id_grade}">
+                <td class="p-3 font-semibold">${(g.nome || '').replace(/</g,'&lt;')}</td>
+                <td class="p-3">
+                  <div class="flex flex-wrap gap-1">
+                    ${String(g.tamanhos || '').split(',').filter(Boolean).map(t =>
+                      `<span class="inline-block px-2 py-0.5 rounded font-mono text-xs bg-slate-100 border border-slate-300">${t}</span>`
+                    ).join('')}
+                  </div>
+                </td>
+                <td class="p-3 text-slate-600 text-xs">${(g.descricao || '—').replace(/</g,'&lt;')}</td>
+                <td class="p-3 text-center">
+                  ${g.is_default
+                    ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-800 border border-emerald-300"><i class="fas fa-star"></i>Padrão</span>'
+                    : (g.ativo ? `<button class="btn btn-secondary btn-sm" data-act="default" title="Marcar como padrão"><i class="far fa-star"></i></button>` : '<span class="text-slate-400 text-xs">—</span>')
+                  }
+                </td>
+                <td class="p-3 text-center">
+                  ${g.ativo
+                    ? '<span class="inline-block px-2 py-0.5 rounded text-xs bg-blue-50 text-blue-700 border border-blue-200">Ativa</span>'
+                    : '<span class="inline-block px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-500 border border-slate-300">Inativa</span>'
+                  }
+                </td>
+                <td class="p-3 text-right">
+                  <div class="flex justify-end gap-1">
+                    <button class="btn btn-secondary btn-sm" data-act="dup" title="Duplicar">
+                      <i class="fas fa-copy"></i>
+                    </button>
+                    <button class="btn btn-primary btn-sm" data-act="edit" title="Editar">
+                      <i class="fas fa-pen"></i>
+                    </button>
+                    <button class="btn btn-danger btn-sm" data-act="del" title="Excluir">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+      // Liga os botões
+      wrap.querySelectorAll('button[data-act]').forEach((btn) => {
+        btn.onclick = async () => {
+          const tr = btn.closest('tr');
+          const id = Number(tr?.dataset.id);
+          const act = btn.dataset.act;
+          if (!id) return;
+          if (act === 'edit') openGradeModal(id, load);
+          else if (act === 'dup') {
+            try {
+              await api('post', `/terc/grades-tamanho/${id}/duplicar`);
+              toast('Grade duplicada', 'success'); load();
+            } catch {}
+          }
+          else if (act === 'default') {
+            try {
+              await api('post', `/terc/grades-tamanho/${id}/default`);
+              toast('Grade marcada como padrão', 'success'); load();
+            } catch {}
+          }
+          else if (act === 'del') {
+            if (!confirm('Confirmar exclusão? A grade será desativada (soft delete).')) return;
+            try {
+              await api('delete', `/terc/grades-tamanho/${id}`);
+              toast('Grade excluída', 'success'); load();
+            } catch {}
+          }
+        };
+      });
+    } catch {
+      wrap.innerHTML = '<div class="p-6 text-center text-red-600">Falha ao carregar grades.</div>';
+    }
+  }
+
+  function openGradeModal(id, onSave) {
+    const editing = !!id;
+    const m = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-xl' });
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-3">
+        <i class="fas ${editing ? 'fa-pen-to-square' : 'fa-plus-circle'} mr-2 text-brand"></i>
+        ${editing ? 'Editar Grade' : 'Nova Grade'} de Tamanho
+      </h3>
+      <div class="grid grid-cols-1 gap-3">
+        <div>
+          <label>Nome da grade *</label>
+          <input id="gm-nome" placeholder="ex.: Padrão Adulto, Numérico 34-42" />
+        </div>
+        <div>
+          <label>Tamanhos *
+            <span class="text-xs text-slate-400 font-normal">(separe por vírgula — ex.: PP,P,M,G,GG)</span>
+          </label>
+          <input id="gm-tams" placeholder="PP,P,M,G,GG" />
+          <div id="gm-preview" class="mt-2 flex flex-wrap gap-1"></div>
+        </div>
+        <div>
+          <label>Descrição <span class="text-xs text-slate-400 font-normal">(opcional)</span></label>
+          <input id="gm-desc" placeholder="ex.: Tamanhos clássicos adulto" />
+        </div>
+        <div class="flex flex-wrap gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" id="gm-default" />
+            <span class="text-sm">Marcar como padrão</span>
+          </label>
+          <label class="flex items-center gap-2">
+            <input type="checkbox" id="gm-ativo" checked />
+            <span class="text-sm">Ativa</span>
+          </label>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-5">
+        <button id="gm-cancel" class="btn btn-secondary">Cancelar</button>
+        <button id="gm-save" class="btn btn-primary"><i class="fas fa-save mr-1"></i>Salvar</button>
+      </div>
+    `;
+    m.appendChild(card); document.body.appendChild(m);
+
+    // Preview ao digitar
+    const $tams = card.querySelector('#gm-tams');
+    const $prev = card.querySelector('#gm-preview');
+    function updatePreview() {
+      const arr = String($tams.value || '').split(/[,;|]/).map(x => x.trim()).filter(Boolean);
+      const seen = new Set();
+      const dedupe = [];
+      arr.forEach(t => { const k = t.toUpperCase(); if (!seen.has(k)) { seen.add(k); dedupe.push(t); } });
+      if (dedupe.length === 0) {
+        $prev.innerHTML = '<span class="text-xs text-slate-400">Pré-visualização aparecerá aqui</span>';
+      } else {
+        $prev.innerHTML = dedupe.map(t =>
+          `<span class="inline-block px-2 py-0.5 rounded font-mono text-xs bg-slate-100 border border-slate-300">${t}</span>`
+        ).join('');
+      }
+    }
+    $tams.addEventListener('input', updatePreview);
+    updatePreview();
+
+    // Carrega dados se for edição
+    if (editing) {
+      api('get', '/terc/grades-tamanho/' + id).then((r) => {
+        const g = r.data || {};
+        card.querySelector('#gm-nome').value = g.nome || '';
+        card.querySelector('#gm-tams').value = g.tamanhos || '';
+        card.querySelector('#gm-desc').value = g.descricao || '';
+        card.querySelector('#gm-default').checked = !!g.is_default;
+        card.querySelector('#gm-ativo').checked = !!g.ativo;
+        updatePreview();
+      }).catch(() => m.remove());
+    } else {
+      card.querySelector('#gm-nome').focus();
+    }
+
+    card.querySelector('#gm-cancel').onclick = () => m.remove();
+    card.querySelector('#gm-save').onclick = async () => {
+      const nome = card.querySelector('#gm-nome').value.trim();
+      const tams = card.querySelector('#gm-tams').value.trim();
+      if (!nome) { toast('Informe o nome da grade', 'warning'); return; }
+      if (!tams) { toast('Informe ao menos 1 tamanho', 'warning'); return; }
+      const body = {
+        nome,
+        tamanhos: tams,
+        descricao: card.querySelector('#gm-desc').value.trim(),
+        is_default: card.querySelector('#gm-default').checked ? 1 : 0,
+        ativo: card.querySelector('#gm-ativo').checked ? 1 : 0,
+      };
+      try {
+        if (editing) await api('put', '/terc/grades-tamanho/' + id, body);
+        else await api('post', '/terc/grades-tamanho', body);
+        toast('Grade salva', 'success');
+        m.remove();
+        onSave && onSave();
+      } catch {}
+    };
+  }
+
+  $('#g-novo').onclick = () => openGradeModal(null, load);
+  load();
 };
 
 /* ============================================================
