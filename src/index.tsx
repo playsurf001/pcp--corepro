@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import type { Bindings } from './lib/db';
-import { authMiddleware, requireAdmin } from './lib/auth';
+import { authMiddleware, requireAdmin, requirePerfil } from './lib/auth';
 
 import auth from './routes/auth';
 import cadastros from './routes/cadastros';
@@ -11,6 +11,7 @@ import ops from './routes/ops';
 import producao from './routes/producao';
 import importador from './routes/importador';
 import relatorios from './routes/relatorios';
+import relatoriosDetalhados from './routes/relatorios_detalhados';
 import terceirizacao from './routes/terceirizacao';
 import mes from './routes/mes';
 
@@ -66,6 +67,9 @@ app.use('/api/rastreabilidade', adminOnly); app.use('/api/rastreabilidade/*', ad
 app.use('/api/alertas', adminOnly); app.use('/api/alertas/*', adminOnly);
 // Relatórios
 app.use('/api/relatorios', adminOnly); app.use('/api/relatorios/*', adminOnly);
+// Relatórios Detalhados: admin + gerente
+const gerenteOuAcima = requirePerfil('gerente');
+app.use('/api/relatorios-det', gerenteOuAcima); app.use('/api/relatorios-det/*', gerenteOuAcima);
 // Importador genérico (NÃO o de terceirização, que tem prefixo /api/terc/importar/...)
 app.use('/api/importar', adminOnly); app.use('/api/importar/*', adminOnly);
 
@@ -75,6 +79,7 @@ app.route('/api', ops);
 app.route('/api', producao);
 app.route('/api', importador);
 app.route('/api', relatorios);
+app.route('/api', relatoriosDetalhados);
 app.route('/api', mes);
 
 // SPA: uma única página, navegação por hash
@@ -113,7 +118,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=4" rel="stylesheet" />
+  <link href="/static/styles.css?v=5" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -143,9 +148,13 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=2"></script>
   <script src="/static/app.js?v=5"></script>
   <script src="/static/mes.js?v=1"></script>
+  <script src="/static/relatorios_det.js?v=1"></script>
 </body>
 </html>`;
 }

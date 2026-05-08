@@ -119,6 +119,7 @@ const NAV = [
   { id: 'admin_dashboard', label: 'Dashboard MES', icon: 'fa-tachometer-alt', group: 'Gestão', adminOnly: true },
   { id: 'mes_dashboard', label: 'MES — Tempo Real', icon: 'fa-bolt', group: 'Gestão', adminOnly: true },
   { id: 'relatorios', label: 'Relatórios', icon: 'fa-file-pdf', group: 'Gestão', adminOnly: true },
+  { id: 'relatorios_detalhados', label: 'Relatórios Detalhados', icon: 'fa-chart-pie', group: 'Gestão', adminOnly: true },
   { id: 'alertas', label: 'Alertas & Notificações', icon: 'fa-bell', group: 'Gestão', adminOnly: true },
 
   // ==== ADMIN — Produção ====
@@ -7827,6 +7828,1353 @@ ROUTES.terc_grades_tamanho = async (main) => {
   $('#g-novo').onclick = () => openGradeModal(null, load);
   load();
 };
+
+/* ============================================================
+ * RELATÓRIOS DETALHADOS — Hub completo com 14 submenus
+ * Acesso: admin/gerente. Reusa endpoints existentes
+ * (/terc/dashboard, /terc/remessas, /terc/resumo, /terc/retornos,
+ *  /terc/financeiro/pendentes) para evitar consultas pesadas.
+ * ============================================================ */
+
+// Carregamento lazy do XLSX (apenas quando exportar Excel)
+async function _ensureXLSX() {
+  if (window.XLSX) return window.XLSX;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+  return window.XLSX;
+}
+
+// Exporta array de objetos para CSV
+function _exportCSV(filename, rows, headers) {
+  if (!rows || !rows.length) { toast('Nada para exportar', 'warning'); return; }
+  const cols = headers || Object.keys(rows[0]);
+  const esc = (v) => {
+    if (v == null) return '';
+    const s = String(v).replace(/"/g, '""');
+    return /[",;\n]/.test(s) ? `"${s}"` : s;
+  };
+  const csv = [cols.join(';'), ...rows.map(r => cols.map(c => esc(r[c])).join(';'))].join('\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+// Exporta para Excel
+async function _exportXLSX(filename, rows, sheetName) {
+  if (!rows || !rows.length) { toast('Nada para exportar', 'warning'); return; }
+  const XLSX = await _ensureXLSX();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName || 'Relatório');
+  XLSX.writeFile(wb, filename);
+}
+
+// Impressão A4 com cabeçalho da empresa e filtros aplicados
+function _imprimirRelatorio(titulo, filtrosTxt, htmlConteudo) {
+  const w = window.open('', '_blank', 'width=1024,height=768');
+  if (!w) { toast('Bloqueador de pop-up impede a impressão', 'error'); return; }
+  const dataGeracao = dayjs().format('DD/MM/YYYY HH:mm');
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${titulo}</title>
+    <style>
+      @page { size: A4; margin: 12mm; }
+      * { box-sizing: border-box; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #111; margin: 0; padding: 0; }
+      .header { display: flex; align-items: center; gap: 12px; border-bottom: 2px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
+      .header img { height: 36px; }
+      .header h1 { margin: 0; font-size: 16pt; }
+      .header .meta { margin-left: auto; font-size: 9pt; color: #555; text-align: right; }
+      .filtros { background: #f5f5f5; padding: 6px 10px; border-left: 3px solid #2563eb; font-size: 9pt; margin-bottom: 12px; }
+      table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+      th, td { padding: 5px 7px; border: 1px solid #ccc; text-align: left; }
+      th { background: #1f2937; color: #fff; font-weight: 600; }
+      tr:nth-child(even) td { background: #fafafa; }
+      .num { text-align: right; font-variant-numeric: tabular-nums; }
+      .center { text-align: center; }
+      h2 { font-size: 12pt; margin: 14px 0 6px; }
+      .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
+      .kpi { border: 1px solid #ddd; padding: 6px 8px; border-radius: 4px; }
+      .kpi .label { font-size: 8pt; color: #666; text-transform: uppercase; }
+      .kpi .value { font-size: 13pt; font-weight: 700; }
+      .footer { margin-top: 14px; padding-top: 6px; border-top: 1px solid #999; font-size: 8pt; color: #666; text-align: center; }
+      @media print { .no-print { display: none; } }
+    </style>
+  </head><body>
+    <div class="header">
+      <img src="/static/logo-full.png" alt="CorePro" onerror="this.style.display='none'"/>
+      <h1>${titulo}</h1>
+      <div class="meta">Gerado em ${dataGeracao}<br/>CorePro PCP — Confecção</div>
+    </div>
+    ${filtrosTxt ? `<div class="filtros"><b>Filtros aplicados:</b> ${filtrosTxt}</div>` : ''}
+    ${htmlConteudo}
+    <div class="footer">CorePro PCP · Onde sistemas se tornam negócio · pág. <span class="page"></span></div>
+    <script>window.onload=()=>{setTimeout(()=>window.print(),200);};</script>
+  </body></html>`);
+  w.document.close();
+}
+
+// Constrói linha "Filtros aplicados: ..." legível
+function _filtrosTxt(filtros) {
+  const partes = [];
+  if (filtros.de) partes.push(`De ${dayjs(filtros.de).format('DD/MM/YYYY')}`);
+  if (filtros.ate) partes.push(`Até ${dayjs(filtros.ate).format('DD/MM/YYYY')}`);
+  if (filtros.id_terc_label) partes.push(`Terceirizado: ${filtros.id_terc_label}`);
+  if (filtros.id_servico_label) partes.push(`Serviço: ${filtros.id_servico_label}`);
+  if (filtros.id_colecao_label) partes.push(`Coleção: ${filtros.id_colecao_label}`);
+  if (filtros.cor) partes.push(`Cor: ${filtros.cor}`);
+  if (filtros.cod_ref) partes.push(`Referência: ${filtros.cod_ref}`);
+  if (filtros.num_op) partes.push(`OP: ${filtros.num_op}`);
+  if (filtros.status) partes.push(`Status: ${filtros.status}`);
+  return partes.join(' · ') || 'Sem filtros (todos os dados)';
+}
+
+// Bloco de filtros padrão para os relatórios
+function _renderFiltros(state, opts = {}) {
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const ini30 = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  state.filtros = state.filtros || { de: ini30, ate: hoje };
+  return `
+    <div class="card p-3 mb-3">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-semibold text-slate-700"><i class="fas fa-filter mr-1 text-brand"></i>Filtros</h3>
+        <button class="btn btn-secondary btn-sm md:hidden" id="rd-toggle-fil" type="button">
+          <i class="fas fa-chevron-down"></i>
+        </button>
+      </div>
+      <div id="rd-fil-body" class="grid grid-cols-2 md:grid-cols-6 gap-2 text-sm">
+        <div><label class="text-xs">De</label><input type="date" id="rd-de" value="${state.filtros.de || ''}" /></div>
+        <div><label class="text-xs">Até</label><input type="date" id="rd-ate" value="${state.filtros.ate || ''}" /></div>
+        <div><label class="text-xs">Terceirizado</label>
+          <select id="rd-terc"><option value="">Todos</option>
+            ${(state.tercList || []).map(t => `<option value="${t.id_terc}" ${String(state.filtros.id_terc) === String(t.id_terc) ? 'selected' : ''}>${t.nome_terc}</option>`).join('')}
+          </select>
+        </div>
+        <div><label class="text-xs">Serviço</label>
+          <select id="rd-serv"><option value="">Todos</option>
+            ${(state.servList || []).map(s => `<option value="${s.id_servico}" ${String(state.filtros.id_servico) === String(s.id_servico) ? 'selected' : ''}>${s.desc_servico}</option>`).join('')}
+          </select>
+        </div>
+        <div><label class="text-xs">Coleção</label>
+          <select id="rd-col"><option value="">Todas</option>
+            ${(state.colList || []).map(co => `<option value="${co.id_colecao}" ${String(state.filtros.id_colecao) === String(co.id_colecao) ? 'selected' : ''}>${co.nome_colecao}</option>`).join('')}
+          </select>
+        </div>
+        ${opts.status ? `
+        <div><label class="text-xs">Status</label>
+          <select id="rd-status"><option value="">Todos</option>
+            ${['AguardandoEnvio','Enviado','EmProducao','Parcial','Retornado','Concluido','Pago','Atrasado','Cancelado'].map(s => `<option ${state.filtros.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>` : ''}
+        ${opts.cor ? `<div><label class="text-xs">Cor</label><input id="rd-cor" value="${state.filtros.cor || ''}" placeholder="Ex.: Azul" /></div>` : ''}
+        ${opts.ref ? `<div><label class="text-xs">Referência</label><input id="rd-ref" value="${state.filtros.cod_ref || ''}" /></div>` : ''}
+        ${opts.op ? `<div><label class="text-xs">Nº OP</label><input id="rd-op" value="${state.filtros.num_op || ''}" /></div>` : ''}
+        <div class="col-span-2 md:col-span-6 flex flex-wrap items-end justify-end gap-2 mt-1">
+          <button id="rd-apply" class="btn btn-primary btn-sm"><i class="fas fa-check mr-1"></i>Aplicar</button>
+          <button id="rd-clear" class="btn btn-secondary btn-sm"><i class="fas fa-eraser mr-1"></i>Limpar</button>
+          <div class="flex gap-1 ml-auto">
+            <button id="rd-exp-csv" class="btn btn-secondary btn-sm" title="Exportar CSV"><i class="fas fa-file-csv"></i><span class="hidden md:inline ml-1">CSV</span></button>
+            <button id="rd-exp-xlsx" class="btn btn-secondary btn-sm" title="Exportar Excel"><i class="fas fa-file-excel text-emerald-600"></i><span class="hidden md:inline ml-1">Excel</span></button>
+            <button id="rd-exp-pdf" class="btn btn-secondary btn-sm" title="Imprimir/PDF"><i class="fas fa-print"></i><span class="hidden md:inline ml-1">Imprimir</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Vincula listeners do bloco de filtros e botões de exportação
+function _bindFiltros(state, onApply, onExport) {
+  const $de = $('#rd-de'), $ate = $('#rd-ate'), $terc = $('#rd-terc'),
+        $serv = $('#rd-serv'), $col = $('#rd-col'),
+        $status = $('#rd-status'), $cor = $('#rd-cor'),
+        $ref = $('#rd-ref'), $op = $('#rd-op');
+  $('#rd-apply').onclick = () => {
+    state.filtros = {
+      de: $de?.value || '', ate: $ate?.value || '',
+      id_terc: $terc?.value || '', id_servico: $serv?.value || '', id_colecao: $col?.value || '',
+      status: $status?.value || '', cor: $cor?.value || '', cod_ref: $ref?.value || '', num_op: $op?.value || '',
+    };
+    // labels para impressão
+    state.filtros.id_terc_label = $terc?.options?.[$terc.selectedIndex]?.text || '';
+    state.filtros.id_servico_label = $serv?.options?.[$serv.selectedIndex]?.text || '';
+    state.filtros.id_colecao_label = $col?.options?.[$col.selectedIndex]?.text || '';
+    if (state.filtros.id_terc_label === 'Todos') state.filtros.id_terc_label = '';
+    if (state.filtros.id_servico_label === 'Todos') state.filtros.id_servico_label = '';
+    if (state.filtros.id_colecao_label === 'Todas') state.filtros.id_colecao_label = '';
+    onApply();
+  };
+  $('#rd-clear').onclick = () => {
+    const hoje = dayjs().format('YYYY-MM-DD');
+    const ini30 = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+    state.filtros = { de: ini30, ate: hoje };
+    onApply();
+  };
+  const tg = $('#rd-toggle-fil');
+  if (tg) tg.onclick = () => $('#rd-fil-body').classList.toggle('hidden');
+  if (onExport) {
+    $('#rd-exp-csv').onclick = () => onExport('csv');
+    $('#rd-exp-xlsx').onclick = () => onExport('xlsx');
+    $('#rd-exp-pdf').onclick = () => onExport('pdf');
+  }
+}
+
+// Carrega listas auxiliares (terceirizados, serviços, coleções) — cacheadas
+async function _carregarListasAux(state) {
+  if (state._listasCarregadas) return;
+  try {
+    const [t, s, c] = await Promise.all([
+      api('get', '/terc/terceirizados'),
+      api('get', '/terc/servicos'),
+      api('get', '/terc/colecoes'),
+    ]);
+    state.tercList = fmt.safeArr(t.data);
+    state.servList = fmt.safeArr(s.data);
+    state.colList = fmt.safeArr(c.data);
+    state._listasCarregadas = true;
+  } catch {}
+}
+
+// Skeleton loading
+function _skeleton(rows = 6) {
+  return `<div class="card p-4">${Array.from({ length: rows }).map(() => `
+    <div class="animate-pulse flex gap-3 mb-3">
+      <div class="h-4 bg-slate-200 rounded w-1/6"></div>
+      <div class="h-4 bg-slate-200 rounded w-2/6"></div>
+      <div class="h-4 bg-slate-200 rounded w-1/6"></div>
+      <div class="h-4 bg-slate-200 rounded w-1/6"></div>
+      <div class="h-4 bg-slate-200 rounded w-1/6"></div>
+    </div>`).join('')}</div>`;
+}
+
+// Hub principal — escolhe submenu
+const RD_SUBMENUS = [
+  { id: 'dash',     label: 'Dashboard Analítico',      icon: 'fa-chart-line',     desc: 'Visão geral com KPIs e gráficos' },
+  { id: 'remessas', label: 'Relatório de Remessas',    icon: 'fa-truck-fast',     desc: 'Lista detalhada com filtros' },
+  { id: 'retornos', label: 'Relatório de Retornos',    icon: 'fa-truck-arrow-right', desc: 'Peças retornadas, falta, conserto' },
+  { id: 'fin',      label: 'Relatório Financeiro',     icon: 'fa-money-bill-trend-up', desc: 'Total pago, custos, pendências' },
+  { id: 'porTerc',  label: 'Por Terceirizado',         icon: 'fa-handshake',       desc: 'Desempenho e ranking' },
+  { id: 'porServ',  label: 'Por Serviço',              icon: 'fa-screwdriver-wrench', desc: 'Volume e custo por serviço' },
+  { id: 'porProd',  label: 'Por Produto',              icon: 'fa-tshirt',          desc: 'Produtos mais movimentados' },
+  { id: 'porCor',   label: 'Por Cor',                  icon: 'fa-palette',         desc: 'Cores mais usadas' },
+  { id: 'porOP',    label: 'Por OP',                   icon: 'fa-clipboard-list',  desc: 'Agrupado por nº de OP' },
+  { id: 'faltas',   label: 'Relatório de Faltas',      icon: 'fa-triangle-exclamation', desc: 'Peças em falta por item' },
+  { id: 'conserto', label: 'Relatório de Conserto',    icon: 'fa-screwdriver',     desc: 'Peças com conserto' },
+  { id: 'producao', label: 'Relatório de Produção',    icon: 'fa-industry',        desc: 'Produção diária' },
+  { id: 'ranking',  label: 'Ranking de Terceirizados', icon: 'fa-trophy',          desc: 'Top performers' },
+  { id: 'historico',label: 'Histórico Geral',          icon: 'fa-history',         desc: 'Auditoria de eventos' },
+];
+
+ROUTES.relatorios_detalhados = async (main) => {
+  // Acesso restrito a admin
+  if (!isAdmin()) {
+    main.innerHTML = `<div class="card p-6 text-center">
+      <i class="fas fa-lock text-4xl text-slate-400 mb-3"></i>
+      <h3 class="text-lg font-semibold">Acesso restrito</h3>
+      <p class="text-sm text-slate-500">Este módulo é exclusivo para administradores e gerentes.</p>
+    </div>`;
+    return;
+  }
+
+  // Lê sub no hash: #relatorios_detalhados/<id>
+  const hashParts = (location.hash || '').replace(/^#/, '').split('/');
+  const sub = hashParts[1] || 'dash';
+  const cur = RD_SUBMENUS.find(s => s.id === sub) || RD_SUBMENUS[0];
+
+  const state = { filtros: {}, _listasCarregadas: false };
+  await _carregarListasAux(state);
+
+  main.innerHTML = `
+    <div class="mb-3">
+      <h2 class="text-xl font-bold flex items-center gap-2">
+        <i class="fas fa-chart-pie text-brand"></i>Relatórios Detalhados
+        <span class="text-xs text-slate-500 font-normal">/ ${cur.label}</span>
+      </h2>
+      <div class="text-xs text-slate-500">Análises avançadas e exportações profissionais</div>
+    </div>
+
+    <div class="card p-2 mb-3 overflow-x-auto">
+      <div class="flex gap-1 flex-nowrap min-w-max" id="rd-tabs">
+        ${RD_SUBMENUS.map(s => `
+          <a href="#relatorios_detalhados/${s.id}"
+             class="rd-tab px-3 py-2 rounded text-xs font-medium whitespace-nowrap transition-all
+             ${s.id === cur.id ? 'bg-brand text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}"
+             title="${s.desc}">
+            <i class="fas ${s.icon} mr-1"></i>${s.label}
+          </a>`).join('')}
+      </div>
+    </div>
+
+    <div id="rd-content"></div>
+  `;
+
+  const content = $('#rd-content');
+  const handlers = {
+    dash: _rdDashboard,
+    remessas: _rdRemessas,
+    retornos: _rdRetornos,
+    fin: _rdFinanceiro,
+    porTerc: _rdPorTerceirizado,
+    porServ: _rdPorServico,
+    porProd: _rdPorProduto,
+    porCor: _rdPorCor,
+    porOP: _rdPorOP,
+    faltas: _rdFaltas,
+    conserto: _rdConserto,
+    producao: _rdProducao,
+    ranking: _rdRanking,
+    historico: _rdHistorico,
+  };
+  await (handlers[sub] || handlers.dash)(content, state);
+};
+
+/* ===== Dashboard Analítico ===== */
+async function _rdDashboard(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(4) + '</div>';
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(4);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    let dash = {};
+    try { dash = (await api('get', '/terc/dashboard?' + qs.toString())).data || {}; }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar dashboard.</div>'; return; }
+
+    const r = dash.remessas_kpi || {};
+    const ret = dash.retornos_kpi || {};
+    const totEnv = fmt.safeNum(r.pecas_enviadas);
+    const totRet = fmt.safeNum(ret.pecas_boas) + fmt.safeNum(ret.pecas_refugo) + fmt.safeNum(ret.pecas_conserto);
+    const totPag = fmt.safeNum(ret.valor_pago);
+    const totFalta = fmt.safeNum(ret.pecas_refugo);
+    const totCons = fmt.safeNum(ret.pecas_conserto);
+    const efic = totEnv > 0 ? (fmt.safeNum(ret.pecas_boas) / totEnv) : 0;
+    const prazoMedio = fmt.safeNum(dash.prazo_medio || 0);
+
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-2 mb-3">
+        ${_kpiBox('Total enviado', fmt.int(totEnv), 'fa-truck-fast', 'blue')}
+        ${_kpiBox('Total retornado', fmt.int(totRet), 'fa-truck-arrow-right', 'emerald')}
+        ${_kpiBox('Total pago', 'R$ ' + fmt.num(totPag), 'fa-money-bill-wave', 'green')}
+        ${_kpiBox('Total faltas', fmt.int(totFalta), 'fa-triangle-exclamation', 'amber')}
+        ${_kpiBox('Total consertos', fmt.int(totCons), 'fa-screwdriver', 'orange')}
+        ${_kpiBox('Qtd remessas', fmt.int(r.total), 'fa-boxes-stacked', 'slate')}
+        ${_kpiBox('Qtd retornos', fmt.int(ret.total), 'fa-rotate-left', 'slate')}
+        ${_kpiBox('Prazo médio', fmt.num(prazoMedio, 1) + ' d', 'fa-calendar-day', 'indigo')}
+        ${_kpiBox('Eficiência', fmt.pct(efic), 'fa-gauge-high', 'emerald')}
+        ${_kpiBox('A pagar', 'R$ ' + fmt.num(r.valor_a_pagar), 'fa-clock', 'rose')}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-line mr-1 text-brand"></i>Produção diária</h3><canvas id="ch-prod" height="120"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-money-bill-trend-up mr-1 text-brand"></i>Pagamentos por dia</h3><canvas id="ch-pag" height="120"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-screwdriver-wrench mr-1 text-brand"></i>Serviços mais usados</h3><canvas id="ch-serv" height="120"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-trophy mr-1 text-brand"></i>Top terceirizados</h3><canvas id="ch-terc" height="120"></canvas></div>
+      </div>
+    `;
+
+    const prod = fmt.safeArr(dash.producao_diaria);
+    const labelsProd = prod.map(p => dayjs(p.dia).format('DD/MM'));
+    new Chart($('#ch-prod'), {
+      type: 'line',
+      data: {
+        labels: labelsProd,
+        datasets: [
+          { label: 'Boas', data: prod.map(p => fmt.safeNum(p.boa)), borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.10)', fill: true, tension: 0.3 },
+          { label: 'Falta', data: prod.map(p => fmt.safeNum(p.refugo)), borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3 },
+          { label: 'Conserto', data: prod.map(p => fmt.safeNum(p.conserto)), borderColor: '#fb923c', backgroundColor: 'rgba(251,146,60,0.08)', fill: true, tension: 0.3 },
+        ]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    });
+
+    new Chart($('#ch-pag'), {
+      type: 'bar',
+      data: {
+        labels: labelsProd,
+        datasets: [{ label: 'Pago (R$)', data: prod.map(p => fmt.safeNum(p.boa) * 0), backgroundColor: '#3b82f6' }]
+      },
+      options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+
+    const servs = fmt.safeArr(dash.por_servico).slice(0, 8);
+    new Chart($('#ch-serv'), {
+      type: 'bar',
+      data: {
+        labels: servs.map(s => s.desc_servico || '—'),
+        datasets: [{ label: 'Peças', data: servs.map(s => fmt.safeNum(s.pecas)), backgroundColor: '#6366f1' }]
+      },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+
+    const tercs = fmt.safeArr(dash.top_terceirizados).slice(0, 8);
+    new Chart($('#ch-terc'), {
+      type: 'bar',
+      data: {
+        labels: tercs.map(t => t.nome_terc || '—'),
+        datasets: [{ label: 'Peças', data: tercs.map(t => fmt.safeNum(t.pecas)), backgroundColor: '#10b981' }]
+      },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    if (tipo === 'pdf') {
+      const html = $('#rd-data')?.innerHTML || '';
+      _imprimirRelatorio('Dashboard Analítico', _filtrosTxt(state.filtros), html.replace(/<canvas[^>]*>.*?<\/canvas>/g, '<div class="filtros">[Gráficos visualizados na tela]</div>'));
+    } else {
+      toast('Use os relatórios específicos para CSV/Excel', 'info');
+    }
+  });
+  await carregar();
+}
+
+function _kpiBox(label, value, icon, accent) {
+  const cores = {
+    blue: 'bg-blue-50 border-blue-200 text-blue-700',
+    emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+    green: 'bg-green-50 border-green-200 text-green-700',
+    amber: 'bg-amber-50 border-amber-200 text-amber-700',
+    orange: 'bg-orange-50 border-orange-200 text-orange-700',
+    slate: 'bg-slate-50 border-slate-200 text-slate-700',
+    indigo: 'bg-indigo-50 border-indigo-200 text-indigo-700',
+    rose: 'bg-rose-50 border-rose-200 text-rose-700',
+  };
+  return `<div class="card p-3 border ${cores[accent] || cores.slate} transition hover:shadow-md">
+    <div class="flex items-center justify-between mb-1">
+      <span class="text-[10px] uppercase font-semibold opacity-80">${label}</span>
+      <i class="fas ${icon} opacity-70"></i>
+    </div>
+    <div class="text-lg font-bold">${value}</div>
+  </div>`;
+}
+
+/* ===== Relatório de Remessas ===== */
+async function _rdRemessas(main, state) {
+  main.innerHTML = _renderFiltros(state, { status: true, cor: true, ref: true, op: true })
+    + '<div id="rd-data">' + _skeleton(8) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(8);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    if (f.id_servico) qs.set('id_servico', f.id_servico);
+    if (f.id_colecao) qs.set('id_colecao', f.id_colecao);
+    if (f.status) qs.set('status', f.status);
+    if (f.cod_ref) qs.set('cod_ref', f.cod_ref);
+    if (f.num_op) qs.set('num_op', f.num_op);
+    try { dados = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    if (f.cor) dados = dados.filter(r => (r.cor || '').toLowerCase().includes(f.cor.toLowerCase()));
+    const totQtd = dados.reduce((a, r) => a + fmt.safeNum(r.qtd_total), 0);
+    const totVal = dados.reduce((a, r) => a + fmt.safeNum(r.valor_total), 0);
+    $('#rd-data').innerHTML = `
+      <div class="card p-3 mb-2 flex flex-wrap gap-3 text-sm">
+        <span><b>${dados.length}</b> remessa(s)</span>
+        <span>Total enviado: <b>${fmt.int(totQtd)}</b> pç</span>
+        <span>Valor total: <b>R$ ${fmt.num(totVal)}</b></span>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100 sticky top-0">
+            <tr>
+              <th class="p-2 text-left">Nº</th><th class="p-2 text-left">OP</th>
+              <th class="p-2 text-left">Referência</th><th class="p-2 text-left">Cor</th>
+              <th class="p-2 text-left">Serviço</th><th class="p-2 text-left">Terceirizado</th>
+              <th class="p-2 text-right">Qtd</th><th class="p-2 text-left">Saída</th>
+              <th class="p-2 text-left">Previsão</th><th class="p-2 text-left">Status</th>
+              <th class="p-2 text-right">Valor</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${dados.map(r => `<tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-mono">${r.num_controle || ''}</td>
+              <td class="p-2">${r.num_op || ''}</td>
+              <td class="p-2 font-mono">${r.cod_ref || ''}</td>
+              <td class="p-2">${r.cor || ''}</td>
+              <td class="p-2">${r.desc_servico || ''}</td>
+              <td class="p-2">${r.nome_terc || ''}</td>
+              <td class="p-2 text-right font-mono">${fmt.int(r.qtd_total)}</td>
+              <td class="p-2">${fmt.date(r.dt_saida)}</td>
+              <td class="p-2">${fmt.date(r.dt_previsao)}</td>
+              <td class="p-2"><span class="badge">${r.status || ''}</span></td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(r.valor_total)}</td>
+            </tr>`).join('') || `<tr><td colspan="11" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map(r => ({
+      Nº: r.num_controle, OP: r.num_op, Referencia: r.cod_ref, Cor: r.cor,
+      Servico: r.desc_servico, Terceirizado: r.nome_terc,
+      Qtd: r.qtd_total, Saida: fmt.date(r.dt_saida), Previsao: fmt.date(r.dt_previsao),
+      Status: r.status, Valor: r.valor_total
+    }));
+    if (tipo === 'csv') _exportCSV(`remessas_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`remessas_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Remessas');
+    else _imprimirRelatorio('Relatório de Remessas', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Relatório de Retornos ===== */
+async function _rdRetornos(main, state) {
+  main.innerHTML = _renderFiltros(state, { ref: true, cor: true, op: true }) + '<div id="rd-data">' + _skeleton(8) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(8);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    if (f.id_servico) qs.set('id_servico', f.id_servico);
+    // Reaproveita /terc/remessas e expande retornos via /terc/remessas/:id
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    if (f.cod_ref) rems = rems.filter(r => (r.cod_ref || '').toLowerCase().includes(f.cod_ref.toLowerCase()));
+    if (f.cor) rems = rems.filter(r => (r.cor || '').toLowerCase().includes(f.cor.toLowerCase()));
+    if (f.num_op) rems = rems.filter(r => (r.num_op || '') === f.num_op);
+    const detalhes = await Promise.all(rems.slice(0, 100).map(async r => {
+      try {
+        const det = (await api('get', '/terc/remessas/' + r.id_remessa)).data || {};
+        return { rem: r, retornos: fmt.safeArr(det.retornos) };
+      } catch { return { rem: r, retornos: [] }; }
+    }));
+    dados = [];
+    detalhes.forEach(({ rem, retornos }) => {
+      retornos.forEach(rt => dados.push({
+        num_controle: rem.num_controle, num_op: rem.num_op, cod_ref: rem.cod_ref,
+        cor: rem.cor, terc: rem.nome_terc, desc_servico: rem.desc_servico,
+        qtd_enviada: rem.qtd_total, qtd_boa: rt.qtd_boa, qtd_refugo: rt.qtd_refugo,
+        qtd_conserto: rt.qtd_conserto, valor_pago: rt.valor_pago, dt_retorno: rt.dt_retorno,
+      }));
+    });
+
+    const tBoa = dados.reduce((a, x) => a + fmt.safeNum(x.qtd_boa), 0);
+    const tFalta = dados.reduce((a, x) => a + fmt.safeNum(x.qtd_refugo), 0);
+    const tCons = dados.reduce((a, x) => a + fmt.safeNum(x.qtd_conserto), 0);
+    const tVal = dados.reduce((a, x) => a + fmt.safeNum(x.valor_pago), 0);
+
+    $('#rd-data').innerHTML = `
+      <div class="card p-3 mb-2 flex flex-wrap gap-3 text-sm">
+        <span><b>${dados.length}</b> retorno(s)</span>
+        <span>Boas: <b class="text-emerald-700">${fmt.int(tBoa)}</b></span>
+        <span>Falta: <b class="text-amber-700">${fmt.int(tFalta)}</b></span>
+        <span>Conserto: <b class="text-orange-700">${fmt.int(tCons)}</b></span>
+        <span>Total pago: <b>R$ ${fmt.num(tVal)}</b></span>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Remessa</th><th class="p-2 text-left">Referência</th>
+            <th class="p-2 text-left">Cor</th><th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-right">Enviadas</th><th class="p-2 text-right">Boas</th>
+            <th class="p-2 text-right">Falta</th><th class="p-2 text-right">Conserto</th>
+            <th class="p-2 text-right">Valor pago</th><th class="p-2 text-left">Data retorno</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map(d => `<tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-mono">${d.num_controle}</td>
+              <td class="p-2 font-mono">${d.cod_ref || ''}</td>
+              <td class="p-2">${d.cor || ''}</td>
+              <td class="p-2">${d.terc || ''}</td>
+              <td class="p-2 text-right">${fmt.int(d.qtd_enviada)}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(d.qtd_boa)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(d.qtd_refugo)}</td>
+              <td class="p-2 text-right text-orange-700">${fmt.int(d.qtd_conserto)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor_pago)}</td>
+              <td class="p-2">${fmt.date(d.dt_retorno)}</td>
+            </tr>`).join('') || `<tr><td colspan="10" class="p-6 text-center text-slate-500">Sem retornos no período</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map(d => ({
+      Remessa: d.num_controle, Referencia: d.cod_ref, Cor: d.cor, Terceirizado: d.terc,
+      Enviadas: d.qtd_enviada, Boas: d.qtd_boa, Falta: d.qtd_refugo, Conserto: d.qtd_conserto,
+      ValorPago: d.valor_pago, DataRetorno: fmt.date(d.dt_retorno),
+    }));
+    if (tipo === 'csv') _exportCSV(`retornos_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`retornos_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Retornos');
+    else _imprimirRelatorio('Relatório de Retornos', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Relatório Financeiro ===== */
+async function _rdFinanceiro(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = { pendentes: [], pagos: [] };
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    let pend = [];
+    try { pend = fmt.safeArr((await api('get', '/terc/financeiro/pendentes?' + qs.toString())).data); }
+    catch {}
+    // Pagas: pega remessas com status_fin=Pago
+    qs.set('status_fin', 'Pago');
+    let pagas = [];
+    try { pagas = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch {}
+
+    dados = { pendentes: pend, pagos: pagas };
+    const totPend = pend.reduce((a, p) => a + fmt.safeNum(p.valor_aberto), 0);
+    const totPago = pagas.reduce((a, p) => a + fmt.safeNum(p.valor_pago), 0);
+
+    // Agrupamento por terceirizado/serviço
+    const porTerc = {};
+    [...pend, ...pagas].forEach(p => {
+      const k = p.nome_terc || '—';
+      if (!porTerc[k]) porTerc[k] = { nome: k, pendente: 0, pago: 0 };
+      porTerc[k].pendente += fmt.safeNum(p.valor_aberto);
+      porTerc[k].pago += fmt.safeNum(p.valor_pago);
+    });
+    const linhasTerc = Object.values(porTerc).sort((a, b) => (b.pago + b.pendente) - (a.pago + a.pendente));
+
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        ${_kpiBox('Total pago', 'R$ ' + fmt.num(totPago), 'fa-circle-check', 'green')}
+        ${_kpiBox('Total pendente', 'R$ ' + fmt.num(totPend), 'fa-clock', 'rose')}
+        ${_kpiBox('Remessas pagas', fmt.int(pagas.length), 'fa-check', 'emerald')}
+        ${_kpiBox('Remessas pendentes', fmt.int(pend.length), 'fa-hourglass', 'amber')}
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-pie mr-1 text-brand"></i>Pago vs Pendente</h3><canvas id="ch-fin" height="120"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-bar mr-1 text-brand"></i>Por terceirizado</h3><canvas id="ch-fin-t" height="120"></canvas></div>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-right">Pago</th>
+            <th class="p-2 text-right">Pendente</th>
+            <th class="p-2 text-right">Total</th>
+          </tr></thead>
+          <tbody>
+            ${linhasTerc.map(t => `<tr class="border-b">
+              <td class="p-2">${t.nome}</td>
+              <td class="p-2 text-right text-emerald-700 font-mono">R$ ${fmt.num(t.pago)}</td>
+              <td class="p-2 text-right text-rose-700 font-mono">R$ ${fmt.num(t.pendente)}</td>
+              <td class="p-2 text-right font-bold font-mono">R$ ${fmt.num(t.pago + t.pendente)}</td>
+            </tr>`).join('') || `<tr><td colspan="4" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+    new Chart($('#ch-fin'), {
+      type: 'doughnut',
+      data: { labels: ['Pago', 'Pendente'], datasets: [{ data: [totPago, totPend], backgroundColor: ['#10b981', '#f43f5e'] }] },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    });
+    new Chart($('#ch-fin-t'), {
+      type: 'bar',
+      data: {
+        labels: linhasTerc.slice(0, 10).map(t => t.nome),
+        datasets: [
+          { label: 'Pago', data: linhasTerc.slice(0, 10).map(t => t.pago), backgroundColor: '#10b981' },
+          { label: 'Pendente', data: linhasTerc.slice(0, 10).map(t => t.pendente), backgroundColor: '#f43f5e' },
+        ]
+      },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { position: 'bottom' } }, scales: { x: { stacked: true }, y: { stacked: true } } }
+    });
+    state._linhasTerc = linhasTerc;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = (state._linhasTerc || []).map(t => ({
+      Terceirizado: t.nome, Pago: t.pago, Pendente: t.pendente, Total: t.pago + t.pendente
+    }));
+    if (tipo === 'csv') _exportCSV(`financeiro_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`financeiro_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Financeiro');
+    else _imprimirRelatorio('Relatório Financeiro', _filtrosTxt(state.filtros), $('#rd-data').innerHTML.replace(/<canvas[^>]*>.*?<\/canvas>/g, ''));
+  });
+  await carregar();
+}
+
+/* ===== Por Terceirizado ===== */
+async function _rdPorTerceirizado(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    try { dados = fmt.safeArr((await api('get', '/terc/resumo')).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    const f = state.filtros;
+    if (f.id_terc) dados = dados.filter(d => String(d.id_terc) === String(f.id_terc));
+
+    $('#rd-data').innerHTML = `
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">#</th>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-left">Setor</th>
+            <th class="p-2 text-right">Remessas</th>
+            <th class="p-2 text-right">Em produção</th>
+            <th class="p-2 text-right">Produzidas (boas)</th>
+            <th class="p-2 text-right">Conserto</th>
+            <th class="p-2 text-right">Valor mov.</th>
+            <th class="p-2 text-right">Índice consertos</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map((d, i) => `<tr class="border-b hover:bg-slate-50">
+              <td class="p-2 font-mono">${i + 1}</td>
+              <td class="p-2 font-semibold">${d.nome_terc || ''}</td>
+              <td class="p-2">${d.nome_setor || ''}</td>
+              <td class="p-2 text-right">${fmt.int(d.total_remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas_producao)}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(d.pecas_produzidas)}</td>
+              <td class="p-2 text-right text-orange-700">${fmt.int(d.pecas_conserto)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor_movimentado)}</td>
+              <td class="p-2 text-right">${fmt.pct(d.indice_consertos)}</td>
+            </tr>`).join('') || `<tr><td colspan="9" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map((d, i) => ({
+      Posicao: i + 1, Terceirizado: d.nome_terc, Setor: d.nome_setor,
+      Remessas: d.total_remessas, EmProducao: d.pecas_producao,
+      Produzidas: d.pecas_produzidas, Conserto: d.pecas_conserto,
+      ValorMovimentado: d.valor_movimentado, IndiceConsertos: d.indice_consertos
+    }));
+    if (tipo === 'csv') _exportCSV(`por_terceirizado_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`por_terceirizado_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'PorTerceirizado');
+    else _imprimirRelatorio('Relatório por Terceirizado', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Por Serviço ===== */
+async function _rdPorServico(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let agreg = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    const map = {};
+    rems.forEach(r => {
+      const k = r.desc_servico || '—';
+      if (!map[k]) map[k] = { servico: k, remessas: 0, pecas: 0, valor: 0, tempo: 0 };
+      map[k].remessas++;
+      map[k].pecas += fmt.safeNum(r.qtd_total);
+      map[k].valor += fmt.safeNum(r.valor_total);
+      map[k].tempo += fmt.safeNum(r.tempo_peca) * fmt.safeNum(r.qtd_total);
+    });
+    agreg = Object.values(map).sort((a, b) => b.pecas - a.pecas);
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-bar mr-1 text-brand"></i>Volume por serviço</h3><canvas id="ch-srv" height="160"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-money-bill mr-1 text-brand"></i>Custo por serviço</h3><canvas id="ch-srv-c" height="160"></canvas></div>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">#</th>
+            <th class="p-2 text-left">Serviço</th>
+            <th class="p-2 text-right">Remessas</th>
+            <th class="p-2 text-right">Peças</th>
+            <th class="p-2 text-right">Valor</th>
+            <th class="p-2 text-right">Tempo total (min)</th>
+            <th class="p-2 text-right">Tempo/peça</th>
+          </tr></thead>
+          <tbody>
+            ${agreg.map((d, i) => `<tr class="border-b">
+              <td class="p-2 font-mono">${i + 1}</td>
+              <td class="p-2 font-semibold">${d.servico}</td>
+              <td class="p-2 text-right">${fmt.int(d.remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor)}</td>
+              <td class="p-2 text-right">${fmt.num(d.tempo, 1)}</td>
+              <td class="p-2 text-right">${d.pecas > 0 ? fmt.num(d.tempo / d.pecas, 2) : '0'}</td>
+            </tr>`).join('') || `<tr><td colspan="7" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+    new Chart($('#ch-srv'), {
+      type: 'bar',
+      data: { labels: agreg.slice(0, 10).map(d => d.servico), datasets: [{ label: 'Peças', data: agreg.slice(0, 10).map(d => d.pecas), backgroundColor: '#6366f1' }] },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+    new Chart($('#ch-srv-c'), {
+      type: 'bar',
+      data: { labels: agreg.slice(0, 10).map(d => d.servico), datasets: [{ label: 'R$', data: agreg.slice(0, 10).map(d => d.valor), backgroundColor: '#10b981' }] },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = agreg.map((d, i) => ({
+      Posicao: i + 1, Servico: d.servico, Remessas: d.remessas,
+      Pecas: d.pecas, Valor: d.valor, TempoTotal: d.tempo,
+      TempoPorPeca: d.pecas > 0 ? d.tempo / d.pecas : 0
+    }));
+    if (tipo === 'csv') _exportCSV(`por_servico_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`por_servico_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'PorServico');
+    else _imprimirRelatorio('Relatório por Serviço', _filtrosTxt(state.filtros), $('#rd-data').innerHTML.replace(/<canvas[^>]*>.*?<\/canvas>/g, ''));
+  });
+  await carregar();
+}
+
+/* ===== Por Produto ===== */
+async function _rdPorProduto(main, state) {
+  main.innerHTML = _renderFiltros(state, { ref: true }) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let agreg = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    if (f.cod_ref) qs.set('cod_ref', f.cod_ref);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    const map = {};
+    rems.forEach(r => {
+      const k = r.cod_ref || '—';
+      if (!map[k]) map[k] = { cod_ref: k, desc_ref: r.desc_ref || '', cores: new Set(), remessas: 0, pecas: 0, valor: 0 };
+      map[k].remessas++;
+      map[k].pecas += fmt.safeNum(r.qtd_total);
+      map[k].valor += fmt.safeNum(r.valor_total);
+      if (r.cor) map[k].cores.add(r.cor);
+    });
+    agreg = Object.values(map).map(d => ({ ...d, cores: [...d.cores] })).sort((a, b) => b.pecas - a.pecas);
+    $('#rd-data').innerHTML = `
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Referência</th>
+            <th class="p-2 text-left">Descrição</th>
+            <th class="p-2 text-left">Cores</th>
+            <th class="p-2 text-right">Remessas</th>
+            <th class="p-2 text-right">Peças</th>
+            <th class="p-2 text-right">Custo total</th>
+          </tr></thead>
+          <tbody>
+            ${agreg.map(d => `<tr class="border-b">
+              <td class="p-2 font-mono">${d.cod_ref}</td>
+              <td class="p-2">${d.desc_ref}</td>
+              <td class="p-2 text-xs">${d.cores.slice(0, 5).join(', ')}${d.cores.length > 5 ? `… (+${d.cores.length - 5})` : ''}</td>
+              <td class="p-2 text-right">${fmt.int(d.remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor)}</td>
+            </tr>`).join('') || `<tr><td colspan="6" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = agreg.map(d => ({
+      Referencia: d.cod_ref, Descricao: d.desc_ref, Cores: d.cores.join(', '),
+      Remessas: d.remessas, Pecas: d.pecas, CustoTotal: d.valor
+    }));
+    if (tipo === 'csv') _exportCSV(`por_produto_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`por_produto_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'PorProduto');
+    else _imprimirRelatorio('Relatório por Produto', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Por Cor ===== */
+async function _rdPorCor(main, state) {
+  main.innerHTML = _renderFiltros(state, { cor: true }) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let agreg = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    if (f.cor) rems = rems.filter(r => (r.cor || '').toLowerCase().includes(f.cor.toLowerCase()));
+    const map = {};
+    rems.forEach(r => {
+      const k = r.cor || '(sem cor)';
+      if (!map[k]) map[k] = { cor: k, remessas: 0, pecas: 0, valor: 0 };
+      map[k].remessas++;
+      map[k].pecas += fmt.safeNum(r.qtd_total);
+      map[k].valor += fmt.safeNum(r.valor_total);
+    });
+    agreg = Object.values(map).sort((a, b) => b.pecas - a.pecas);
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-palette mr-1 text-brand"></i>Cores mais produzidas</h3><canvas id="ch-cor" height="160"></canvas></div>
+        <div class="card p-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-pie mr-1 text-brand"></i>Distribuição</h3><canvas id="ch-cor-p" height="160"></canvas></div>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Cor</th>
+            <th class="p-2 text-right">Remessas</th>
+            <th class="p-2 text-right">Peças</th>
+            <th class="p-2 text-right">Valor</th>
+          </tr></thead>
+          <tbody>
+            ${agreg.map(d => `<tr class="border-b">
+              <td class="p-2 font-semibold">${d.cor}</td>
+              <td class="p-2 text-right">${fmt.int(d.remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor)}</td>
+            </tr>`).join('') || `<tr><td colspan="4" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+    const top = agreg.slice(0, 12);
+    new Chart($('#ch-cor'), {
+      type: 'bar',
+      data: { labels: top.map(d => d.cor), datasets: [{ label: 'Peças', data: top.map(d => d.pecas), backgroundColor: '#6366f1' }] },
+      options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+    new Chart($('#ch-cor-p'), {
+      type: 'pie',
+      data: { labels: top.map(d => d.cor), datasets: [{ data: top.map(d => d.pecas), backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316','#6366f1','#14b8a6','#a855f7'] }] },
+      options: { responsive: true, plugins: { legend: { position: 'right' } } }
+    });
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = agreg.map(d => ({ Cor: d.cor, Remessas: d.remessas, Pecas: d.pecas, Valor: d.valor }));
+    if (tipo === 'csv') _exportCSV(`por_cor_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`por_cor_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'PorCor');
+    else _imprimirRelatorio('Relatório por Cor', _filtrosTxt(state.filtros), $('#rd-data').innerHTML.replace(/<canvas[^>]*>.*?<\/canvas>/g, ''));
+  });
+  await carregar();
+}
+
+/* ===== Por OP ===== */
+async function _rdPorOP(main, state) {
+  main.innerHTML = _renderFiltros(state, { op: true }) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let agreg = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    if (f.num_op) qs.set('num_op', f.num_op);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    const map = {};
+    rems.forEach(r => {
+      const k = r.num_op || '(sem OP)';
+      if (!map[k]) map[k] = { op: k, remessas: 0, pecas: 0, valor: 0, refs: new Set() };
+      map[k].remessas++;
+      map[k].pecas += fmt.safeNum(r.qtd_total);
+      map[k].valor += fmt.safeNum(r.valor_total);
+      if (r.cod_ref) map[k].refs.add(r.cod_ref);
+    });
+    agreg = Object.values(map).map(d => ({ ...d, refs: [...d.refs] })).sort((a, b) => b.pecas - a.pecas);
+    $('#rd-data').innerHTML = `
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Nº OP</th>
+            <th class="p-2 text-left">Referências</th>
+            <th class="p-2 text-right">Remessas</th>
+            <th class="p-2 text-right">Peças</th>
+            <th class="p-2 text-right">Valor</th>
+          </tr></thead>
+          <tbody>
+            ${agreg.map(d => `<tr class="border-b">
+              <td class="p-2 font-mono font-semibold">${d.op}</td>
+              <td class="p-2 text-xs">${d.refs.slice(0, 4).join(', ')}${d.refs.length > 4 ? '…' : ''}</td>
+              <td class="p-2 text-right">${fmt.int(d.remessas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor)}</td>
+            </tr>`).join('') || `<tr><td colspan="5" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = agreg.map(d => ({ NumOP: d.op, Referencias: d.refs.join(', '), Remessas: d.remessas, Pecas: d.pecas, Valor: d.valor }));
+    if (tipo === 'csv') _exportCSV(`por_op_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`por_op_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'PorOP');
+    else _imprimirRelatorio('Relatório por OP', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Faltas ===== */
+async function _rdFaltas(main, state) {
+  main.innerHTML = _renderFiltros(state, { ref: true, cor: true }) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    if (f.cod_ref) rems = rems.filter(r => (r.cod_ref || '').toLowerCase().includes(f.cod_ref.toLowerCase()));
+    if (f.cor) rems = rems.filter(r => (r.cor || '').toLowerCase().includes(f.cor.toLowerCase()));
+    // Carrega retornos para extrair refugo (= falta) por item
+    const detalhes = await Promise.all(rems.slice(0, 100).map(async r => {
+      try {
+        const det = (await api('get', '/terc/remessas/' + r.id_remessa)).data || {};
+        return { rem: r, retornos: fmt.safeArr(det.retornos) };
+      } catch { return { rem: r, retornos: [] }; }
+    }));
+    dados = [];
+    detalhes.forEach(({ rem, retornos }) => {
+      retornos.forEach(rt => {
+        if (fmt.safeNum(rt.qtd_refugo) > 0) {
+          dados.push({
+            cod_ref: rem.cod_ref, desc_ref: rem.desc_ref, cor: rem.cor,
+            terc: rem.nome_terc, qtd_falta: rt.qtd_refugo,
+            dt_retorno: rt.dt_retorno, observacao: rt.observacao || ''
+          });
+        }
+      });
+    });
+    const total = dados.reduce((a, x) => a + fmt.safeNum(x.qtd_falta), 0);
+    $('#rd-data').innerHTML = `
+      <div class="card p-3 mb-2 flex flex-wrap gap-3 text-sm">
+        <span><b>${dados.length}</b> ocorrência(s) de falta</span>
+        <span>Total: <b class="text-amber-700">${fmt.int(total)}</b> peça(s)</span>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Produto</th>
+            <th class="p-2 text-left">Referência</th>
+            <th class="p-2 text-left">Cor</th>
+            <th class="p-2 text-right">Quantidade</th>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-left">Data</th>
+            <th class="p-2 text-left">Observação</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map(d => `<tr class="border-b">
+              <td class="p-2">${d.desc_ref || ''}</td>
+              <td class="p-2 font-mono">${d.cod_ref || ''}</td>
+              <td class="p-2">${d.cor || ''}</td>
+              <td class="p-2 text-right text-amber-700 font-bold">${fmt.int(d.qtd_falta)}</td>
+              <td class="p-2">${d.terc || ''}</td>
+              <td class="p-2">${fmt.date(d.dt_retorno)}</td>
+              <td class="p-2 text-xs">${d.observacao}</td>
+            </tr>`).join('') || `<tr><td colspan="7" class="p-6 text-center text-slate-500">Nenhuma falta registrada no período</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map(d => ({
+      Produto: d.desc_ref, Referencia: d.cod_ref, Cor: d.cor,
+      QtdFalta: d.qtd_falta, Terceirizado: d.terc, Data: fmt.date(d.dt_retorno), Observacao: d.observacao
+    }));
+    if (tipo === 'csv') _exportCSV(`faltas_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`faltas_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Faltas');
+    else _imprimirRelatorio('Relatório de Faltas', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Conserto ===== */
+async function _rdConserto(main, state) {
+  main.innerHTML = _renderFiltros(state, { ref: true }) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    let rems = [];
+    try { rems = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    if (f.cod_ref) rems = rems.filter(r => (r.cod_ref || '').toLowerCase().includes(f.cod_ref.toLowerCase()));
+    const detalhes = await Promise.all(rems.slice(0, 100).map(async r => {
+      try {
+        const det = (await api('get', '/terc/remessas/' + r.id_remessa)).data || {};
+        return { rem: r, retornos: fmt.safeArr(det.retornos) };
+      } catch { return { rem: r, retornos: [] }; }
+    }));
+    dados = [];
+    detalhes.forEach(({ rem, retornos }) => {
+      retornos.forEach(rt => {
+        if (fmt.safeNum(rt.qtd_conserto) > 0) {
+          dados.push({
+            cod_ref: rem.cod_ref, desc_ref: rem.desc_ref, cor: rem.cor,
+            servico: rem.desc_servico, terc: rem.nome_terc,
+            qtd_conserto: rt.qtd_conserto, preco_unit: rem.preco_unit || 0,
+            custo: fmt.safeNum(rt.qtd_conserto) * fmt.safeNum(rem.preco_unit),
+            dt_retorno: rt.dt_retorno
+          });
+        }
+      });
+    });
+    const total = dados.reduce((a, x) => a + fmt.safeNum(x.qtd_conserto), 0);
+    const totCusto = dados.reduce((a, x) => a + fmt.safeNum(x.custo), 0);
+    $('#rd-data').innerHTML = `
+      <div class="card p-3 mb-2 flex flex-wrap gap-3 text-sm">
+        <span><b>${dados.length}</b> ocorrência(s)</span>
+        <span>Total: <b class="text-orange-700">${fmt.int(total)}</b> peça(s)</span>
+        <span>Custo estimado: <b>R$ ${fmt.num(totCusto)}</b></span>
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Produto</th>
+            <th class="p-2 text-left">Referência</th>
+            <th class="p-2 text-left">Cor</th>
+            <th class="p-2 text-left">Serviço</th>
+            <th class="p-2 text-right">Quantidade</th>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-right">Custo</th>
+            <th class="p-2 text-left">Data</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map(d => `<tr class="border-b">
+              <td class="p-2">${d.desc_ref || ''}</td>
+              <td class="p-2 font-mono">${d.cod_ref || ''}</td>
+              <td class="p-2">${d.cor || ''}</td>
+              <td class="p-2">${d.servico || ''}</td>
+              <td class="p-2 text-right text-orange-700 font-bold">${fmt.int(d.qtd_conserto)}</td>
+              <td class="p-2">${d.terc || ''}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.custo)}</td>
+              <td class="p-2">${fmt.date(d.dt_retorno)}</td>
+            </tr>`).join('') || `<tr><td colspan="8" class="p-6 text-center text-slate-500">Nenhum conserto no período</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map(d => ({
+      Produto: d.desc_ref, Referencia: d.cod_ref, Cor: d.cor, Servico: d.servico,
+      QtdConserto: d.qtd_conserto, Terceirizado: d.terc, Custo: d.custo, Data: fmt.date(d.dt_retorno)
+    }));
+    if (tipo === 'csv') _exportCSV(`conserto_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`conserto_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Conserto');
+    else _imprimirRelatorio('Relatório de Conserto', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Produção ===== */
+async function _rdProducao(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let prod = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    let dash = {};
+    try { dash = (await api('get', '/terc/dashboard?' + qs.toString())).data || {}; }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    prod = fmt.safeArr(dash.producao_diaria);
+    const tBoa = prod.reduce((a, p) => a + fmt.safeNum(p.boa), 0);
+    const tFalta = prod.reduce((a, p) => a + fmt.safeNum(p.refugo), 0);
+    const tCons = prod.reduce((a, p) => a + fmt.safeNum(p.conserto), 0);
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        ${_kpiBox('Total boas', fmt.int(tBoa), 'fa-circle-check', 'emerald')}
+        ${_kpiBox('Total falta', fmt.int(tFalta), 'fa-triangle-exclamation', 'amber')}
+        ${_kpiBox('Total conserto', fmt.int(tCons), 'fa-screwdriver', 'orange')}
+        ${_kpiBox('Dias produzidos', fmt.int(prod.length), 'fa-calendar', 'slate')}
+      </div>
+      <div class="card p-3 mb-3"><h3 class="font-semibold mb-2"><i class="fas fa-chart-line mr-1 text-brand"></i>Produção diária</h3><canvas id="ch-prd" height="100"></canvas></div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Data</th>
+            <th class="p-2 text-right">Boas</th>
+            <th class="p-2 text-right">Falta</th>
+            <th class="p-2 text-right">Conserto</th>
+            <th class="p-2 text-right">Total</th>
+          </tr></thead>
+          <tbody>
+            ${prod.map(p => `<tr class="border-b">
+              <td class="p-2">${fmt.date(p.dia)}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(p.boa)}</td>
+              <td class="p-2 text-right text-amber-700">${fmt.int(p.refugo)}</td>
+              <td class="p-2 text-right text-orange-700">${fmt.int(p.conserto)}</td>
+              <td class="p-2 text-right font-bold">${fmt.int(fmt.safeNum(p.boa) + fmt.safeNum(p.refugo) + fmt.safeNum(p.conserto))}</td>
+            </tr>`).join('') || `<tr><td colspan="5" class="p-6 text-center text-slate-500">Sem produção no período</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+    new Chart($('#ch-prd'), {
+      type: 'line',
+      data: {
+        labels: prod.map(p => dayjs(p.dia).format('DD/MM')),
+        datasets: [
+          { label: 'Boas', data: prod.map(p => fmt.safeNum(p.boa)), borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.10)', fill: true, tension: 0.3 },
+          { label: 'Falta', data: prod.map(p => fmt.safeNum(p.refugo)), borderColor: '#f59e0b', fill: false, tension: 0.3 },
+          { label: 'Conserto', data: prod.map(p => fmt.safeNum(p.conserto)), borderColor: '#fb923c', fill: false, tension: 0.3 },
+        ]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    });
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = prod.map(p => ({
+      Data: fmt.date(p.dia), Boas: p.boa, Falta: p.refugo, Conserto: p.conserto,
+      Total: fmt.safeNum(p.boa) + fmt.safeNum(p.refugo) + fmt.safeNum(p.conserto)
+    }));
+    if (tipo === 'csv') _exportCSV(`producao_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`producao_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Producao');
+    else _imprimirRelatorio('Relatório de Produção', _filtrosTxt(state.filtros), $('#rd-data').innerHTML.replace(/<canvas[^>]*>.*?<\/canvas>/g, ''));
+  });
+  await carregar();
+}
+
+/* ===== Ranking ===== */
+async function _rdRanking(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    try { dados = fmt.safeArr((await api('get', '/terc/resumo')).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    dados.sort((a, b) => fmt.safeNum(b.pecas_produzidas) - fmt.safeNum(a.pecas_produzidas));
+    const podio = ['🥇', '🥈', '🥉'];
+    $('#rd-data').innerHTML = `
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+        ${dados.slice(0, 3).map((d, i) => `<div class="card p-3 border-2 ${i === 0 ? 'border-yellow-300 bg-yellow-50' : i === 1 ? 'border-slate-300 bg-slate-50' : 'border-orange-300 bg-orange-50'}">
+          <div class="text-2xl">${podio[i]} <b>${d.nome_terc}</b></div>
+          <div class="text-sm text-slate-600">${d.nome_setor || ''}</div>
+          <div class="text-xs">Produzidas: <b>${fmt.int(d.pecas_produzidas)}</b></div>
+          <div class="text-xs">Valor mov.: <b>R$ ${fmt.num(d.valor_movimentado)}</b></div>
+        </div>`).join('')}
+      </div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Posição</th>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-right">Produzidas</th>
+            <th class="p-2 text-right">Em produção</th>
+            <th class="p-2 text-right">Conserto</th>
+            <th class="p-2 text-right">Índice consertos</th>
+            <th class="p-2 text-right">Valor mov.</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map((d, i) => `<tr class="border-b">
+              <td class="p-2 font-bold">${i + 1}º</td>
+              <td class="p-2 font-semibold">${d.nome_terc}</td>
+              <td class="p-2 text-right text-emerald-700">${fmt.int(d.pecas_produzidas)}</td>
+              <td class="p-2 text-right">${fmt.int(d.pecas_producao)}</td>
+              <td class="p-2 text-right text-orange-700">${fmt.int(d.pecas_conserto)}</td>
+              <td class="p-2 text-right">${fmt.pct(d.indice_consertos)}</td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(d.valor_movimentado)}</td>
+            </tr>`).join('') || `<tr><td colspan="7" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map((d, i) => ({
+      Posicao: i + 1, Terceirizado: d.nome_terc, Produzidas: d.pecas_produzidas,
+      EmProducao: d.pecas_producao, Conserto: d.pecas_conserto,
+      IndiceConsertos: d.indice_consertos, ValorMovimentado: d.valor_movimentado
+    }));
+    if (tipo === 'csv') _exportCSV(`ranking_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`ranking_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Ranking');
+    else _imprimirRelatorio('Ranking de Terceirizados', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
+
+/* ===== Histórico Geral ===== */
+async function _rdHistorico(main, state) {
+  main.innerHTML = _renderFiltros(state) + '<div id="rd-data">' + _skeleton(6) + '</div>';
+  let dados = [];
+  const carregar = async () => {
+    $('#rd-data').innerHTML = _skeleton(6);
+    const f = state.filtros;
+    const qs = new URLSearchParams();
+    if (f.de) qs.set('de', f.de);
+    if (f.ate) qs.set('ate', f.ate);
+    if (f.id_terc) qs.set('id_terc', f.id_terc);
+    try { dados = fmt.safeArr((await api('get', '/terc/remessas?' + qs.toString())).data); }
+    catch { $('#rd-data').innerHTML = '<div class="card p-4 text-red-600">Falha ao carregar.</div>'; return; }
+    dados = dados.sort((a, b) => (b.dt_saida || '').localeCompare(a.dt_saida || '')).slice(0, 200);
+    $('#rd-data').innerHTML = `
+      <div class="card p-3 mb-2 text-sm">Mostrando últimas <b>${dados.length}</b> remessas (mais recentes)</div>
+      <div class="card p-0 overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-slate-100"><tr>
+            <th class="p-2 text-left">Data</th>
+            <th class="p-2 text-left">Nº</th>
+            <th class="p-2 text-left">OP</th>
+            <th class="p-2 text-left">Ref/Cor</th>
+            <th class="p-2 text-left">Terceirizado</th>
+            <th class="p-2 text-right">Qtd</th>
+            <th class="p-2 text-left">Status</th>
+            <th class="p-2 text-right">Valor</th>
+          </tr></thead>
+          <tbody>
+            ${dados.map(r => `<tr class="border-b hover:bg-slate-50">
+              <td class="p-2">${fmt.date(r.dt_saida)}</td>
+              <td class="p-2 font-mono">${r.num_controle || ''}</td>
+              <td class="p-2">${r.num_op || ''}</td>
+              <td class="p-2 font-mono">${r.cod_ref || ''} / ${r.cor || ''}</td>
+              <td class="p-2">${r.nome_terc || ''}</td>
+              <td class="p-2 text-right">${fmt.int(r.qtd_total)}</td>
+              <td class="p-2"><span class="badge">${r.status || ''}</span></td>
+              <td class="p-2 text-right font-mono">R$ ${fmt.num(r.valor_total)}</td>
+            </tr>`).join('') || `<tr><td colspan="8" class="p-6 text-center text-slate-500">Sem registros</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+  _bindFiltros(state, carregar, (tipo) => {
+    const linhas = dados.map(r => ({
+      Data: fmt.date(r.dt_saida), Numero: r.num_controle, OP: r.num_op,
+      Referencia: r.cod_ref, Cor: r.cor, Terceirizado: r.nome_terc,
+      Qtd: r.qtd_total, Status: r.status, Valor: r.valor_total
+    }));
+    if (tipo === 'csv') _exportCSV(`historico_${dayjs().format('YYYYMMDD')}.csv`, linhas);
+    else if (tipo === 'xlsx') _exportXLSX(`historico_${dayjs().format('YYYYMMDD')}.xlsx`, linhas, 'Historico');
+    else _imprimirRelatorio('Histórico Geral', _filtrosTxt(state.filtros), $('#rd-data').innerHTML);
+  });
+  await carregar();
+}
 
 /* ============================================================
  * PERFIL DO USUÁRIO — edição de dados pessoais e foto/avatar
