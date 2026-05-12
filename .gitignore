@@ -31,3 +31,6 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# Backups de banco D1 (não versionar)
+backups/

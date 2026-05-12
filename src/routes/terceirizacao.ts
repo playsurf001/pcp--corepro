@@ -1470,15 +1470,19 @@ app.post('/terc/remessas', async (c) => {
   // ---- Persistir cada item + sua grade independente ----
   let ordem = 0;
   for (const it of itensValidos) {
+    // Nº OP por item: usa o do item; se faltar, herda do cabeçalho da remessa
+    const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
+      ? it.num_op.trim()
+      : (b.num_op || null);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
-         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho, num_op)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
       .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, toInt(it.grade_num, 1),
         it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
-        toInt(it.id_grade_tamanho) || null).run();
+        toInt(it.id_grade_tamanho) || null, itemNumOp).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
       if (toInt(g.qtd) > 0) {
@@ -1632,15 +1636,19 @@ app.put('/terc/remessas/:id', async (c) => {
 
   let ordem = 0;
   for (const it of itensValidos) {
+    // Nº OP por item: usa o do item; se faltar, herda do cabeçalho
+    const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
+      ? it.num_op.trim()
+      : (b.num_op || null);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
-         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao, id_grade_tamanho)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?)`)
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao, id_grade_tamanho, num_op)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?)`)
       .bind(id, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, toInt(it.grade_num, 1),
         it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
-        toInt(it.id_grade_tamanho) || null).run();
+        toInt(it.id_grade_tamanho) || null, itemNumOp).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
       if (toInt(g.qtd) > 0) {
@@ -2938,23 +2946,78 @@ app.post('/terc/grades-tamanho/:id/default', async (c) => {
   return c.json(ok({ id_grade: id, is_default: 1 }));
 });
 
-// DELETE — soft delete (marca ativo=0); se for default, transfere o flag p/ outra
+// USO — conta quantas remessas/itens estão usando essa grade
+// Usado pela UI para decidir se permite hard-delete ou apenas soft-delete
+app.get('/terc/grades-tamanho/:id/uso', async (c) => {
+  const id = toInt(c.req.param('id'));
+  const cur = await c.env.DB.prepare('SELECT id_grade, nome FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
+  if (!cur) return fail('Grade não encontrada', 404);
+
+  const rItens = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM terc_remessa_itens WHERE id_grade_tamanho=?'
+  ).bind(id).first<any>();
+  const itens = Number(rItens?.n || 0);
+
+  const rRemessas = await c.env.DB.prepare(`
+    SELECT COUNT(DISTINCT id_remessa) AS n
+      FROM terc_remessa_itens
+     WHERE id_grade_tamanho=?
+  `).bind(id).first<any>();
+  const remessas = Number(rRemessas?.n || 0);
+
+  return c.json(ok({
+    id_grade: id,
+    nome: cur.nome,
+    itens,
+    remessas,
+    em_uso: (itens + remessas) > 0,
+  }));
+});
+
+// DELETE — soft delete por padrão; ?hard=1 só permitido se a grade NUNCA foi usada
 app.delete('/terc/grades-tamanho/:id', async (c) => {
   const id = toInt(c.req.param('id'));
   const cur = await c.env.DB.prepare('SELECT * FROM terc_grades_tamanho WHERE id_grade=?').bind(id).first<any>();
   if (!cur) return fail('Grade não encontrada', 404);
 
-  // Hard delete se não estiver em uso (sempre soft por segurança aqui)
+  // Conta uso real (preserva histórico de remessas/retornos antigos)
+  const rItens = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM terc_remessa_itens WHERE id_grade_tamanho=?'
+  ).bind(id).first<any>();
+  const emUso = Number(rItens?.n || 0) > 0;
+
+  const wantHard = c.req.query('hard') === '1';
+
+  if (wantHard) {
+    if (emUso) {
+      return c.json({
+        ok: false,
+        code: 'GRADE_EM_USO',
+        error: 'Esta grade já possui movimentações e não pode ser excluída permanentemente. Você pode desativá-la (soft-delete).',
+      }, 409);
+    }
+    await c.env.DB.prepare('DELETE FROM terc_grades_tamanho WHERE id_grade=?').bind(id).run();
+    if (cur.is_default) {
+      const next = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE ativo=1 ORDER BY id_grade ASC LIMIT 1').first<any>();
+      if (next) {
+        await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=1 WHERE id_grade=?').bind(next.id_grade).run();
+      }
+    }
+    await audit(c, 'GRADES_TAMANHO', 'DEL_HARD', `grade:${id}`, 'nome', cur.nome, '');
+    return c.json(ok({ id_grade: id, deleted: true, hard: true }));
+  }
+
+  // Soft delete (padrão) — preserva o vínculo histórico nas remessas antigas
   await c.env.DB.prepare('UPDATE terc_grades_tamanho SET ativo=0, is_default=0, dt_alteracao=CURRENT_TIMESTAMP WHERE id_grade=?').bind(id).run();
 
-  // Se era a default, promove a próxima ativa
   if (cur.is_default) {
     const next = await c.env.DB.prepare('SELECT id_grade FROM terc_grades_tamanho WHERE ativo=1 ORDER BY id_grade ASC LIMIT 1').first<any>();
     if (next) {
       await c.env.DB.prepare('UPDATE terc_grades_tamanho SET is_default=1 WHERE id_grade=?').bind(next.id_grade).run();
     }
   }
-  return c.json(ok({ id_grade: id, deleted: true }));
+  await audit(c, 'GRADES_TAMANHO', 'DEL_SOFT', `grade:${id}`, 'ativo', '1', '0');
+  return c.json(ok({ id_grade: id, deleted: true, hard: false, em_uso: emUso }));
 });
 
 export default app;

@@ -505,7 +505,7 @@ const Modal = {
 
     const back = document.createElement('div');
     back.className = 'modal-backdrop';
-    back.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px;animation:modalFadeIn .18s ease';
+    back.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:9500;padding:16px;animation:modalFadeIn .18s ease';
 
     const card = document.createElement('div');
     card.className = `modal w-full ${sizeCls}`;

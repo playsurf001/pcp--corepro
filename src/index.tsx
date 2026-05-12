@@ -5,15 +5,9 @@ import type { Bindings } from './lib/db';
 import { authMiddleware, requireAdmin, requirePerfil } from './lib/auth';
 
 import auth from './routes/auth';
-import cadastros from './routes/cadastros';
-import sequencias from './routes/sequencias';
-import ops from './routes/ops';
-import producao from './routes/producao';
-import importador from './routes/importador';
-import relatorios from './routes/relatorios';
+import configuracoes from './routes/configuracoes';
 import relatoriosDetalhados from './routes/relatorios_detalhados';
 import terceirizacao from './routes/terceirizacao';
-import mes from './routes/mes';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
 
@@ -24,7 +18,7 @@ app.use('/api/*', cors());
 app.get('/api/health', (c) =>
   c.json({
     ok: true,
-    sistema: 'PCP Confecção v2.0',
+    sistema: 'CorePro Terceirização',
     timestamp: new Date().toISOString(),
   })
 );
@@ -36,51 +30,14 @@ app.use('/api/*', authMiddleware);
 app.route('/api', auth);
 app.route('/api', terceirizacao);
 
-// Demais módulos: APENAS administradores
-// (Gestão, Produção, Chão de Fábrica, Engenharia, Cadastros, MES, Importador genérico)
+// Configurações (parâmetros da empresa): admin only
+// Relatórios: liberado para TODOS os usuários autenticados (alinhado com frontend)
 const adminOnly = requireAdmin();
-// Cadastros
-app.use('/api/clientes', adminOnly); app.use('/api/clientes/*', adminOnly);
-app.use('/api/referencias', adminOnly); app.use('/api/referencias/*', adminOnly);
-app.use('/api/maquinas', adminOnly); app.use('/api/maquinas/*', adminOnly);
-app.use('/api/aparelhos', adminOnly); app.use('/api/aparelhos/*', adminOnly);
-app.use('/api/operacoes', adminOnly); app.use('/api/operacoes/*', adminOnly);
-app.use('/api/cores', adminOnly); app.use('/api/cores/*', adminOnly);
-app.use('/api/tamanhos', adminOnly); app.use('/api/tamanhos/*', adminOnly);
-app.use('/api/parametros', adminOnly); app.use('/api/parametros/*', adminOnly);
-// Sequências
-app.use('/api/sequencias', adminOnly); app.use('/api/sequencias/*', adminOnly);
-// OPs
-app.use('/api/ops', adminOnly); app.use('/api/ops/*', adminOnly);
-// Produção / Apontamentos / Dashboard de fábrica
-app.use('/api/apontamentos', adminOnly); app.use('/api/apontamentos/*', adminOnly);
-app.use('/api/dashboard', adminOnly); app.use('/api/dashboard/*', adminOnly);
-app.use('/api/produtos/ranking', adminOnly);
-app.use('/api/auditoria', adminOnly); app.use('/api/auditoria/*', adminOnly);
-// MES / chão de fábrica
-app.use('/api/setores', adminOnly); app.use('/api/setores/*', adminOnly);
-app.use('/api/colaboradores', adminOnly); app.use('/api/colaboradores/*', adminOnly);
-app.use('/api/sessoes', adminOnly); app.use('/api/sessoes/*', adminOnly);
-app.use('/api/defeitos', adminOnly); app.use('/api/defeitos/*', adminOnly);
-app.use('/api/bonificacao', adminOnly); app.use('/api/bonificacao/*', adminOnly);
-app.use('/api/rastreabilidade', adminOnly); app.use('/api/rastreabilidade/*', adminOnly);
-app.use('/api/alertas', adminOnly); app.use('/api/alertas/*', adminOnly);
-// Relatórios
-app.use('/api/relatorios', adminOnly); app.use('/api/relatorios/*', adminOnly);
-// Relatórios Detalhados: admin + gerente
-const gerenteOuAcima = requirePerfil('gerente');
-app.use('/api/relatorios-det', gerenteOuAcima); app.use('/api/relatorios-det/*', gerenteOuAcima);
-// Importador genérico (NÃO o de terceirização, que tem prefixo /api/terc/importar/...)
-app.use('/api/importar', adminOnly); app.use('/api/importar/*', adminOnly);
 
-app.route('/api', cadastros);
-app.route('/api', sequencias);
-app.route('/api', ops);
-app.route('/api', producao);
-app.route('/api', importador);
-app.route('/api', relatorios);
+app.use('/api/parametros', adminOnly); app.use('/api/parametros/*', adminOnly);
+
+app.route('/api', configuracoes);
 app.route('/api', relatoriosDetalhados);
-app.route('/api', mes);
 
 // SPA: uma única página, navegação por hash
 app.get('/', (c) => {
@@ -93,8 +50,8 @@ function renderSPA(): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CorePro — Onde sistemas se tornam negócio</title>
-  <meta name="description" content="CorePro — Plataforma SaaS de PCP, balanceamento e gestão de produção." />
+  <title>CorePro — Terceirização Têxtil</title>
+  <meta name="description" content="CorePro — Sistema profissional de gestão de terceirização têxtil." />
   <meta name="theme-color" content="#020617" />
   <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon.png" />
   <link rel="icon" type="image/png" sizes="192x192" href="/static/logo-icon.png" />
@@ -118,7 +75,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=5" rel="stylesheet" />
+  <link href="/static/styles.css?v=13" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -151,10 +108,9 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="/static/core.js?v=2"></script>
-  <script src="/static/app.js?v=5"></script>
-  <script src="/static/mes.js?v=1"></script>
-  <script src="/static/relatorios_det.js?v=1"></script>
+  <script src="/static/core.js?v=4"></script>
+  <script src="/static/app.js?v=14"></script>
+  <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;
 }
