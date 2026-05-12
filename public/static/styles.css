@@ -2281,6 +2281,83 @@ textarea.field-invalid {
   box-shadow: 0 8px 22px rgba(99, 102, 241, 0.28);
 }
 
+/* ============================================================================
+ * Animação de Duplicação — destaque visual ao criar um novo card
+ * Usado pelo botão "Duplicar" para sinalizar qual card foi gerado.
+ * Anti-FOUC: combina fade-in (slide vertical) + pulse de borda primária.
+ * ============================================================================ */
+.rem-item-duplicated {
+  animation:
+    remItemSlideIn 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.1) both,
+    remItemHighlight 1.6s ease-out 0.05s both;
+  position: relative;
+}
+@keyframes remItemSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes remItemHighlight {
+  0% {
+    border-color: #10b981;
+    box-shadow:
+      0 0 0 3px rgba(16, 185, 129, 0.18),
+      0 8px 24px rgba(16, 185, 129, 0.28);
+    background: linear-gradient(180deg, rgba(16, 185, 129, 0.08), transparent 60%);
+  }
+  60% {
+    border-color: #10b981;
+    box-shadow:
+      0 0 0 2px rgba(16, 185, 129, 0.12),
+      0 6px 18px rgba(16, 185, 129, 0.18);
+  }
+  100% {
+    border-color: var(--border);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+    background: var(--surface-1);
+  }
+}
+/* Dark mode — highlight com tom emerald compatível */
+[data-theme="dark"] .rem-item-duplicated {
+  animation:
+    remItemSlideIn 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.1) both,
+    remItemHighlightDark 1.6s ease-out 0.05s both;
+}
+@keyframes remItemHighlightDark {
+  0% {
+    border-color: #34d399;
+    box-shadow:
+      0 0 0 3px rgba(52, 211, 153, 0.22),
+      0 10px 28px rgba(52, 211, 153, 0.30);
+    background: linear-gradient(180deg, rgba(52, 211, 153, 0.10), #111827 60%);
+  }
+  60% {
+    border-color: #34d399;
+    box-shadow:
+      0 0 0 2px rgba(52, 211, 153, 0.15),
+      0 8px 22px rgba(52, 211, 153, 0.20);
+  }
+  100% {
+    border-color: #334155;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    background: #111827;
+  }
+}
+/* Respeita preferência de movimento reduzido (acessibilidade) */
+@media (prefers-reduced-motion: reduce) {
+  .rem-item-duplicated {
+    animation: remItemHighlight 0.8s ease-out both;
+  }
+  [data-theme="dark"] .rem-item-duplicated {
+    animation: remItemHighlightDark 0.8s ease-out both;
+  }
+}
+
 /* Cabeçalho do card */
 .rem-item-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -2627,6 +2704,19 @@ textarea.field-invalid {
   .rem-item-actions {
     width: 100%;
     justify-content: flex-end;
+    /* Garante que os botões (Duplicar/+Cor/Excluir) permaneçam visíveis
+       no mobile sem quebrar o layout do card */
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .rem-item-actions .btn {
+    /* Botões compactos no mobile, sem perder o texto principal */
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    flex: 0 1 auto;
+  }
+  .rem-item-actions .btn i {
+    margin-right: 4px;
   }
   .rem-item-card .grid-cols-12 > [class*="col-span-"] {
     grid-column: span 12 / span 12;

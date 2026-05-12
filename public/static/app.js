@@ -2078,8 +2078,8 @@ async function TERC_openRemModal(id, onSave) {
     if (!idGrade && GRADE_DEFAULT) idGrade = GRADE_DEFAULT.id_grade;
 
     return {
-      uid: _uid++,
-      id_item: over.id_item || null,
+      uid: _uid++,                                  // sempre novo (interno)
+      id_item: over.id_item || null,                // null em duplicações: novo item no backend
       id_produto: over.id_produto || '',
       cod_ref: over.cod_ref || '',
       desc_ref: over.desc_ref || '',
@@ -2089,10 +2089,12 @@ async function TERC_openRemModal(id, onSave) {
       tempo_peca: Number(over.tempo_peca || 0),
       grade,
       id_grade_tamanho: idGrade,
+      observacao: over.observacao || '',            // observação por item (se existir)
       // Nº OP por item: herda do cabeçalho até o usuário editar manualmente.
       // _num_op_manual=true significa que este item foi divergido e não sincroniza mais.
       num_op: (over.num_op != null ? String(over.num_op) : ''),
       _num_op_manual: !!over._num_op_manual,
+      // _qtdRetornada NUNCA é copiado em duplicações: clone é item novo, sem retornos
       _qtdRetornada: Number(over._qtdRetornada || 0),
       _precoTag: '',
     };
@@ -2369,8 +2371,8 @@ async function TERC_openRemModal(id, onSave) {
           <span class="rem-item-cor" data-role="cor-label">${corBadge}</span>
         </div>
         <div class="rem-item-actions">
-          <button type="button" class="btn btn-secondary btn-sm" data-act="dup-item" title="Duplicar este item (mesma grade e cor)">
-            <i class="fas fa-copy mr-1"></i>Duplicar
+          <button type="button" class="btn btn-secondary btn-sm rem-btn-dup" data-act="dup-item" title="Duplicar este produto com todos os dados (cor, grade, OP, preço, tempo)">
+            <i class="fas fa-clone mr-1"></i>Duplicar
           </button>
           <button type="button" class="btn btn-secondary btn-sm" data-act="add-cor" title="Duplicar este produto com outra cor">
             <i class="fas fa-palette mr-1"></i>+ Cor
@@ -2744,21 +2746,83 @@ async function TERC_openRemModal(id, onSave) {
         if (last) last.querySelector('[data-f="cor"]')?.focus();
       }, 30);
     };
-    // ---- Duplicar item completo (mesmo produto, cor, preço, grade e Nº OP) ----
+    // ============================================================
+    // Botão "Duplicar" — cópia COMPLETA do item original
+    // ------------------------------------------------------------
+    // Copia: Produto, Serviço, Referência, Descrição, Cor, Nº OP,
+    //        Preço, Tempo/peça, Grade de tamanho, Quantidades,
+    //        Observação por item, flag _num_op_manual.
+    // NÃO copia: id_item, uid, _qtdRetornada, _precoTag (estados
+    //           temporários / IDs únicos / flags de erro).
+    // Após inserir: re-renderiza, recalcula totais, dá scroll
+    //               suave até o novo card e aplica animação de
+    //               highlight para identificação visual.
+    // ============================================================
     const fDupBtn = wrap.querySelector('[data-act="dup-item"]');
     if (fDupBtn) {
       fDupBtn.onclick = () => {
+        // Anti-duplo-clique: desabilita o botão durante a operação
+        if (fDupBtn.disabled) return;
+        fDupBtn.disabled = true;
+
+        // Cópia DEFENSIVA: garante que alterações no clone NÃO afetem o original
+        // (objects/arrays são clonados; primitivos copiados por valor naturalmente)
         const clone = newItem({
-          id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
-          id_servico: it.id_servico, cor: it.cor, preco_unit: it.preco_unit,
-          tempo_peca: it.tempo_peca, grade: { ...(it.grade || {}) },
+          // Dados do produto
+          id_produto: it.id_produto,
+          cod_ref: it.cod_ref,
+          desc_ref: it.desc_ref,
+          id_servico: it.id_servico,
+          // Variantes
+          cor: it.cor,
+          // Preços e tempo
+          preco_unit: Number(it.preco_unit || 0),
+          tempo_peca: Number(it.tempo_peca || 0),
+          // Grade — deep clone do objeto para edição independente
+          grade: { ...(it.grade || {}) },
           id_grade_tamanho: it.id_grade_tamanho,
+          // Nº OP por item — preserva o estado (herda ou manual)
           num_op: it.num_op,
           _num_op_manual: it._num_op_manual,
+          // Observação por item, se houver
+          observacao: it.observacao || '',
+          // Explicitamente NÃO copia: id_item, uid (sempre novos),
+          // _qtdRetornada (clone não tem histórico de retorno).
         });
-        itens.push(clone);
+
+        // Insere logo APÓS o item original (não no fim) — UX mais previsível
+        const idx = itens.findIndex(x => x.uid === it.uid);
+        if (idx >= 0) {
+          itens.splice(idx + 1, 0, clone);
+        } else {
+          itens.push(clone);
+        }
+
+        // Re-renderiza a lista e recalcula totais
         mountItens();
-        toast('Item duplicado', 'success');
+        recalcAll();
+
+        // Identificação visual: scroll suave + highlight animado
+        setTimeout(() => {
+          const novoEl = card.querySelector(`[data-uid="${clone.uid}"]`);
+          if (novoEl) {
+            try {
+              novoEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } catch {
+              // Fallback para navegadores sem scrollIntoView com options
+              novoEl.scrollIntoView();
+            }
+            novoEl.classList.add('rem-item-duplicated');
+            // Remove a classe ao final da animação (CSS animation dura 1.6s)
+            setTimeout(() => {
+              novoEl.classList.remove('rem-item-duplicated');
+            }, 1700);
+          }
+          // Reabilita o botão (caso o card original ainda exista no DOM)
+          if (fDupBtn && fDupBtn.isConnected) fDupBtn.disabled = false;
+        }, 40);
+
+        toast('Produto duplicado — edite cor/grade/OP se necessário', 'success');
       };
     }
     // ---- Copiar grade deste item para todos os outros ----
