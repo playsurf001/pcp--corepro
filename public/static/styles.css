@@ -2005,6 +2005,7 @@ input:focus, select:focus, textarea:focus {
   position: relative;
   display: inline-flex;
   align-items: center;
+  overflow: visible !important;   /* nunca recortar o dropdown */
 }
 
 /* Backdrop invisível que cobre a tela quando o dropdown está aberto:
@@ -2014,20 +2015,22 @@ input:focus, select:focus, textarea:focus {
 .user-menu-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: 99998;                 /* logo abaixo do dropdown */
   background: transparent;
   cursor: default;
+  pointer-events: auto;
 }
 .user-menu-backdrop.is-hidden { display: none; }
 
 .user-dropdown {
-  position: fixed;            /* foge de qualquer overflow:hidden/transform */
+  position: fixed !important; /* foge de qualquer overflow:hidden/transform */
   top: 56px;                  /* fallback — JS reposiciona dinamicamente */
   right: 12px;
   width: 248px;
   min-width: 228px;
   max-width: calc(100vw - 16px);
-  z-index: 10000;             /* SEMPRE acima de modais, drawers, FABs e tabelas sticky */
+  z-index: 99999 !important;  /* SEMPRE acima de modais, drawers, FABs, tabelas sticky e qualquer tooltip nativo */
+  overflow: visible !important;
   isolation: isolate;         /* cria stacking-context próprio */
   background: var(--surface-1, #ffffff);
   color: var(--text-1, #0f172a);
@@ -2051,12 +2054,17 @@ input:focus, select:focus, textarea:focus {
     transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .user-dropdown.is-hidden {
-  display: none;
+  display: none !important;
 }
 .user-dropdown.is-open {
   opacity: 1;
   transform: translateY(0) scale(1);
-  pointer-events: auto;
+  pointer-events: auto !important;
+}
+/* Garante clicabilidade de TODOS os filhos do dropdown
+ * (mesmo se algum pai estiver com pointer-events:none herdado) */
+.user-dropdown.is-open * {
+  pointer-events: auto !important;
 }
 
 /* Header do dropdown (avatar + nome + perfil) */
@@ -2088,7 +2096,7 @@ input:focus, select:focus, textarea:focus {
 /* Itens do dropdown */
 .user-dropdown-item {
   position: relative;
-  z-index: 1;                 /* mantém clicável acima do conteúdo do dropdown */
+  z-index: 2;                 /* mantém clicável acima do conteúdo do dropdown */
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2100,11 +2108,35 @@ input:focus, select:focus, textarea:focus {
   font-size: 0.85rem;
   color: var(--text-1, #0f172a);
   cursor: pointer;
-  pointer-events: auto;       /* garante clicabilidade mesmo se pai estiver com pointer-events:none */
+  pointer-events: auto !important; /* garante clicabilidade mesmo se pai estiver com pointer-events:none */
   user-select: none;
   transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
   border-radius: 0;
   font-family: inherit;
+  /* Ícones/spans internos não devem capturar o clique antes do botão */
+}
+.user-dropdown-item > * {
+  pointer-events: none;       /* o clique sempre cai no <button>, nunca no <i> ou <span> */
+}
+
+/* Botão Sair especificamente — z-index máximo dentro do dropdown */
+#btn-logout {
+  position: relative;
+  z-index: 5 !important;
+  pointer-events: auto !important;
+}
+
+/* Enquanto o menu está aberto: oculta TODA tooltip flutuante customizada
+ * que possa estar sobreposta (popovers, tippy, bs-tooltip, etc.) */
+body:has(.user-dropdown.is-open) [role="tooltip"],
+body:has(.user-dropdown.is-open) .tooltip,
+body:has(.user-dropdown.is-open) .tippy-box,
+body:has(.user-dropdown.is-open) .popover-floating,
+body:has(.user-dropdown.is-open) [data-floating-menu],
+body:has(.user-dropdown.is-open) #terc-print-menu {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 .user-dropdown-item i {
   width: 16px;

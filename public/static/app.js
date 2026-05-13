@@ -328,37 +328,48 @@ function renderLayout() {
     userBackdrop.addEventListener('click', () => closeUserMenu());
     return userBackdrop;
   }
-  // Remove o atributo title temporariamente de elementos abaixo do dropdown
+  // Remove o atributo title temporariamente de TODOS elementos do documento
   // (impede tooltip nativo do navegador de aparecer por cima do menu).
+  // Também limpa tooltips customizados que possam estar visíveis.
   let _suppressedTitles = [];
   function suppressNativeTitles() {
     _suppressedTitles = [];
     document.querySelectorAll('[title]').forEach(el => {
+      // Ignora o próprio botão do menu e qualquer elemento dentro do dropdown
       if (el === btn || menu.contains(el)) return;
-      _suppressedTitles.push({ el, val: el.getAttribute('title') });
-      el.setAttribute('data-title-saved', el.getAttribute('title'));
+      const val = el.getAttribute('title');
+      _suppressedTitles.push({ el, val });
+      el.setAttribute('data-title-saved', val);
       el.removeAttribute('title');
     });
+    // Remove tooltips customizados visíveis (Tippy/BS/popovers/Floating UI)
+    document.querySelectorAll(
+      '[role="tooltip"], .tooltip, .tippy-box, .popover-floating, [data-floating-menu], #terc-print-menu'
+    ).forEach(el => { try { el.remove(); } catch {} });
   }
   function restoreNativeTitles() {
     _suppressedTitles.forEach(({ el, val }) => {
-      if (val != null) el.setAttribute('title', val);
-      el.removeAttribute('data-title-saved');
+      if (val != null && el && el.isConnected) el.setAttribute('title', val);
+      if (el && el.isConnected) el.removeAttribute('data-title-saved');
     });
     _suppressedTitles = [];
   }
 
   function openUserMenu() {
-    // Remove qualquer popover/menu flutuante anterior que possa interceptar cliques
+    // Remove TODO popover/menu flutuante anterior que possa interceptar cliques
     document.getElementById('terc-print-menu')?.remove();
-    document.querySelectorAll('.popover-floating, [data-floating-menu]').forEach(el => el.remove());
+    document.querySelectorAll(
+      '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
+    ).forEach(el => { try { el.remove(); } catch {} });
+    suppressNativeTitles();    // suprime ANTES de mostrar para evitar flicker do tooltip
     positionUserMenu();
     ensureUserBackdrop();
     userBackdrop.classList.remove('is-hidden');
-    suppressNativeTitles();
     menu.classList.remove('is-hidden');
     menu.classList.add('is-open');
     btn.setAttribute('aria-expanded', 'true');
+    // Reposiciona após render (next frame) para garantir bounding rect correto
+    requestAnimationFrame(positionUserMenu);
   }
   function closeUserMenu() {
     menu.classList.add('is-hidden');
@@ -385,41 +396,75 @@ function renderLayout() {
   window.addEventListener('scroll', () => { if (menu.classList.contains('is-open')) positionUserMenu(); }, true);
   window.addEventListener('resize', () => { if (menu.classList.contains('is-open')) positionUserMenu(); });
 
-  // Logout — função robusta exposta globalmente para fallback
+  // Logout — função robusta, idempotente, exposta globalmente como fallback.
+  // Flag _logoutInProgress impede execução dupla por múltiplos handlers.
+  let _logoutInProgress = false;
   async function doLogout() {
-    closeUserMenu();
-    // Remove qualquer popover residual que possa estar bloqueando
-    document.getElementById('terc-print-menu')?.remove();
-    try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
-    try { AUTH.clearToken(); AUTH.clearUser(); } catch {}
+    if (_logoutInProgress) return;
+    _logoutInProgress = true;
     try {
-      localStorage.removeItem('pcp_token');
-      localStorage.removeItem('pcp_user');
-      sessionStorage.clear();
-    } catch {}
-    state.user = null;
-    location.hash = '';
-    renderLogin('Sessão encerrada.');
+      // 1) Fecha menu e limpa qualquer overlay/popover residual ANTES de qualquer coisa
+      try { closeUserMenu(); } catch {}
+      try {
+        document.getElementById('terc-print-menu')?.remove();
+        document.querySelectorAll(
+          '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
+        ).forEach(el => { try { el.remove(); } catch {} });
+      } catch {}
+
+      // 2) Limpa imediatamente o storage local (síncrono) — usuário JÁ está deslogado
+      try { localStorage.removeItem('pcp_token'); } catch {}
+      try { localStorage.removeItem('pcp_user'); } catch {}
+      try { sessionStorage.clear(); } catch {}
+      try { AUTH.clearToken(); } catch {}
+      try { AUTH.clearUser(); } catch {}
+
+      // 3) Limpa estado global de autenticação
+      try { state.user = null; } catch {}
+      try { state.token = null; } catch {}
+
+      // 4) Chama a API (silenciosa — se falhar não impede o logout client-side)
+      try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
+
+      // 5) Redireciona para a tela de login
+      try { location.hash = ''; } catch {}
+      try { renderLogin('Sessão encerrada.'); } catch (err) {
+        // Fallback duríssimo: força recarga completa para garantir o redirect
+        try { location.reload(); } catch {}
+      }
+    } finally {
+      // Libera o flag depois de um ciclo, permitindo novo logout futuro
+      setTimeout(() => { _logoutInProgress = false; }, 1000);
+    }
   }
   window.doLogout = doLogout;
 
-  // Handler do botão Sair — usa addEventListener + capture para garantir disparo,
-  // mesmo se outro elemento tentar interceptar (popover residual, overlay, etc.)
-  const btnLogout = $('#btn-logout');
-  if (btnLogout) {
-    const onLogoutClick = (e) => {
+  // Handler do botão Sair — UM ÚNICO ponto de disparo via delegação no document
+  // com capture:true, garantindo que sempre dispare ANTES de qualquer outro
+  // handler (popover residual, overlay, etc) que pudesse interceptar o clique.
+  // Usa pointerdown (dispara antes do click e antes do tooltip nativo aparecer)
+  // e também click como failsafe para teclado/acessibilidade.
+  const _logoutHandler = (e) => {
+    const t = e.target && e.target.closest && e.target.closest('#btn-logout');
+    if (!t) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    doLogout();
+  };
+  // Capture phase: roda antes de qualquer handler dos elementos descendentes
+  document.addEventListener('pointerdown', _logoutHandler, true);
+  document.addEventListener('click', _logoutHandler, true);
+  // Teclado (Enter/Espaço) — acessibilidade
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const t = document.activeElement;
+    if (t && t.id === 'btn-logout') {
       e.preventDefault();
       e.stopPropagation();
       doLogout();
-    };
-    btnLogout.addEventListener('click', onLogoutClick);
-    btnLogout.addEventListener('pointerup', onLogoutClick);   // touch/mobile fallback
-    // Failsafe: delegação no document caso o botão seja substituído por re-render
-    document.addEventListener('click', (e) => {
-      const t = e.target.closest && e.target.closest('#btn-logout');
-      if (t) { e.preventDefault(); e.stopPropagation(); doLogout(); }
-    }, true);
-  }
+    }
+  }, true);
 
   const btnSenha = $('#btn-trocar-senha');
   if (btnSenha) btnSenha.addEventListener('click', (e) => {
