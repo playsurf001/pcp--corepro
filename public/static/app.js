@@ -98,6 +98,102 @@ const state = {
 // Expõe globalmente para módulos externos (relatorios_det.js, etc)
 window.state = state;
 
+/* ============================================================
+ * LOGOUT GLOBAL — escopo de módulo, registrado UMA ÚNICA VEZ.
+ *
+ * IMPORTANTE: doLogout() e seus listeners DEVEM ficar fora de
+ * renderLayout(), porque renderLayout() é chamado a cada navegação
+ * (bootApp → renderLayout). Se os listeners ficassem dentro, cada
+ * navegação registraria NOVOS listeners no document, acumulando
+ * handlers de closures mortas que bloqueavam uns aos outros via
+ * stopImmediatePropagation + flag _logoutInProgress.
+ *
+ * Aqui o registro é IDEMPOTENTE (window.__logoutBound) — mesmo se
+ * o script for re-injetado, não duplica.
+ * ============================================================ */
+let _logoutInProgress = false;
+async function doLogout() {
+  console.log('[logout] doLogout() iniciado');
+  if (_logoutInProgress) { console.log('[logout] já em progresso, ignorando'); return; }
+  _logoutInProgress = true;
+  try {
+    // 1) Fecha menu e limpa qualquer overlay/popover residual ANTES de qualquer coisa
+    try {
+      const menu = document.getElementById('user-menu');
+      if (menu) { menu.classList.add('is-hidden'); menu.classList.remove('is-open'); }
+      const bd = document.getElementById('user-menu-backdrop');
+      if (bd) bd.classList.add('is-hidden');
+    } catch {}
+    try {
+      document.getElementById('terc-print-menu')?.remove();
+      document.querySelectorAll(
+        '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
+      ).forEach(el => { try { el.remove(); } catch {} });
+    } catch {}
+
+    // 2) Limpa imediatamente o storage local (síncrono) — usuário JÁ está deslogado
+    try { localStorage.removeItem('pcp_token'); } catch {}
+    try { localStorage.removeItem('pcp_user'); } catch {}
+    try { sessionStorage.clear(); } catch {}
+    try { AUTH.clearToken(); } catch {}
+    try { AUTH.clearUser(); } catch {}
+
+    // 3) Limpa estado global de autenticação
+    try { state.user = null; } catch {}
+    try { state.token = null; } catch {}
+
+    // 4) Chama a API (silenciosa — se falhar não impede o logout client-side)
+    try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
+
+    // 5) Redireciona para a tela de login
+    try { location.hash = ''; } catch {}
+    try {
+      if (typeof renderLogin === 'function') {
+        renderLogin('Sessão encerrada.');
+      } else {
+        location.reload();
+      }
+    } catch (err) {
+      console.error('[logout] renderLogin falhou, recarregando página', err);
+      try { location.reload(); } catch {}
+    }
+    console.log('[logout] doLogout() concluído');
+  } finally {
+    // Libera o flag depois de um ciclo, permitindo novo logout futuro
+    setTimeout(() => { _logoutInProgress = false; }, 1000);
+  }
+}
+window.doLogout = doLogout;
+
+// Registra UMA ÚNICA VEZ os listeners delegados no document.
+// Usa pointerdown (dispara antes do tooltip nativo aparecer) e click (failsafe).
+if (!window.__logoutBound) {
+  window.__logoutBound = true;
+  const _globalLogoutHandler = (e) => {
+    const t = e.target && e.target.closest && e.target.closest('#btn-logout');
+    if (!t) return;
+    console.log('[logout] handler global disparou via', e.type);
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    doLogout();
+  };
+  // Capture phase: roda antes de qualquer handler dos elementos descendentes
+  document.addEventListener('pointerdown', _globalLogoutHandler, true);
+  document.addEventListener('click', _globalLogoutHandler, true);
+  // Teclado (Enter/Espaço) — acessibilidade
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const t = document.activeElement;
+    if (t && t.id === 'btn-logout') {
+      e.preventDefault();
+      e.stopPropagation();
+      doLogout();
+    }
+  }, true);
+  console.log('[logout] handlers globais registrados (uma única vez)');
+}
+
 /* ---------- Layout / Navegação ----------
  * Política de acesso (refator 2026‑04‑30):
  *   - admin: vê TUDO
@@ -396,75 +492,10 @@ function renderLayout() {
   window.addEventListener('scroll', () => { if (menu.classList.contains('is-open')) positionUserMenu(); }, true);
   window.addEventListener('resize', () => { if (menu.classList.contains('is-open')) positionUserMenu(); });
 
-  // Logout — função robusta, idempotente, exposta globalmente como fallback.
-  // Flag _logoutInProgress impede execução dupla por múltiplos handlers.
-  let _logoutInProgress = false;
-  async function doLogout() {
-    if (_logoutInProgress) return;
-    _logoutInProgress = true;
-    try {
-      // 1) Fecha menu e limpa qualquer overlay/popover residual ANTES de qualquer coisa
-      try { closeUserMenu(); } catch {}
-      try {
-        document.getElementById('terc-print-menu')?.remove();
-        document.querySelectorAll(
-          '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
-        ).forEach(el => { try { el.remove(); } catch {} });
-      } catch {}
-
-      // 2) Limpa imediatamente o storage local (síncrono) — usuário JÁ está deslogado
-      try { localStorage.removeItem('pcp_token'); } catch {}
-      try { localStorage.removeItem('pcp_user'); } catch {}
-      try { sessionStorage.clear(); } catch {}
-      try { AUTH.clearToken(); } catch {}
-      try { AUTH.clearUser(); } catch {}
-
-      // 3) Limpa estado global de autenticação
-      try { state.user = null; } catch {}
-      try { state.token = null; } catch {}
-
-      // 4) Chama a API (silenciosa — se falhar não impede o logout client-side)
-      try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
-
-      // 5) Redireciona para a tela de login
-      try { location.hash = ''; } catch {}
-      try { renderLogin('Sessão encerrada.'); } catch (err) {
-        // Fallback duríssimo: força recarga completa para garantir o redirect
-        try { location.reload(); } catch {}
-      }
-    } finally {
-      // Libera o flag depois de um ciclo, permitindo novo logout futuro
-      setTimeout(() => { _logoutInProgress = false; }, 1000);
-    }
-  }
-  window.doLogout = doLogout;
-
-  // Handler do botão Sair — UM ÚNICO ponto de disparo via delegação no document
-  // com capture:true, garantindo que sempre dispare ANTES de qualquer outro
-  // handler (popover residual, overlay, etc) que pudesse interceptar o clique.
-  // Usa pointerdown (dispara antes do click e antes do tooltip nativo aparecer)
-  // e também click como failsafe para teclado/acessibilidade.
-  const _logoutHandler = (e) => {
-    const t = e.target && e.target.closest && e.target.closest('#btn-logout');
-    if (!t) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-    doLogout();
-  };
-  // Capture phase: roda antes de qualquer handler dos elementos descendentes
-  document.addEventListener('pointerdown', _logoutHandler, true);
-  document.addEventListener('click', _logoutHandler, true);
-  // Teclado (Enter/Espaço) — acessibilidade
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const t = document.activeElement;
-    if (t && t.id === 'btn-logout') {
-      e.preventDefault();
-      e.stopPropagation();
-      doLogout();
-    }
-  }, true);
+  // NOTA: doLogout() e os listeners globais de logout foram movidos para
+  // o ESCOPO GLOBAL (fora de renderLayout) e registrados UMA ÚNICA VEZ
+  // no init() — assim não acumulam handlers a cada re-render e não ficam
+  // bloqueados por closures antigas. Ver final do arquivo.
 
   const btnSenha = $('#btn-trocar-senha');
   if (btnSenha) btnSenha.addEventListener('click', (e) => {
