@@ -9,6 +9,45 @@ const app = new Hono<{ Bindings: Bindings }>();
 const MOD = 'TERC';
 const TAMS = ['P','M','G','GG','EG','SG','T7','T8','T9','T10'];
 
+/**
+ * Resolve nome de cor (texto) para id_cor (FK em cores.id).
+ * - Case-insensitive (COLLATE NOCASE).
+ * - Retorna null se corText vazio ou não encontrado (mantém compat).
+ * - Auto-cria a cor caso não exista, gerando hex determinístico, para que
+ *   inserts antigos continuem funcionando sem quebrar (denormalização).
+ */
+async function resolveColorId(db: D1Database, corText: any): Promise<number | null> {
+  const nome = (corText == null ? '' : String(corText)).trim();
+  if (!nome) return null;
+  // Busca case-insensitive
+  const row = await db.prepare(
+    'SELECT id FROM cores WHERE nome = ? COLLATE NOCASE LIMIT 1'
+  ).bind(nome).first<{ id: number }>();
+  if (row && row.id) return row.id;
+  // Auto-create: hex placeholder determinístico
+  try {
+    const ins = await db.prepare(
+      `INSERT INTO cores (nome, hex, ativo, created_at) VALUES (?, '#000000', 1, datetime('now'))`
+    ).bind(nome).run();
+    const newId = Number(ins.meta?.last_row_id || 0);
+    if (newId) {
+      // Atualiza hex para algo único determinístico
+      const hex = '#' + ((newId * 999983) % 16777215).toString(16).toUpperCase().padStart(6, '0');
+      try {
+        await db.prepare('UPDATE cores SET hex=? WHERE id=?').bind(hex, newId).run();
+      } catch {}
+      return newId;
+    }
+  } catch {
+    // Race condition: outra request inseriu — refaz busca
+    const row2 = await db.prepare(
+      'SELECT id FROM cores WHERE nome = ? COLLATE NOCASE LIMIT 1'
+    ).bind(nome).first<{ id: number }>();
+    if (row2 && row2.id) return row2.id;
+  }
+  return null;
+}
+
 /* =================================================================
  * CADASTROS AUXILIARES
  * ================================================================= */
@@ -733,12 +772,13 @@ app.post('/terc/precos', async (c) => {
   }
   const cor     = String(b.cor ?? '').trim();
   const tamanho = String(b.tamanho ?? '').trim();
+  const id_cor  = await resolveColorId(c.env.DB, cor);
   try {
     const r = await c.env.DB.prepare(`
-      INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, tamanho, preco, tempo_min, id_colecao, dt_vigencia, observacao, ativo)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+      INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, id_cor, tamanho, preco, tempo_min, id_colecao, dt_vigencia, observacao, ativo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`)
       .bind(b.cod_ref, b.desc_ref || null, toInt(b.id_servico), toInt(b.grade, 1),
-        cor, tamanho,
+        cor, id_cor, tamanho,
         toNum(b.preco), toNum(b.tempo_min), toInt(b.id_colecao) || null,
         b.dt_vigencia || null, b.observacao || null).run();
     await audit(c, MOD, 'INS', `preco:${r.meta.last_row_id}`, 'preco', '', String(b.preco));
@@ -755,15 +795,16 @@ app.put('/terc/precos/:id', async (c) => {
   const id = toInt(c.req.param('id')); const b = await c.req.json();
   const cor     = String(b.cor ?? '').trim();
   const tamanho = String(b.tamanho ?? '').trim();
+  const id_cor  = await resolveColorId(c.env.DB, cor);
   try {
     await c.env.DB.prepare(`
       UPDATE terc_precos
-         SET cod_ref=?, desc_ref=?, id_servico=?, grade=?, cor=?, tamanho=?,
+         SET cod_ref=?, desc_ref=?, id_servico=?, grade=?, cor=?, id_cor=?, tamanho=?,
              preco=?, tempo_min=?, id_colecao=?, dt_vigencia=?, observacao=?, ativo=?,
              dt_alteracao=datetime('now'), alterado_por=?
        WHERE id_preco=?`)
       .bind(b.cod_ref, b.desc_ref || null, toInt(b.id_servico), toInt(b.grade, 1),
-        cor, tamanho,
+        cor, id_cor, tamanho,
         toNum(b.preco), toNum(b.tempo_min), toInt(b.id_colecao) || null,
         b.dt_vigencia || null, b.observacao || null, b.ativo ? 1 : 0,
         getUser(c), id).run();
@@ -1097,11 +1138,12 @@ app.post('/terc/precos/importar', async (c) => {
         atualizados++;
       } else {
         // CRIAR (em modo 'atualizar' também criamos os faltantes)
+        const idCorIns = await resolveColorId(c.env.DB, cor);
         await c.env.DB.prepare(`
-          INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, tamanho,
+          INSERT INTO terc_precos (cod_ref, desc_ref, id_servico, grade, cor, id_cor, tamanho,
                                    preco, tempo_min, id_colecao, ativo)
-          VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 1)`)
-          .bind(cod_ref, desc_ref || null, idSv, cor, tamanho, preco, tempo, idColecao).run();
+          VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1)`)
+          .bind(cod_ref, desc_ref || null, idSv, cor, idCorIns, tamanho, preco, tempo, idColecao).run();
         criados++;
       }
 
@@ -1451,15 +1493,16 @@ app.post('/terc/remessas', async (c) => {
   const head = itensValidos[0];
   const status_inicial = b.dt_envio ? 'Enviado' : (b.status || 'AguardandoEnvio');
 
+  const headIdCor = await resolveColorId(c.env.DB, head.cor);
   const r = await c.env.DB.prepare(`
     INSERT INTO terc_remessas
-      (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, grade,
+      (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
        qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
        prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
        status, status_fin, modo, observacao, criado_por)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
-      head.cod_ref || '', head._desc, head._idServ, head.cor || null, toInt(head.grade_num, 1),
+      head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
       totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
       diasFinal, tempoMaxItem, efic, pess, min_dia,
@@ -1474,13 +1517,14 @@ app.post('/terc/remessas', async (c) => {
     const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
       ? it.num_op.trim()
       : (b.num_op || null);
+    const itIdCor = await resolveColorId(c.env.DB, it.cor);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
-        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
+        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, id_cor, grade_num,
          qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho, num_op)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
       .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
-        it.cor || null, toInt(it.grade_num, 1),
+        it.cor || null, itIdCor, toInt(it.grade_num, 1),
         it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
         toInt(it.id_grade_tamanho) || null, itemNumOp).run();
     const idItem = ri.meta.last_row_id as number;
@@ -1617,15 +1661,16 @@ app.put('/terc/remessas/:id', async (c) => {
   }
 
   const head = itensValidos[0];
+  const headIdCor = await resolveColorId(c.env.DB, head.cor);
 
   // ---- UPDATE cabeçalho (com agregados do 1º item p/ compat) ----
   await c.env.DB.prepare(`
-    UPDATE terc_remessas SET num_op=?, id_terc=?, id_setor=?, cod_ref=?, desc_ref=?, id_servico=?, cor=?, grade=?,
+    UPDATE terc_remessas SET num_op=?, id_terc=?, id_setor=?, cod_ref=?, desc_ref=?, id_servico=?, cor=?, id_cor=?, grade=?,
       qtd_total=?, preco_unit=?, valor_total=?, id_colecao=?, dt_saida=?, dt_inicio=?, dt_previsao=?, prazo_dias=?,
       tempo_peca=?, efic_pct=?, qtd_pessoas=?, min_trab_dia=?, status=?, observacao=?, alterado_por=?, dt_alteracao=datetime('now')
     WHERE id_remessa=?`)
     .bind(b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || null,
-      head.cod_ref || '', head._desc, head._idServ, head.cor || null, toInt(head.grade_num, 1),
+      head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
       totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       b.dt_saida, b.dt_inicio || b.dt_saida, dt_prev, prazo > 0 ? prazo : dias,
       tempoMaxItem, efic, pess, min_dia, b.status || 'AguardandoEnvio', b.observacao || null, getUser(c), id).run();
@@ -1640,13 +1685,14 @@ app.put('/terc/remessas/:id', async (c) => {
     const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
       ? it.num_op.trim()
       : (b.num_op || null);
+    const itIdCor = await resolveColorId(c.env.DB, it.cor);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
-        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, grade_num,
+        (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, id_cor, grade_num,
          qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, dt_alteracao, id_grade_tamanho, num_op)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), ?, ?)`)
       .bind(id, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
-        it.cor || null, toInt(it.grade_num, 1),
+        it.cor || null, itIdCor, toInt(it.grade_num, 1),
         it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
         toInt(it.id_grade_tamanho) || null, itemNumOp).run();
     const idItem = ri.meta.last_row_id as number;
@@ -1955,13 +2001,14 @@ app.post('/terc/retornos', async (c) => {
   // ---- INSERT por item retornado + grade do item ----
   const gradeAgreg: Record<string, number> = {}; // p/ compat. terc_retorno_grade legado
   for (const x of itensValid) {
+    const itIdCor = await resolveColorId(c.env.DB, x.it.cor);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_retorno_itens
-        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_servico,
+        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_cor, id_servico,
          qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(idRet, x.idItem, idRem,
-        x.it.cod_ref, x.it.desc_ref, x.it.cor, x.it.id_servico,
+        x.it.cod_ref, x.it.desc_ref, x.it.cor, itIdCor, x.it.id_servico,
         x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao).run();
     const idRi = ri.meta.last_row_id as number;
     for (const g of x.grade) {
@@ -2100,13 +2147,14 @@ app.put('/terc/retornos/:id', async (c) => {
 
   const gradeAgreg: Record<string, number> = {};
   for (const x of itensValid) {
+    const itIdCor = await resolveColorId(c.env.DB, x.it.cor);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_retorno_itens
-        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_servico,
+        (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_cor, id_servico,
          qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(id, x.idItem, idRem,
-        x.it.cod_ref, x.it.desc_ref, x.it.cor, x.it.id_servico,
+        x.it.cod_ref, x.it.desc_ref, x.it.cor, itIdCor, x.it.id_servico,
         x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao).run();
     const idRi = ri.meta.last_row_id as number;
     for (const g of x.grade) {
@@ -2777,11 +2825,12 @@ app.post('/terc/importar/remessas', async (c) => {
 
       if (!dryRun) {
         const nextN = await c.env.DB.prepare('SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas').first<any>();
+        const rowIdCor = await resolveColorId(c.env.DB, row.cor);
         const r = await c.env.DB.prepare(`
-          INSERT INTO terc_remessas (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, grade, qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_inicio, dt_previsao, prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia, status, observacao, criado_por)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          INSERT INTO terc_remessas (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade, qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_inicio, dt_previsao, prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia, status, observacao, criado_por)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(toInt(row.num_controle) || nextN?.n, row.num_op || null, id_terc, id_setor, cod_ref, row.desc_ref || null,
-            id_servico, row.cor || null, toInt(row.grade, 1), qtd_total, preco, valor, id_colecao,
+            id_servico, row.cor || null, rowIdCor, toInt(row.grade, 1), qtd_total, preco, valor, id_colecao,
             dt_saida, row.dt_inicio || dt_saida, row.dt_previsao || dt_saida,
             toInt(row.prazo_dias), toNum(row.tempo_peca), toNum(row.efic_pct, 0.8),
             toInt(row.qtd_pessoas, 1), toInt(row.min_trab_dia, 480),

@@ -2031,6 +2031,14 @@ ROUTES.terc_remessas = async (main) => {
  * ================================================================= */
 function TERC_corHex(nome) {
   if (!nome) return '#cbd5e1';
+  // Prioridade 1: cadastro oficial via window.Cores (cache)
+  try {
+    const cache = window.Cores?.cache;
+    if (Array.isArray(cache)) {
+      const found = cache.find(c => (c.nome || '').toLocaleLowerCase('pt-BR') === String(nome).toLocaleLowerCase('pt-BR'));
+      if (found && found.hex) return found.hex;
+    }
+  } catch {}
   const n = String(nome).toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
   const map = {
     'amarelo':'#facc15','areia':'#d6c79e','azul':'#2563eb','azul claro':'#60a5fa',
@@ -2158,10 +2166,33 @@ async function TERC_openRemModal(id, onSave) {
   }
 
   // ---- Cache global de cores (1 fetch para o modal todo) ----
+  // Fonte 1: /cores (cadastro oficial, com hex correto)
+  // Fonte 2: /terc/cores/distinct (uso/frequência em remessas — legado)
+  // Merge: usa nome como chave, prioriza hex do /cores, soma uso do legado.
   let _coresCache = [];
   try {
-    const rc = await api('get', '/terc/cores/distinct', null, { silent: true });
-    _coresCache = fmt.safeArr(rc?.data);
+    const [rOfic, rLeg] = await Promise.all([
+      window.Cores ? window.Cores.list(true) : api('get', '/cores?ativo=1', null, { silent: true }).then(r => r?.data || []),
+      api('get', '/terc/cores/distinct', null, { silent: true }).then(r => fmt.safeArr(r?.data)).catch(() => []),
+    ]);
+    const map = new Map();
+    (rOfic || []).forEach(c => {
+      const nome = (c.nome || c.nome_cor || '').trim();
+      if (!nome) return;
+      map.set(nome.toLowerCase(), { nome_cor: nome, hex: c.hex || TERC_corHex(nome), uso: 0, id_cor: c.id || null });
+    });
+    (rLeg || []).forEach(c => {
+      const nome = (c.nome_cor || '').trim();
+      if (!nome) return;
+      const k = nome.toLowerCase();
+      if (map.has(k)) {
+        const cur = map.get(k);
+        cur.uso = (cur.uso || 0) + (c.uso || 0);
+      } else {
+        map.set(k, { nome_cor: nome, hex: c.hex || TERC_corHex(nome), uso: c.uso || 0, id_cor: null });
+      }
+    });
+    _coresCache = Array.from(map.values()).sort((a, b) => (b.uso || 0) - (a.uso || 0) || a.nome_cor.localeCompare(b.nome_cor));
   } catch {}
   if (_coresCache.length === 0) {
     _coresCache = fmt.safeArr(window.TERC?.cores).map(c => ({ nome_cor: c.nome_cor, hex: c.hex, uso: 0 }));
@@ -5087,6 +5118,8 @@ ROUTES.terc_precos = async (main) => {
 
 async function TERC_openPrecoModal(id, onSave) {
   await TERC.load();
+  // Garante cache de cores oficiais para o select visual
+  try { if (window.Cores) await window.Cores.list(); } catch {}
   let p = { grade: 1, preco: 0, tempo_min: 0, ativo: 1, cor: '', tamanho: '' };
   if (id) {
     try {
@@ -5096,7 +5129,6 @@ async function TERC_openPrecoModal(id, onSave) {
   }
   const prodInicial = (id && p.cod_ref) ? TERC.findProdutoByRef(p.cod_ref, p.id_colecao) : null;
   const idProdSel = prodInicial ? prodInicial.id_produto : '';
-  const cores = fmt.safeArr(window.TERC?.cores);
   const tamsPadrao = ['PP','P','M','G','GG','XGG','EG','SG'];
 
   const m = el('div', { class: 'modal-backdrop' });
@@ -5112,8 +5144,9 @@ async function TERC_openPrecoModal(id, onSave) {
       <div><label>Descrição</label><input id="m-desc" value="${(p.desc_ref || '').replace(/"/g, '&quot;')}" /></div>
       <div>
         <label>Cor <span class="text-xs text-slate-400">(opcional)</span></label>
-        <input id="m-cor" value="${(p.cor || '').replace(/"/g, '&quot;')}" list="m-cor-dl" placeholder="Ex: Azul (vazio = todas as cores)" />
-        <datalist id="m-cor-dl">${cores.map(c => `<option value="${c.nome_cor}">`).join('')}</datalist>
+        ${window.Cores
+          ? window.Cores.select({ value: p.cor || '', name: 'cor', placeholder: 'Ex: Azul (vazio = todas)', idPrefix: 'm-cor' })
+          : `<input id="m-cor-fallback" value="${(p.cor || '').replace(/"/g, '&quot;')}" placeholder="Ex: Azul" />`}
       </div>
       <div>
         <label>Tamanho / Grade <span class="text-xs text-slate-400">(opcional)</span></label>
@@ -5135,6 +5168,15 @@ async function TERC_openPrecoModal(id, onSave) {
     </div>
   `;
   m.appendChild(card); document.body.appendChild(m);
+  // Bind cor visual (bolinha colorida ao digitar)
+  try { window.Cores?.bindInputs(card); } catch {}
+
+  // Helper para ler valor do input cor (visual ou fallback)
+  const _getCorVal = () => {
+    const visual = card.querySelector('[data-cor-input] input[name="cor"]');
+    if (visual) return (visual.value || '').trim();
+    return (card.querySelector('#m-cor-fallback')?.value || '').trim();
+  };
 
   // 📦 Auto-fill ao escolher PRODUTO
   $('#m-prod').onchange = () => {
@@ -5154,7 +5196,7 @@ async function TERC_openPrecoModal(id, onSave) {
       id_produto: $('#m-prod').value || null,
       id_servico: $('#m-serv').value,
       id_colecao: $('#m-col').value,
-      cor:        $('#m-cor').value.trim(),
+      cor:        _getCorVal(),
       tamanho:    $('#m-tam').value.trim(),
       grade:      $('#m-grade').value,
       preco:      $('#m-preco').value,
