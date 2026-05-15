@@ -4439,3 +4439,420 @@ textarea.field-invalid {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
   transition: background 0.15s ease;
 }
+
+/* ==================================================================== */
+/* USER MENU REFACTOR v21 — Sidebar bottom button + premium popover     */
+/* Substitui o dropdown antigo da topbar. z-index 999999 garante que    */
+/* o popover fica acima de qualquer overlay/drawer/modal.               */
+/* ==================================================================== */
+
+/* ---------- TOPBAR LIMPO (sem avatar/dropdown) ---------- */
+.topbar-clean {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-1);
+  min-height: 56px;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.topbar-date {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+}
+[data-theme="light"] .topbar-clean {
+  background: #ffffff;
+  border-bottom-color: #e2e8f0;
+}
+[data-theme="light"] .topbar-date {
+  color: #475569;
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+@media (max-width: 640px) {
+  .topbar-clean { padding: 10px 12px; gap: 8px; }
+  .topbar-date { display: none; }
+  #page-title { font-size: 1rem !important; }
+}
+
+/* ---------- BOTÃO DO USUÁRIO NA SIDEBAR (rodapé) ---------- */
+.sidebar-user-btn {
+  /* Reset de button */
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  width: 100%;
+
+  /* Layout */
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.82rem;
+  color: #CBD5F5;
+  position: relative;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
+}
+.sidebar-user-btn:hover {
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.10), rgba(124, 58, 237, 0.06));
+}
+.sidebar-user-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(99, 102, 241, 0.55);
+}
+.sidebar-user-btn.is-open {
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.14), rgba(124, 58, 237, 0.10));
+}
+
+.sidebar-user-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+/* Bolinha verde de online (pequena, no canto do avatar) */
+.sidebar-user-status {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #10B981;
+  border: 2px solid var(--sidebar-bg, #0F172A);
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+  animation: userOnlinePulse 2.2s ease-in-out infinite;
+}
+@keyframes userOnlinePulse {
+  0%   { box-shadow: 0 0 0 0   rgba(16, 185, 129, 0.55); }
+  70%  { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);    }
+  100% { box-shadow: 0 0 0 0   rgba(16, 185, 129, 0);    }
+}
+
+.sidebar-user-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.15;
+}
+.sidebar-user-name {
+  font-weight: 600;
+  color: #fff;
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.sidebar-user-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(203, 213, 245, 0.65);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-user-online { color: #34D399; font-weight: 600; }
+.sidebar-user-dot { opacity: 0.55; }
+.sidebar-user-perfil { opacity: 0.85; }
+
+.sidebar-user-caret {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: rgba(203, 213, 245, 0.7);
+  transition: transform 0.22s ease, color 0.22s ease;
+  flex-shrink: 0;
+}
+.sidebar-user-btn.is-open .sidebar-user-caret {
+  transform: rotate(180deg);
+  color: #fff;
+}
+
+/* ---------- POPOVER PREMIUM ---------- */
+.sidebar-user-pop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 999999;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 10px;
+
+  /* Visual translucent / blur */
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 18px;
+  box-shadow:
+    0 20px 50px rgba(2, 6, 23, 0.65),
+    0 4px 12px rgba(2, 6, 23, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* Animação */
+  transform-origin: bottom left;
+  animation: userPopIn 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+  color: #E5E7EB;
+}
+.sidebar-user-pop.is-hidden { display: none !important; }
+
+@keyframes userPopIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+/* Header do popover */
+.user-pop-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+.user-pop-avatar-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.user-pop-avatar-wrap .avatar-img,
+.user-pop-avatar-wrap .avatar-fallback {
+  width: 52px; height: 52px; font-size: 20px; border-width: 2px;
+}
+.user-pop-status {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #10B981;
+  border: 2.5px solid rgba(15, 23, 42, 0.92);
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+  animation: userOnlinePulse 2.2s ease-in-out infinite;
+}
+.user-pop-info {
+  min-width: 0;
+  flex: 1;
+}
+.user-pop-nome {
+  font-weight: 700;
+  color: #F8FAFC;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.user-pop-email {
+  font-size: 0.75rem;
+  color: rgba(203, 213, 225, 0.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.user-pop-perfil-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.28), rgba(124, 58, 237, 0.28));
+  color: #C7D2FE;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+/* Sections */
+.user-pop-section {
+  padding: 4px 0 6px;
+}
+.user-pop-section-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: rgba(148, 163, 184, 0.80);
+  padding: 8px 10px 4px;
+}
+
+/* Items */
+.user-pop-item {
+  /* Reset button */
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  color: #E5E7EB;
+  font-size: 0.86rem;
+  font-weight: 500;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.10s ease;
+}
+.user-pop-item > i {
+  width: 18px;
+  text-align: center;
+  font-size: 0.95rem;
+  color: rgba(199, 210, 254, 0.85);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+.user-pop-item > span:not(.user-pop-tag) {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.user-pop-item:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(124, 58, 237, 0.14));
+  color: #F8FAFC;
+}
+.user-pop-item:hover > i { color: #C7D2FE; }
+.user-pop-item:active { transform: translateY(1px); }
+.user-pop-item:focus-visible {
+  outline: none;
+  background: rgba(99, 102, 241, 0.18);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.45);
+}
+
+/* Tag/chip (ex.: tema atual) */
+.user-pop-tag {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(99, 102, 241, 0.18);
+  color: #C7D2FE;
+  border: 1px solid rgba(99, 102, 241, 0.32);
+  flex-shrink: 0;
+}
+
+/* Separador */
+.user-pop-sep {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 6px 4px;
+}
+
+/* Logout (item perigoso) */
+.user-pop-item.is-danger {
+  color: #FCA5A5;
+  margin-top: 2px;
+}
+.user-pop-item.is-danger > i { color: #F87171; }
+.user-pop-item.is-danger:hover {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.18), rgba(220, 38, 38, 0.14));
+  color: #FECACA;
+}
+.user-pop-item.is-danger:hover > i { color: #FCA5A5; }
+
+/* ---------- LIGHT MODE: popover (sidebar é sempre dark) ---------- */
+[data-theme="light"] .sidebar-user-pop {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(15, 23, 42, 0.08);
+  color: #0F172A;
+  box-shadow:
+    0 20px 50px rgba(15, 23, 42, 0.18),
+    0 4px 12px rgba(15, 23, 42, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.50);
+}
+[data-theme="light"] .user-pop-header { border-bottom-color: rgba(15, 23, 42, 0.08); }
+[data-theme="light"] .user-pop-nome { color: #0F172A; }
+[data-theme="light"] .user-pop-email { color: #64748B; }
+[data-theme="light"] .user-pop-perfil-badge {
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.12), rgba(124, 58, 237, 0.12));
+  color: #4338CA;
+  border-color: rgba(79, 70, 229, 0.25);
+}
+[data-theme="light"] .user-pop-section-label { color: #64748B; }
+[data-theme="light"] .user-pop-item { color: #1E293B; }
+[data-theme="light"] .user-pop-item > i { color: #6366F1; }
+[data-theme="light"] .user-pop-item:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.10), rgba(124, 58, 237, 0.08));
+  color: #0F172A;
+}
+[data-theme="light"] .user-pop-item:hover > i { color: #4F46E5; }
+[data-theme="light"] .user-pop-tag {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4338CA;
+  border-color: rgba(99, 102, 241, 0.25);
+}
+[data-theme="light"] .user-pop-sep { background: rgba(15, 23, 42, 0.08); }
+[data-theme="light"] .user-pop-item.is-danger { color: #DC2626; }
+[data-theme="light"] .user-pop-item.is-danger > i { color: #EF4444; }
+[data-theme="light"] .user-pop-item.is-danger:hover {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.10), rgba(220, 38, 38, 0.08));
+  color: #B91C1C;
+}
+[data-theme="light"] .user-pop-status {
+  border-color: rgba(255, 255, 255, 0.96);
+}
+
+/* ---------- RESPONSIVO ---------- */
+@media (max-width: 640px) {
+  .sidebar-user-pop {
+    border-radius: 16px;
+    padding: 8px;
+  }
+  .user-pop-item { padding: 11px 10px; font-size: 0.92rem; }
+  .user-pop-avatar-wrap .avatar-img,
+  .user-pop-avatar-wrap .avatar-fallback {
+    width: 48px; height: 48px; font-size: 18px;
+  }
+}
+
+/* Quando a sidebar fica recolhida (modo "rail" se existir) — mantém botão clicável */
+@media (max-width: 1023px) {
+  /* Sidebar vira drawer; o botão fica visível dentro dele.
+     O popover (position:fixed, z-index:999999) flutua sobre tudo. */
+}
+
+/* ---------- LEGADO: oculta dropdown antigo se ainda existir no DOM ---------- */
+#user-btn, #user-menu, #user-menu-backdrop,
+#topbar-avatar, #user-dropdown-avatar {
+  /* Defesa: caso algum hot-reload parcial deixe os elementos antigos */
+  display: none !important;
+}

@@ -158,12 +158,17 @@ function doLogout(e) {
     document.body.appendChild(overlay);
   } catch {}
 
-  // 2) Fecha o menu visualmente (defesa)
+  // 2) Fecha o popover visualmente (defesa)
   try {
-    const menu = document.getElementById('user-menu');
-    if (menu) { menu.classList.add('is-hidden'); menu.classList.remove('is-open'); }
-    const bd = document.getElementById('user-menu-backdrop');
-    if (bd) bd.classList.add('is-hidden');
+    const pop = document.getElementById('sidebar-user-pop');
+    if (pop) { pop.classList.add('is-hidden'); pop.classList.remove('is-open'); }
+    const sbBtn = document.getElementById('sidebar-user-btn');
+    if (sbBtn) { sbBtn.classList.remove('is-open'); sbBtn.setAttribute('aria-expanded', 'false'); }
+    // Legados (caso ainda existam após hot-reload parcial)
+    const legacyMenu = document.getElementById('user-menu');
+    if (legacyMenu) { legacyMenu.classList.add('is-hidden'); legacyMenu.classList.remove('is-open'); }
+    const legacyBd = document.getElementById('user-menu-backdrop');
+    if (legacyBd) legacyBd.classList.add('is-hidden');
     document.getElementById('terc-print-menu')?.remove();
     document.querySelectorAll(
       '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
@@ -316,6 +321,11 @@ function renderLayout() {
   const sistemaIds = (groups['Sistema'] || []).map(i => i.id);
   if (sistemaIds.includes(state.route)) sistemaOpen = true;
 
+  const adminItems = isAdmin() ? `
+              <button data-act="ver-usuarios" class="user-pop-item" role="menuitem">
+                <i class="fas fa-user-shield"></i><span>Gerenciar usuários</span>
+              </button>` : '';
+
   $('#app').innerHTML = `
   <div class="flex h-screen">
     <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
@@ -356,45 +366,86 @@ function renderLayout() {
             </div>`;
         }).join('')}
       </nav>
-      <a href="#perfil" data-route="perfil" class="sidebar-user" title="Editar perfil">
-        ${avatarHTML(u, '')}
-        <div class="flex-1 min-w-0">
-          <div class="nome">${u.nome || '—'}</div>
-          <div class="perfil">${u.perfil || ''}</div>
-        </div>
-        <i class="fas fa-cog text-xs opacity-60"></i>
-      </a>
+
+      <!-- ============== PERFIL DROPDOWN (sidebar bottom) ============== -->
+      <button type="button" id="sidebar-user-btn" class="sidebar-user-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="sidebar-user-pop">
+        <span class="sidebar-user-avatar-wrap">
+          ${avatarHTML(u, '')}
+          <span class="sidebar-user-status" aria-label="Online"></span>
+        </span>
+        <span class="sidebar-user-info">
+          <span class="sidebar-user-name">${u.nome || '—'}</span>
+          <span class="sidebar-user-meta">
+            <span class="sidebar-user-online">Online</span>
+            <span class="sidebar-user-dot">•</span>
+            <span class="sidebar-user-perfil">${u.perfil || ''}</span>
+          </span>
+        </span>
+        <i class="fas fa-chevron-up sidebar-user-caret" aria-hidden="true"></i>
+      </button>
     </aside>
+
+    <!-- ============== POPOVER do USUÁRIO (fixed, position via JS) ============== -->
+    <div id="sidebar-user-pop" class="sidebar-user-pop is-hidden" role="menu" aria-labelledby="sidebar-user-btn">
+      <div class="user-pop-header">
+        <div class="user-pop-avatar-wrap">
+          <span id="user-pop-avatar">${avatarHTML(u, 'lg')}</span>
+          <span class="user-pop-status" aria-label="Online"></span>
+        </div>
+        <div class="user-pop-info">
+          <div class="user-pop-nome">${u.nome || '—'}</div>
+          <div class="user-pop-email">${u.email || u.login || ''}</div>
+          <div class="user-pop-perfil-badge">${u.perfil || ''}</div>
+        </div>
+      </div>
+
+      <div class="user-pop-section">
+        <div class="user-pop-section-label">Conta</div>
+        <button data-act="ver-perfil" class="user-pop-item" role="menuitem">
+          <i class="fas fa-user-circle"></i><span>Meu perfil</span>
+        </button>
+        <button data-act="editar-perfil" class="user-pop-item" role="menuitem">
+          <i class="fas fa-user-pen"></i><span>Editar perfil</span>
+        </button>
+        <button data-act="trocar-senha" class="user-pop-item" role="menuitem">
+          <i class="fas fa-key"></i><span>Trocar senha</span>
+        </button>
+      </div>
+
+      <div class="user-pop-section">
+        <div class="user-pop-section-label">Preferências</div>
+        <button data-act="toggle-tema" class="user-pop-item" role="menuitem">
+          <i class="fas fa-circle-half-stroke"></i>
+          <span>Alternar tema</span>
+          <span class="user-pop-tag" id="user-pop-tema-tag">—</span>
+        </button>
+        <button data-act="ver-configs" class="user-pop-item" role="menuitem">
+          <i class="fas fa-sliders"></i><span>Configurações</span>
+        </button>
+      </div>
+
+      <div class="user-pop-section">
+        <div class="user-pop-section-label">Atalhos</div>
+        <button data-act="ver-remessas" class="user-pop-item" role="menuitem">
+          <i class="fas fa-truck-fast"></i><span>Ver remessas</span>
+        </button>${adminItems}
+      </div>
+
+      <div class="user-pop-sep"></div>
+      <button id="btn-logout" class="user-pop-item is-danger logout-btn" data-action="logout" role="menuitem">
+        <i class="fas fa-arrow-right-from-bracket"></i><span>Sair</span>
+      </button>
+    </div>
+
     <div class="flex-1 flex flex-col overflow-hidden">
-      <header id="topbar" class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between gap-3">
+      <header id="topbar" class="topbar-clean">
         <button id="btn-hamburger" class="btn-hamburger" aria-label="Abrir menu" aria-controls="sidebar" aria-expanded="false">
           <i class="fas fa-bars"></i>
         </button>
         <h2 id="page-title" class="text-lg font-semibold text-slate-800 flex-1 min-w-0">Dashboard</h2>
-        <div class="text-sm text-slate-500 flex items-center gap-3">
-          <span id="today">${dayjs().format('DD/MM/YYYY')}</span>
-          <span class="text-slate-300">|</span>
+        <div class="topbar-actions">
+          <span id="today" class="topbar-date">${dayjs().format('DD/MM/YYYY')}</span>
           ${Theme.toggleButtonHTML()}
-          <div class="user-menu-wrap">
-            <button id="user-btn" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-100" aria-label="Menu do usuário" aria-haspopup="menu" aria-expanded="false">
-              <span id="topbar-avatar">${avatarHTML(u, '')}</span>
-              <span class="text-slate-700 hidden sm:inline"><b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span></span>
-              <i class="fas fa-caret-down text-xs"></i>
-            </button>
-            <div id="user-menu" class="user-dropdown is-hidden" role="menu" aria-labelledby="user-btn">
-              <div class="user-dropdown-header">
-                <div id="user-dropdown-avatar">${avatarHTML(u, 'sm')}</div>
-                <div class="min-w-0 flex-1">
-                  <div class="nome">${u.nome || '—'}</div>
-                  <div class="perfil">${u.perfil || ''}</div>
-                </div>
-              </div>
-              <button id="btn-perfil" class="user-dropdown-item" role="menuitem"><i class="fas fa-user-circle"></i><span>Meu perfil</span></button>
-              <button id="btn-trocar-senha" class="user-dropdown-item" role="menuitem"><i class="fas fa-key"></i><span>Trocar senha</span></button>
-              <div class="user-dropdown-sep"></div>
-              <button id="btn-logout" class="user-dropdown-item is-danger" role="menuitem"><i class="fas fa-sign-out-alt"></i><span>Sair</span></button>
-            </div>
-          </div>
         </div>
       </header>
       <main id="main-content" class="flex-1 overflow-auto p-6 bg-slate-50"></main>
@@ -448,125 +499,194 @@ function renderLayout() {
     }
   }));
 
-  // ----- Menu de usuário (topbar) — dropdown FIXED com posicionamento dinâmico -----
-  const btn = $('#user-btn'), menu = $('#user-menu');
+  // ============================================================
+  // MENU DE USUÁRIO (sidebar inferior) — popover FIXED ancorado
+  // ao botão, abrindo PARA CIMA (já que o botão fica no rodapé).
+  // ============================================================
+  const userBtn = $('#sidebar-user-btn');
+  const userPop = $('#sidebar-user-pop');
 
-  /** Posiciona o menu (position:fixed) alinhado ao botão (right-edge), abaixo dele.
-   *  Mobile: fixa no canto direito da tela com margem. */
-  function positionUserMenu() {
-    const r = btn.getBoundingClientRect();
+  /** Atualiza a chip que mostra o tema atual ("Claro"/"Escuro"). */
+  function updateTemaTag() {
+    const tag = $('#user-pop-tema-tag');
+    if (!tag) return;
+    const cur = (window.Theme && Theme.current) ? Theme.current : 'light';
+    tag.textContent = cur === 'dark' ? 'Escuro' : 'Claro';
+  }
+
+  /** Posiciona o popover acima do botão (position:fixed).
+   *  Desktop: alinha à esquerda do botão.
+   *  Mobile (≤640px): ocupa quase toda a largura, centralizado. */
+  function positionUserPop() {
+    if (!userBtn || !userPop) return;
+    const r = userBtn.getBoundingClientRect();
     const vw = window.innerWidth;
-    const menuW = Math.min(240, vw - 16);
-    menu.style.width = menuW + 'px';
-    // top = bottom do botão + 6px
-    menu.style.top = (r.bottom + 6) + 'px';
-    // right alinhado ao botão (mas nunca colado na borda esquerda)
-    let right = Math.max(8, vw - r.right);
-    if (vw < 480) right = 8; // mobile: cola direita
-    menu.style.right = right + 'px';
-    menu.style.left = 'auto';
+    const vh = window.innerHeight;
+    const margin = 8;
+
+    // Reset para medir altura real
+    userPop.style.maxHeight = '';
+    const popH = Math.min(userPop.offsetHeight || 460, vh - 2 * margin);
+    const popW = userPop.offsetWidth || 280;
+
+    if (vw <= 640) {
+      // Mobile: popover quase-fullwidth, centralizado horizontalmente.
+      const w = Math.min(vw - 2 * margin, 380);
+      userPop.style.width = w + 'px';
+      userPop.style.left = ((vw - w) / 2) + 'px';
+      userPop.style.right = 'auto';
+    } else {
+      // Desktop/tablet: alinhado à esquerda do botão.
+      userPop.style.width = '';
+      let left = r.left;
+      // Garante que não sai pela direita
+      if (left + popW + margin > vw) left = vw - popW - margin;
+      if (left < margin) left = margin;
+      userPop.style.left = left + 'px';
+      userPop.style.right = 'auto';
+    }
+
+    // Vertical: abre PARA CIMA (top = r.top - popH - 8).
+    // Se não houver espaço para cima, abre para baixo.
+    let top = r.top - popH - 8;
+    if (top < margin) {
+      // tenta abrir para baixo
+      const below = r.bottom + 8;
+      if (below + popH < vh - margin) {
+        top = below;
+      } else {
+        // sem espaço nem em cima nem embaixo: cola no topo e limita altura
+        top = margin;
+        userPop.style.maxHeight = (vh - 2 * margin) + 'px';
+      }
+    }
+    userPop.style.top = top + 'px';
   }
 
-  // Backdrop invisível: bloqueia hover em botões abaixo (suprime tooltips nativos
-  // do navegador que apareceriam por cima do dropdown via atributo title=).
-  let userBackdrop = null;
-  function ensureUserBackdrop() {
-    if (userBackdrop) return userBackdrop;
-    userBackdrop = document.createElement('div');
-    userBackdrop.id = 'user-menu-backdrop';
-    userBackdrop.className = 'user-menu-backdrop is-hidden';
-    document.body.appendChild(userBackdrop);
-    userBackdrop.addEventListener('click', () => closeUserMenu());
-    return userBackdrop;
-  }
-  // Remove o atributo title temporariamente de TODOS elementos do documento
-  // (impede tooltip nativo do navegador de aparecer por cima do menu).
-  // Também limpa tooltips customizados que possam estar visíveis.
-  let _suppressedTitles = [];
-  function suppressNativeTitles() {
-    _suppressedTitles = [];
-    document.querySelectorAll('[title]').forEach(el => {
-      // Ignora o próprio botão do menu e qualquer elemento dentro do dropdown
-      if (el === btn || menu.contains(el)) return;
-      const val = el.getAttribute('title');
-      _suppressedTitles.push({ el, val });
-      el.setAttribute('data-title-saved', val);
-      el.removeAttribute('title');
-    });
-    // Remove tooltips customizados visíveis (Tippy/BS/popovers/Floating UI)
-    document.querySelectorAll(
-      '[role="tooltip"], .tooltip, .tippy-box, .popover-floating, [data-floating-menu], #terc-print-menu'
-    ).forEach(el => { try { el.remove(); } catch {} });
-  }
-  function restoreNativeTitles() {
-    _suppressedTitles.forEach(({ el, val }) => {
-      if (val != null && el && el.isConnected) el.setAttribute('title', val);
-      if (el && el.isConnected) el.removeAttribute('data-title-saved');
-    });
-    _suppressedTitles = [];
-  }
-
-  function openUserMenu() {
-    // Remove TODO popover/menu flutuante anterior que possa interceptar cliques
+  function openUserPop() {
+    if (!userBtn || !userPop) return;
+    // Remove popovers/tooltips residuais que poderiam interceptar cliques
     document.getElementById('terc-print-menu')?.remove();
     document.querySelectorAll(
       '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
     ).forEach(el => { try { el.remove(); } catch {} });
-    suppressNativeTitles();    // suprime ANTES de mostrar para evitar flicker do tooltip
-    positionUserMenu();
-    ensureUserBackdrop();
-    userBackdrop.classList.remove('is-hidden');
-    menu.classList.remove('is-hidden');
-    menu.classList.add('is-open');
-    btn.setAttribute('aria-expanded', 'true');
-    // Reposiciona após render (next frame) para garantir bounding rect correto
-    requestAnimationFrame(positionUserMenu);
+
+    updateTemaTag();
+    userPop.classList.remove('is-hidden');
+    userPop.classList.add('is-open');
+    userBtn.classList.add('is-open');
+    userBtn.setAttribute('aria-expanded', 'true');
+    // Reposiciona DEPOIS de visível (precisa de offsetHeight real)
+    positionUserPop();
+    requestAnimationFrame(positionUserPop);
   }
-  function closeUserMenu() {
-    menu.classList.add('is-hidden');
-    menu.classList.remove('is-open');
-    btn.setAttribute('aria-expanded', 'false');
-    if (userBackdrop) userBackdrop.classList.add('is-hidden');
-    restoreNativeTitles();
+  function closeUserPop() {
+    if (!userPop || !userBtn) return;
+    userPop.classList.add('is-hidden');
+    userPop.classList.remove('is-open');
+    userBtn.classList.remove('is-open');
+    userBtn.setAttribute('aria-expanded', 'false');
   }
-  function toggleUserMenu() {
-    menu.classList.contains('is-open') ? closeUserMenu() : openUserMenu();
+  function toggleUserPop() {
+    if (!userPop) return;
+    userPop.classList.contains('is-open') ? closeUserPop() : openUserPop();
   }
 
-  btn.addEventListener('click', (ev) => { ev.stopPropagation(); toggleUserMenu(); });
+  // Toggle no clique do botão
+  if (userBtn) {
+    userBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleUserPop();
+    });
+  }
+
   // Click-fora fecha
   document.addEventListener('click', (e) => {
-    if (!menu.classList.contains('is-open')) return;
-    if (!btn.contains(e.target) && !menu.contains(e.target)) closeUserMenu();
+    if (!userPop || !userPop.classList.contains('is-open')) return;
+    if (userBtn && userBtn.contains(e.target)) return;
+    if (userPop.contains(e.target)) return;
+    closeUserPop();
   });
   // ESC fecha
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && menu.classList.contains('is-open')) closeUserMenu();
+    if (e.key === 'Escape' && userPop && userPop.classList.contains('is-open')) {
+      closeUserPop();
+      userBtn && userBtn.focus();
+    }
   });
-  // Reposiciona em scroll/resize (menu fixed precisa acompanhar o botão)
-  window.addEventListener('scroll', () => { if (menu.classList.contains('is-open')) positionUserMenu(); }, true);
-  window.addEventListener('resize', () => { if (menu.classList.contains('is-open')) positionUserMenu(); });
+  // Reposiciona em scroll/resize (popover fixed precisa acompanhar o botão)
+  window.addEventListener('scroll', () => {
+    if (userPop && userPop.classList.contains('is-open')) positionUserPop();
+  }, true);
+  window.addEventListener('resize', () => {
+    if (userPop && userPop.classList.contains('is-open')) positionUserPop();
+  });
 
-  // NOTA: doLogout() e os listeners globais de logout foram movidos para
-  // o ESCOPO GLOBAL (fora de renderLayout) e registrados UMA ÚNICA VEZ
-  // no init() — assim não acumulam handlers a cada re-render e não ficam
-  // bloqueados por closures antigas. Ver final do arquivo.
+  // ============================================================
+  // DELEGAÇÃO de cliques nos itens [data-act] do popover.
+  // Cada item executa uma ação e fecha o popover (exceto logout,
+  // que faz hard-reload e destrói tudo).
+  // ============================================================
+  if (userPop) {
+    userPop.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-act]');
+      if (!item) return;
+      const act = item.dataset.act;
+      // Fecha o popover ANTES de navegar (UX)
+      switch (act) {
+        case 'ver-perfil':
+          closeUserPop();
+          navigate('perfil');
+          break;
+        case 'editar-perfil':
+          closeUserPop();
+          navigate('perfil');
+          // Sinaliza para a página entrar em modo edição (se suportado)
+          try { sessionStorage.setItem('perfil:edit', '1'); } catch {}
+          break;
+        case 'trocar-senha':
+          closeUserPop();
+          if (typeof openTrocarSenha === 'function') openTrocarSenha(false);
+          break;
+        case 'ver-configs':
+          closeUserPop();
+          navigate('configuracoes');
+          break;
+        case 'toggle-tema':
+          // NÃO fecha — usuário pode querer alternar várias vezes
+          if (window.Theme && typeof Theme.toggle === 'function') {
+            try { Theme.toggle(); } catch (err) { console.warn('[tema] toggle falhou', err); }
+            updateTemaTag();
+          }
+          break;
+        case 'ver-remessas':
+          closeUserPop();
+          navigate('terc_remessas');
+          break;
+        case 'ver-usuarios':
+          closeUserPop();
+          navigate('usuarios');
+          break;
+        // Logout é tratado pelo handler direto + delegação global
+        default:
+          break;
+      }
+    });
+  }
 
-  const btnSenha = $('#btn-trocar-senha');
-  if (btnSenha) btnSenha.addEventListener('click', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    closeUserMenu(); openTrocarSenha(false);
-  });
-  const btnPerfil = $('#btn-perfil');
-  if (btnPerfil) btnPerfil.addEventListener('click', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    closeUserMenu(); navigate('perfil');
-  });
+  // Atualiza a tag de tema quando o tema mudar por outro caminho
+  // (ex.: botão de tema na topbar, atalho de teclado, etc.)
+  window.addEventListener('themechange', updateTemaTag);
+  // Inicializa a tag com o tema atual
+  updateTemaTag();
 
   // ============================================================
   // LOGOUT — bind DIRETO no botão (no momento do render).
   // Não depende de delegação global. Roda em pointerdown E click
-  // (failsafe). Não fecha o menu antes — o hard reload destrói tudo.
+  // (failsafe). Não fecha o popover antes — o hard reload destrói tudo.
+  // O handler global em window.__logoutBound também captura via
+  // [data-action="logout"] / .logout-btn / #btn-logout.
   // ============================================================
   const btnLogout = $('#btn-logout');
   if (btnLogout) {
@@ -588,31 +708,42 @@ function renderLayout() {
     });
   }
 
-  // Theme toggle (sistema dual light/dark)
+  // Theme toggle (sistema dual light/dark) — botão na topbar
   Theme.bindToggle('#theme-toggle-btn');
 }
 
-/** Reaplica avatar/nome em sidebar e topbar (chamado após salvar perfil) */
+/** Reaplica avatar/nome/perfil no botão da sidebar e no header do popover
+ *  (chamado após salvar perfil em /perfil). */
 function refreshUserUI() {
   const u = state.user || {};
-  const slot = $('#topbar-avatar'); if (slot) slot.innerHTML = avatarHTML(u, '');
-  const ddSlot = $('#user-dropdown-avatar'); if (ddSlot) ddSlot.innerHTML = avatarHTML(u, 'sm');
-  const sb = $('.sidebar-user'); if (sb) {
-    const av = sb.querySelector('.avatar-img,.avatar-fallback');
-    if (av) av.outerHTML = avatarHTML(u, '');
-    const nome = sb.querySelector('.nome'); if (nome) nome.textContent = u.nome || '—';
-    const perf = sb.querySelector('.perfil'); if (perf) perf.textContent = u.perfil || '';
+
+  // === Botão da sidebar (#sidebar-user-btn) ===
+  const sbBtn = $('#sidebar-user-btn');
+  if (sbBtn) {
+    // Avatar (substitui apenas o elemento .avatar-img/.avatar-fallback,
+    // preservando o span.sidebar-user-status irmão dentro do wrap)
+    const wrap = sbBtn.querySelector('.sidebar-user-avatar-wrap');
+    if (wrap) {
+      const oldAv = wrap.querySelector('.avatar-img, .avatar-fallback');
+      if (oldAv) oldAv.outerHTML = avatarHTML(u, '');
+    }
+    const nameEl = sbBtn.querySelector('.sidebar-user-name');
+    if (nameEl) nameEl.textContent = u.nome || '—';
+    const perfilEl = sbBtn.querySelector('.sidebar-user-perfil');
+    if (perfilEl) perfilEl.textContent = u.perfil || '';
   }
-  const ub = $('#user-btn'); if (ub) {
-    const span = ub.querySelector('span.text-slate-700');
-    if (span) span.innerHTML = `<b>${u.nome}</b> <span class="text-xs text-slate-400">(${u.perfil})</span>`;
-  }
-  // Atualiza header do dropdown (nome/perfil)
-  const dd = $('#user-menu'); if (dd) {
-    const ddNome = dd.querySelector('.user-dropdown-header .nome');
-    const ddPerf = dd.querySelector('.user-dropdown-header .perfil');
-    if (ddNome) ddNome.textContent = u.nome || '—';
-    if (ddPerf) ddPerf.textContent = u.perfil || '';
+
+  // === Header do popover (#sidebar-user-pop) ===
+  const pop = $('#sidebar-user-pop');
+  if (pop) {
+    const avSlot = pop.querySelector('#user-pop-avatar');
+    if (avSlot) avSlot.innerHTML = avatarHTML(u, 'lg');
+    const nomeEl = pop.querySelector('.user-pop-nome');
+    if (nomeEl) nomeEl.textContent = u.nome || '—';
+    const emailEl = pop.querySelector('.user-pop-email');
+    if (emailEl) emailEl.textContent = u.email || u.login || '';
+    const badgeEl = pop.querySelector('.user-pop-perfil-badge');
+    if (badgeEl) badgeEl.textContent = u.perfil || '';
   }
 }
 window.refreshUserUI = refreshUserUI;
