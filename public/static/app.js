@@ -111,72 +111,111 @@ window.state = state;
  * Aqui o registro é IDEMPOTENTE (window.__logoutBound) — mesmo se
  * o script for re-injetado, não duplica.
  * ============================================================ */
+/**
+ * doLogout — Logout DEFINITIVO com hard reload.
+ *
+ * Estratégia (à prova de balas):
+ *  1) Sinaliza saída no sessionStorage (sobrevive ao reload, é lido no init
+ *     para mostrar toast "Sessão encerrada.")
+ *  2) Limpa TODOS storages possíveis (tanto chaves atuais quanto legadas)
+ *  3) Limpa TODOS cookies do documento
+ *  4) Chama API /auth/logout em paralelo (fire-and-forget)
+ *  5) Hard reload via window.location.replace('/') — destrói TODO estado JS,
+ *     handlers acumulados e closures. NÃO TEM COMO FALHAR.
+ *
+ * Idempotente: flag _logoutInProgress evita execução dupla.
+ */
 let _logoutInProgress = false;
-async function doLogout() {
+function doLogout(e) {
+  if (e) {
+    try { e.preventDefault(); } catch {}
+    try { e.stopPropagation(); } catch {}
+    try { e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch {}
+  }
   console.log('[logout] doLogout() iniciado');
   if (_logoutInProgress) { console.log('[logout] já em progresso, ignorando'); return; }
   _logoutInProgress = true;
+
+  // 1) Fecha o menu visualmente (UX imediato — usuário vê reação ao clique)
   try {
-    // 1) Fecha menu e limpa qualquer overlay/popover residual ANTES de qualquer coisa
-    try {
-      const menu = document.getElementById('user-menu');
-      if (menu) { menu.classList.add('is-hidden'); menu.classList.remove('is-open'); }
-      const bd = document.getElementById('user-menu-backdrop');
-      if (bd) bd.classList.add('is-hidden');
-    } catch {}
-    try {
-      document.getElementById('terc-print-menu')?.remove();
-      document.querySelectorAll(
-        '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
-      ).forEach(el => { try { el.remove(); } catch {} });
-    } catch {}
+    const menu = document.getElementById('user-menu');
+    if (menu) { menu.classList.add('is-hidden'); menu.classList.remove('is-open'); }
+    const bd = document.getElementById('user-menu-backdrop');
+    if (bd) bd.classList.add('is-hidden');
+    document.getElementById('terc-print-menu')?.remove();
+    document.querySelectorAll(
+      '.popover-floating, [data-floating-menu], [role="tooltip"], .tooltip, .tippy-box'
+    ).forEach(el => { try { el.remove(); } catch {} });
+  } catch {}
 
-    // 2) Limpa imediatamente o storage local (síncrono) — usuário JÁ está deslogado
-    try { localStorage.removeItem('pcp_token'); } catch {}
-    try { localStorage.removeItem('pcp_user'); } catch {}
-    try { sessionStorage.clear(); } catch {}
-    try { AUTH.clearToken(); } catch {}
-    try { AUTH.clearUser(); } catch {}
+  // 2) Limpa TODOS storages (atuais + legados + genéricos)
+  const lsKeys = [
+    'pcp_token', 'pcp_user',           // chaves atuais do sistema
+    'token', 'user', 'empresa', 'auth', // chaves comuns/legadas
+    'authToken', 'userData', 'currentUser', 'session', 'jwt',
+  ];
+  lsKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+  try { sessionStorage.clear(); } catch {}
+  // Não limpa localStorage completamente para preservar prefs do usuário
+  // (tema, idioma, accordion state) — apenas dados de autenticação.
 
-    // 3) Limpa estado global de autenticação
-    try { state.user = null; } catch {}
-    try { state.token = null; } catch {}
-
-    // 4) Chama a API (silenciosa — se falhar não impede o logout client-side)
-    try { await api('post', '/auth/logout', {}, { silent: true }); } catch {}
-
-    // 5) Redireciona para a tela de login
-    try { location.hash = ''; } catch {}
-    try {
-      if (typeof renderLogin === 'function') {
-        renderLogin('Sessão encerrada.');
-      } else {
-        location.reload();
+  // 3) Limpa cookies do documento (defesa em profundidade — sistema usa JWT,
+  // mas se houver cookies de sessão residuais eles também caem)
+  try {
+    document.cookie.split(';').forEach((c) => {
+      const eq = c.indexOf('=');
+      const name = (eq > -1 ? c.substr(0, eq) : c).trim();
+      if (name) {
+        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
+        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=${location.hostname}`;
       }
-    } catch (err) {
-      console.error('[logout] renderLogin falhou, recarregando página', err);
-      try { location.reload(); } catch {}
-    }
-    console.log('[logout] doLogout() concluído');
-  } finally {
-    // Libera o flag depois de um ciclo, permitindo novo logout futuro
-    setTimeout(() => { _logoutInProgress = false; }, 1000);
+    });
+  } catch {}
+
+  // 4) Reseta estado global (defesa — vai morrer no reload de qualquer jeito)
+  try { if (window.state) { window.state.user = null; window.state.token = null; } } catch {}
+  try { AUTH && AUTH.clearToken && AUTH.clearToken(); } catch {}
+  try { AUTH && AUTH.clearUser && AUTH.clearUser(); } catch {}
+
+  // 5) Avisa o backend (fire-and-forget — não esperamos resposta)
+  try {
+    fetch((window.API_BASE_URL || '/api') + '/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      keepalive: true, // garante que o request continue mesmo após o reload
+    }).catch(() => {});
+  } catch {}
+
+  // 6) Marca a saída para mostrar mensagem na próxima tela de login
+  try { sessionStorage.setItem('_logout_msg', 'Sessão encerrada.'); } catch {}
+
+  // 7) HARD RELOAD — destrói TODO o estado JS, handlers, closures.
+  //    Usa replace() para não criar entrada no histórico (evita "voltar" para a app).
+  //    location.hash = '' garante que rotas hash internas não persistam.
+  console.log('[logout] redirecionando via hard reload...');
+  try {
+    location.hash = '';
+    // Pequeno timeout para o navegador processar limpeza síncrona antes de recarregar
+    setTimeout(() => {
+      try { window.location.replace('/'); }
+      catch { window.location.href = '/'; }
+    }, 50);
+  } catch {
+    try { window.location.href = '/'; } catch {}
   }
 }
 window.doLogout = doLogout;
+window.handleLogout = doLogout; // alias solicitado
 
 // Registra UMA ÚNICA VEZ os listeners delegados no document.
 // Usa pointerdown (dispara antes do tooltip nativo aparecer) e click (failsafe).
 if (!window.__logoutBound) {
   window.__logoutBound = true;
   const _globalLogoutHandler = (e) => {
-    const t = e.target && e.target.closest && e.target.closest('#btn-logout');
+    const t = e.target && e.target.closest && e.target.closest('#btn-logout, [data-action="logout"], .logout-btn');
     if (!t) return;
     console.log('[logout] handler global disparou via', e.type);
-    e.preventDefault();
-    e.stopPropagation();
-    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-    doLogout();
+    doLogout(e);
   };
   // Capture phase: roda antes de qualquer handler dos elementos descendentes
   document.addEventListener('pointerdown', _globalLogoutHandler, true);
@@ -185,10 +224,8 @@ if (!window.__logoutBound) {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const t = document.activeElement;
-    if (t && t.id === 'btn-logout') {
-      e.preventDefault();
-      e.stopPropagation();
-      doLogout();
+    if (t && (t.id === 'btn-logout' || t.dataset?.action === 'logout' || t.classList?.contains('logout-btn'))) {
+      doLogout(e);
     }
   }, true);
   console.log('[logout] handlers globais registrados (uma única vez)');
@@ -217,6 +254,7 @@ const NAV = [
   // ==== SISTEMA (recolhível) — cadastros + admin ====
   { id: 'terc_produtos',         label: 'Produtos',          icon: 'fa-tshirt',           group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'terc_precos',           label: 'Preços / Coleções', icon: 'fa-money-bill-wave',  group: 'Sistema',       collapsible: true, tercOnly: true },
+  { id: 'cores',                 label: 'Cores',             icon: 'fa-palette',          group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'terc_importador',       label: 'Importação',        icon: 'fa-file-excel',       group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Sistema',       collapsible: true, adminOnly: true },
@@ -5764,6 +5802,460 @@ ROUTES.terc_grades_tamanho = async (main) => {
 
 
 /* ============================================================
+ * CORES — Gerenciamento centralizado de cores
+ * ============================================================
+ * CRUD completo + importação em massa (CSV, texto livre, Excel via copy/paste)
+ * + exclusão em massa com dupla confirmação + busca + filtro ativo/inativo.
+ *
+ * Cache global em window.Cores.cache (preenchido sob demanda) — usado por
+ * window.Cores.select() para renderizar selects visuais com bolinha colorida
+ * em qualquer parte do sistema (remessas, produtos, retornos, etc).
+ * ============================================================ */
+
+// ---------- API client global (acessível por outras telas) ----------
+window.Cores = window.Cores || {
+  cache: null,
+  cacheAt: 0,
+  /** Busca lista (com cache de 60s). force=true ignora cache. */
+  async list(force = false) {
+    const now = Date.now();
+    if (!force && this.cache && (now - this.cacheAt) < 60_000) return this.cache;
+    try {
+      const r = await api('get', '/cores?ativo=1', null, { silent: true });
+      this.cache = Array.isArray(r?.data) ? r.data : [];
+      this.cacheAt = now;
+    } catch { this.cache = this.cache || []; }
+    return this.cache;
+  },
+  /** Invalida cache (chamado após CRUD) */
+  invalidate() { this.cache = null; this.cacheAt = 0; },
+  /** Renderiza um <select> visual com bolinha colorida no option (via datalist + input).
+   *  Uso: window.Cores.select({ value, name, required, placeholder, idPrefix }) → string HTML */
+  select({ value = '', name = 'cor', required = false, placeholder = 'Cor', idPrefix = 'sel-cor' } = {}) {
+    const id = idPrefix + '-' + Math.random().toString(36).slice(2, 8);
+    const cores = this.cache || [];
+    const optsHtml = cores.map(c =>
+      `<option value="${escapeHtml(c.nome)}" data-hex="${escapeHtml(c.hex)}"></option>`
+    ).join('');
+    const hex = (cores.find(c => (c.nome || '').toLowerCase() === String(value || '').toLowerCase())?.hex) || '';
+    return `
+      <span class="cor-input-wrap" data-cor-input>
+        <span class="cor-input-dot" data-cor-dot style="background:${escapeHtml(hex || 'transparent')};border:1px solid var(--border-2,#cbd5e1)"></span>
+        <input id="${id}" name="${escapeHtml(name)}" type="text"
+               list="${id}-dl"
+               value="${escapeHtml(value || '')}"
+               placeholder="${escapeHtml(placeholder)}"
+               autocomplete="off"
+               ${required ? 'required' : ''} />
+        <datalist id="${id}-dl">${optsHtml}</datalist>
+      </span>`;
+  },
+  /** Bind: atualiza a bolinha quando o usuário digita (chamado uma vez pelo container) */
+  bindInputs(scope = document) {
+    scope.querySelectorAll('[data-cor-input]:not([data-cor-bound])').forEach(wrap => {
+      wrap.setAttribute('data-cor-bound', '1');
+      const inp = wrap.querySelector('input');
+      const dot = wrap.querySelector('[data-cor-dot]');
+      if (!inp || !dot) return;
+      const upd = () => {
+        const val = (inp.value || '').toLowerCase().trim();
+        const found = (this.cache || []).find(c => (c.nome || '').toLowerCase() === val);
+        dot.style.background = found?.hex || 'transparent';
+      };
+      inp.addEventListener('input', upd);
+      inp.addEventListener('change', upd);
+      upd();
+    });
+  },
+};
+
+ROUTES.cores = async (main) => {
+  // Helpers internos
+  function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+  function isValidHex(s) {
+    let x = String(s || '').trim().toUpperCase().replace(/^#/, '');
+    if (/^[0-9A-F]{3}$/.test(x)) x = x.split('').map(ch => ch + ch).join('');
+    return /^[0-9A-F]{6}$/.test(x) ? '#' + x : null;
+  }
+  function contrastingText(hex) {
+    // Decide texto branco/preto pelo brilho percebido
+    const h = String(hex || '').replace('#', '');
+    if (h.length !== 6) return '#000';
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+    return yiq >= 140 ? '#0f172a' : '#ffffff';
+  }
+  state.route = 'cores';
+
+  let lista = [];
+  let filtro = { q: '', somenteAtivos: false };
+
+  async function loadList() {
+    try {
+      const qs = new URLSearchParams();
+      if (filtro.q) qs.set('q', filtro.q);
+      if (filtro.somenteAtivos) qs.set('ativo', '1');
+      const r = await api('get', '/cores' + (qs.toString() ? '?' + qs : ''), null, { silent: true });
+      lista = Array.isArray(r?.data) ? r.data : [];
+    } catch (e) {
+      lista = [];
+      toast('Erro ao carregar cores: ' + (e?.message || 'desconhecido'), 'error');
+    }
+    render();
+    // Invalida o cache global para outras telas pegarem a versão atualizada
+    window.Cores.invalidate();
+  }
+
+  function render() {
+    const totalAtivas = lista.filter(c => c.ativo).length;
+    const totalInativas = lista.length - totalAtivas;
+
+    main.innerHTML = `
+      <div class="page-header mb-4 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 class="page-title"><i class="fas fa-palette mr-2 text-violet-500"></i>Cores</h1>
+          <p class="page-subtitle">Cadastro centralizado das cores usadas em remessas, produtos, retornos e relatórios.</p>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="c-nova" class="btn btn-primary"><i class="fas fa-plus mr-1"></i>Nova cor</button>
+          <button id="c-import" class="btn btn-secondary"><i class="fas fa-file-import mr-1"></i>Importar</button>
+          <button id="c-del-all" class="btn btn-danger" ${lista.length === 0 ? 'disabled' : ''}><i class="fas fa-trash-can mr-1"></i>Excluir todas</button>
+        </div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="card-body">
+          <div class="flex items-center gap-3 flex-wrap">
+            <div class="flex-1 min-w-[220px]">
+              <label class="text-xs text-slate-500 font-medium">Buscar</label>
+              <input id="c-busca" type="text" class="form-input" placeholder="Nome ou HEX (ex: #2563EB)" value="${escHtml(filtro.q)}" />
+            </div>
+            <label class="flex items-center gap-2 text-sm select-none cursor-pointer">
+              <input id="c-ativos" type="checkbox" ${filtro.somenteAtivos ? 'checked' : ''} />
+              <span>Somente ativas</span>
+            </label>
+            <button id="c-reload" class="btn btn-secondary btn-sm"><i class="fas fa-rotate"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="text-xs text-slate-500 mb-2">
+        <i class="fas fa-info-circle mr-1"></i>
+        <b>${lista.length}</b> cores total — <b class="text-emerald-600">${totalAtivas}</b> ativas, <b class="text-slate-500">${totalInativas}</b> inativas
+      </div>
+
+      ${lista.length === 0 ? `
+        <div class="card">
+          <div class="card-body text-center py-12 text-slate-500">
+            <i class="fas fa-palette text-5xl text-slate-300 mb-3"></i>
+            <p class="font-medium">Nenhuma cor cadastrada${filtro.q ? ' com este filtro' : ''}.</p>
+            <p class="text-sm mt-1">Clique em <b>Nova cor</b> ou <b>Importar</b> para começar.</p>
+          </div>
+        </div>
+      ` : `
+        <div class="cores-grid">
+          ${lista.map(c => `
+            <div class="cor-card ${c.ativo ? '' : 'is-inactive'}" data-id="${c.id}">
+              <div class="cor-preview" style="background:${escHtml(c.hex)};color:${contrastingText(c.hex)}">
+                <span class="cor-hex-overlay">${escHtml(c.hex)}</span>
+                ${c.ativo ? '' : '<span class="cor-badge-inativo">Inativa</span>'}
+              </div>
+              <div class="cor-info">
+                <div class="cor-nome" title="${escHtml(c.nome)}">${escHtml(c.nome)}</div>
+                <div class="cor-actions">
+                  <button class="btn-icon" data-act="edit" data-id="${c.id}" title="Editar"><i class="fas fa-pen"></i></button>
+                  <button class="btn-icon" data-act="toggle" data-id="${c.id}" title="${c.ativo ? 'Desativar' : 'Ativar'}">
+                    <i class="fas ${c.ativo ? 'fa-eye' : 'fa-eye-slash'}"></i>
+                  </button>
+                  <button class="btn-icon is-danger" data-act="del" data-id="${c.id}" title="Excluir"><i class="fas fa-trash"></i></button>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `}
+    `;
+
+    // Listeners
+    $('#c-nova').onclick = () => openCorModal(null);
+    $('#c-import').onclick = () => openImportModal();
+    $('#c-del-all').onclick = () => deleteAll();
+    $('#c-reload').onclick = () => loadList();
+    let _qtmr = 0;
+    $('#c-busca').oninput = (e) => {
+      clearTimeout(_qtmr);
+      const v = e.target.value;
+      _qtmr = setTimeout(() => { filtro.q = v; loadList(); }, 280);
+    };
+    $('#c-ativos').onchange = (e) => { filtro.somenteAtivos = e.target.checked; loadList(); };
+
+    main.querySelectorAll('[data-act]').forEach(btn => {
+      btn.onclick = async () => {
+        const id = Number(btn.dataset.id);
+        const act = btn.dataset.act;
+        const cor = lista.find(c => c.id === id);
+        if (!cor) return;
+        if (act === 'edit') openCorModal(cor);
+        else if (act === 'del') deleteOne(cor);
+        else if (act === 'toggle') {
+          try {
+            await api('put', '/cores/' + id, { ...cor, ativo: cor.ativo ? 0 : 1 }, { silent: false });
+            toast(cor.ativo ? 'Cor desativada' : 'Cor ativada', 'success');
+            loadList();
+          } catch {}
+        }
+      };
+    });
+  }
+
+  // ---------- Modal: Nova/Editar ----------
+  function openCorModal(cor) {
+    const isEdit = !!cor;
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    m.innerHTML = `
+      <div class="modal-card" style="max-width:480px">
+        <div class="modal-header">
+          <h3><i class="fas fa-palette mr-2"></i>${isEdit ? 'Editar cor' : 'Nova cor'}</h3>
+          <button class="modal-close" type="button">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="space-y-3">
+            <div>
+              <label class="form-label">Nome <span class="text-red-500">*</span></label>
+              <input id="cm-nome" type="text" class="form-input" maxlength="60"
+                value="${escHtml(cor?.nome || '')}" placeholder="Ex: Azul Royal" required />
+            </div>
+            <div class="flex gap-3 items-end">
+              <div class="flex-1">
+                <label class="form-label">Código HEX <span class="text-red-500">*</span></label>
+                <input id="cm-hex" type="text" class="form-input" maxlength="7"
+                  value="${escHtml(cor?.hex || '#2563EB')}" placeholder="#2563EB" required />
+              </div>
+              <div>
+                <label class="form-label">Picker</label>
+                <input id="cm-pick" type="color" value="${escHtml(cor?.hex || '#2563EB')}"
+                  style="height:38px;width:48px;border-radius:8px;border:1px solid var(--border-2,#cbd5e1);cursor:pointer" />
+              </div>
+            </div>
+            <div>
+              <label class="form-label">Preview</label>
+              <div id="cm-preview" class="cor-preview-modal"
+                style="background:${escHtml(cor?.hex || '#2563EB')};color:${contrastingText(cor?.hex || '#2563EB')}">
+                <span id="cm-preview-text">${escHtml(cor?.nome || 'Azul Royal')}</span>
+                <span id="cm-preview-hex" style="opacity:.75;font-size:.8em">${escHtml(cor?.hex || '#2563EB')}</span>
+              </div>
+            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input id="cm-ativo" type="checkbox" ${(cor?.ativo ?? 1) ? 'checked' : ''} />
+              <span class="text-sm">Ativa (visível nos selects do sistema)</span>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-act="cancel" type="button">Cancelar</button>
+          <button class="btn btn-primary" data-act="save" type="button"><i class="fas fa-save mr-1"></i>${isEdit ? 'Salvar' : 'Cadastrar'}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.querySelector('.modal-close').onclick = close;
+    m.querySelector('[data-act="cancel"]').onclick = close;
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+
+    const $nome = m.querySelector('#cm-nome');
+    const $hex = m.querySelector('#cm-hex');
+    const $pick = m.querySelector('#cm-pick');
+    const $prev = m.querySelector('#cm-preview');
+    const $prevTxt = m.querySelector('#cm-preview-text');
+    const $prevHex = m.querySelector('#cm-preview-hex');
+
+    function syncPreview() {
+      const hex = isValidHex($hex.value) || '#cccccc';
+      $prev.style.background = hex;
+      $prev.style.color = contrastingText(hex);
+      $prevTxt.textContent = $nome.value || 'Sem nome';
+      $prevHex.textContent = hex;
+    }
+    $nome.oninput = syncPreview;
+    $hex.oninput = () => {
+      const v = isValidHex($hex.value);
+      if (v) $pick.value = v;
+      syncPreview();
+    };
+    $pick.oninput = () => { $hex.value = $pick.value.toUpperCase(); syncPreview(); };
+
+    setTimeout(() => $nome.focus(), 50);
+
+    m.querySelector('[data-act="save"]').onclick = async () => {
+      const nome = ($nome.value || '').trim();
+      const hex = isValidHex($hex.value);
+      const ativo = m.querySelector('#cm-ativo').checked ? 1 : 0;
+      if (!nome) { toast('Informe o nome da cor', 'warning'); $nome.focus(); return; }
+      if (!hex)  { toast('Código HEX inválido. Use #RRGGBB.', 'warning'); $hex.focus(); return; }
+      try {
+        if (isEdit) {
+          await api('put', '/cores/' + cor.id, { nome, hex, ativo }, { silent: false });
+          toast('Cor atualizada!', 'success');
+        } else {
+          await api('post', '/cores', { nome, hex, ativo }, { silent: false });
+          toast('Cor cadastrada!', 'success');
+        }
+        close();
+        loadList();
+      } catch {}
+    };
+  }
+
+  // ---------- Excluir 1 ----------
+  async function deleteOne(cor) {
+    if (!confirm(`Excluir a cor "${cor.nome}" (${cor.hex})?\n\nEsta ação é irreversível.`)) return;
+    try {
+      await api('delete', '/cores/' + cor.id, null, { silent: false });
+      toast('Cor excluída', 'success');
+      loadList();
+    } catch {}
+  }
+
+  // ---------- Excluir TODAS (dupla confirmação) ----------
+  async function deleteAll() {
+    if (lista.length === 0) return;
+    if (!confirm(`Tem certeza que deseja excluir TODAS as ${lista.length} cores?\n\nEsta ação é IRREVERSÍVEL.`)) return;
+    const txt = prompt(`Para confirmar a exclusão de TODAS as cores, digite exatamente:\n\nEXCLUIR_TODAS\n\n(maiúsculas, sem espaços)`);
+    if (txt !== 'EXCLUIR_TODAS') { toast('Operação cancelada', 'info'); return; }
+    try {
+      const r = await api('delete', '/cores?confirm=true&confirm2=EXCLUIR_TODAS', null, { silent: false });
+      toast(`${r?.data?.deleted || 0} cores excluídas`, 'success');
+      loadList();
+    } catch {}
+  }
+
+  // ---------- Modal: Importar ----------
+  function openImportModal() {
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    m.innerHTML = `
+      <div class="modal-card" style="max-width:640px">
+        <div class="modal-header">
+          <h3><i class="fas fa-file-import mr-2"></i>Importar cores</h3>
+          <button class="modal-close" type="button">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-sm text-slate-600 mb-3">
+            Cole/cole as cores no formato <code>nome,#hex</code> (uma por linha).
+            Aceita também separação por <kbd>;</kbd>, <kbd>Tab</kbd> ou <kbd>|</kbd>.
+            Excel/CSV: copie as duas colunas e cole abaixo.
+          </p>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="form-label">Ou selecione arquivo CSV / TXT</label>
+              <input id="ci-file" type="file" accept=".csv,.txt,text/csv,text/plain" class="form-input" />
+            </div>
+            <div>
+              <label class="form-label">Comportamento ao encontrar duplicata</label>
+              <select id="ci-mode" class="form-input">
+                <option value="skip">Ignorar (manter a existente)</option>
+                <option value="overwrite">Sobrescrever (atualizar pelo nome/HEX)</option>
+              </select>
+            </div>
+          </div>
+          <label class="form-label">Lista de cores</label>
+          <textarea id="ci-text" rows="10" class="form-input font-mono text-sm"
+            placeholder="Azul Royal,#2563EB&#10;Preto,#000000&#10;Branco,#FFFFFF"></textarea>
+          <div class="text-xs text-slate-500 mt-2">
+            <i class="fas fa-info-circle mr-1"></i>
+            Linhas vazias ou começando com <code>#</code> (comentário) são ignoradas.
+          </div>
+          <div id="ci-result" class="mt-3"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-act="cancel" type="button">Fechar</button>
+          <button class="btn btn-primary" data-act="run" type="button"><i class="fas fa-upload mr-1"></i>Importar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.querySelector('.modal-close').onclick = close;
+    m.querySelector('[data-act="cancel"]').onclick = close;
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+
+    const $text = m.querySelector('#ci-text');
+    const $file = m.querySelector('#ci-file');
+    const $result = m.querySelector('#ci-result');
+
+    $file.onchange = async () => {
+      const f = $file.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      $text.value = txt;
+    };
+
+    function parseList(raw) {
+      const lines = String(raw || '').split(/\r?\n/);
+      const items = [];
+      for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+        if (!line) continue;
+        if (line.startsWith('#') && !/^#[0-9A-Fa-f]{3,6}\b/.test(line)) continue; // comentário (mas permite "#FFF" sozinho)
+        // Detecta separador
+        const sep = line.indexOf(';') > -1 ? ';'
+                   : line.indexOf('\t') > -1 ? '\t'
+                   : line.indexOf('|') > -1 ? '|'
+                   : ',';
+        const parts = line.split(sep).map(s => s.trim());
+        if (parts.length < 2) {
+          // formato "nome #hex" separado por espaço (último token = hex)
+          const m2 = line.match(/^(.+?)\s+(#?[0-9A-Fa-f]{3,6})\s*$/);
+          if (m2) { items.push({ row: i + 1, nome: m2[1].trim(), hex: m2[2] }); continue; }
+          items.push({ row: i + 1, nome: parts[0] || '', hex: '' });
+          continue;
+        }
+        items.push({ row: i + 1, nome: parts[0], hex: parts[1] });
+      }
+      return items;
+    }
+
+    m.querySelector('[data-act="run"]').onclick = async () => {
+      const items = parseList($text.value);
+      if (!items.length) { toast('Nada para importar', 'warning'); return; }
+      const mode = m.querySelector('#ci-mode').value;
+      $result.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Importando ' + items.length + ' linhas...';
+      try {
+        const r = await api('post', '/cores/import', { items, mode }, { silent: false });
+        const d = r?.data || {};
+        const errs = Array.isArray(d.errors) ? d.errors : [];
+        $result.innerHTML = `
+          <div class="alert ${errs.length ? 'alert-warning' : 'alert-success'}">
+            <div class="font-medium mb-1">
+              <i class="fas fa-check-circle mr-1"></i>
+              ${d.inserted || 0} inseridas · ${d.updated || 0} atualizadas · ${d.skipped || 0} ignoradas · ${errs.length} erros
+            </div>
+            ${errs.length ? `
+              <details class="text-xs mt-2">
+                <summary class="cursor-pointer">Ver detalhes dos erros (${errs.length})</summary>
+                <ul class="mt-2 space-y-1 max-h-40 overflow-auto">
+                  ${errs.slice(0, 50).map(e => `<li>Linha ${e.row}: <b>${escHtml(e.nome || '—')}</b> (${escHtml(e.hex || '—')}) → ${escHtml(e.motivo)}</li>`).join('')}
+                </ul>
+              </details>
+            ` : ''}
+          </div>`;
+        loadList();
+      } catch (e) {
+        $result.innerHTML = '<div class="alert alert-error">Erro ao importar: ' + escHtml(e?.message || 'desconhecido') + '</div>';
+      }
+    };
+  }
+
+  // Boot
+  loadList();
+};
+
+
+/* ============================================================
  * CONFIGURAÇÕES — Parâmetros da empresa (usados na impressão de romaneio)
  * ============================================================ */
 ROUTES.configuracoes = async (main) => {
@@ -6196,15 +6688,28 @@ function bootApp() {
 }
 
 (async function init() {
+  // Recupera mensagem de logout vinda do hard reload (se houver)
+  let logoutMsg = null;
+  try {
+    logoutMsg = sessionStorage.getItem('_logout_msg');
+    if (logoutMsg) sessionStorage.removeItem('_logout_msg');
+  } catch {}
+
   window.addEventListener('hashchange', () => {
-    if (!state.user) return;
+    // GUARDA DE ROTA: sem usuário autenticado, qualquer hashchange volta ao login
+    if (!state.user) {
+      // Limpa hash para evitar loop e garante tela de login
+      try { history.replaceState(null, '', location.pathname); } catch {}
+      renderLogin(logoutMsg || 'Faça login para continuar.');
+      return;
+    }
     const r = location.hash.slice(1) || 'dashboard';
     if (r !== state.route) navigate(r);
   });
 
   // Tem token? Valida com /auth/me
   const token = AUTH.getToken();
-  if (!token) { renderLogin(); return; }
+  if (!token) { renderLogin(logoutMsg || undefined); return; }
   try {
     const r = await axios.get(API + '/auth/me', { headers: { Authorization: 'Bearer ' + token } });
     const u = r.data?.data;
