@@ -132,11 +132,33 @@ function doLogout(e) {
     try { e.stopPropagation(); } catch {}
     try { e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch {}
   }
-  console.log('[logout] doLogout() iniciado');
-  if (_logoutInProgress) { console.log('[logout] já em progresso, ignorando'); return; }
+  console.log('[logout] ▶ doLogout() iniciado, type=', e?.type || 'manual');
+  if (_logoutInProgress) { console.log('[logout] ⚠ já em progresso, ignorando'); return; }
   _logoutInProgress = true;
 
-  // 1) Fecha o menu visualmente (UX imediato — usuário vê reação ao clique)
+  // 1) FEEDBACK VISUAL imediato — overlay de "Saindo..." cobre a tela inteira.
+  // Garante que mesmo se a navegação demorar, o usuário VÊ que o clique funcionou.
+  try {
+    const overlay = document.createElement('div');
+    overlay.id = '__logout_overlay';
+    overlay.style.cssText = [
+      'position:fixed','inset:0','z-index:9999999',
+      'background:rgba(15,23,42,0.85)','backdrop-filter:blur(6px)',
+      '-webkit-backdrop-filter:blur(6px)',
+      'display:flex','align-items:center','justify-content:center',
+      'color:#fff','font-family:system-ui,-apple-system,sans-serif',
+      'font-size:1rem','letter-spacing:.02em',
+    ].join(';');
+    overlay.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+        <div style="width:42px;height:42px;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;border-radius:50%;animation:__logoutSpin .8s linear infinite"></div>
+        <div>Saindo da conta...</div>
+      </div>
+      <style>@keyframes __logoutSpin{to{transform:rotate(360deg)}}</style>`;
+    document.body.appendChild(overlay);
+  } catch {}
+
+  // 2) Fecha o menu visualmente (defesa)
   try {
     const menu = document.getElementById('user-menu');
     if (menu) { menu.classList.add('is-hidden'); menu.classList.remove('is-open'); }
@@ -148,7 +170,7 @@ function doLogout(e) {
     ).forEach(el => { try { el.remove(); } catch {} });
   } catch {}
 
-  // 2) Limpa TODOS storages (atuais + legados + genéricos)
+  // 3) Limpa TODOS storages (atuais + legados + genéricos)
   const lsKeys = [
     'pcp_token', 'pcp_user',           // chaves atuais do sistema
     'token', 'user', 'empresa', 'auth', // chaves comuns/legadas
@@ -156,11 +178,9 @@ function doLogout(e) {
   ];
   lsKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
   try { sessionStorage.clear(); } catch {}
-  // Não limpa localStorage completamente para preservar prefs do usuário
-  // (tema, idioma, accordion state) — apenas dados de autenticação.
+  console.log('[logout] ✓ storages limpos');
 
-  // 3) Limpa cookies do documento (defesa em profundidade — sistema usa JWT,
-  // mas se houver cookies de sessão residuais eles também caem)
+  // 4) Limpa cookies (defesa em profundidade)
   try {
     document.cookie.split(';').forEach((c) => {
       const eq = c.indexOf('=');
@@ -172,34 +192,31 @@ function doLogout(e) {
     });
   } catch {}
 
-  // 4) Reseta estado global (defesa — vai morrer no reload de qualquer jeito)
+  // 5) Reseta estado global (defesa — morre no reload)
   try { if (window.state) { window.state.user = null; window.state.token = null; } } catch {}
   try { AUTH && AUTH.clearToken && AUTH.clearToken(); } catch {}
   try { AUTH && AUTH.clearUser && AUTH.clearUser(); } catch {}
 
-  // 5) Avisa o backend (fire-and-forget — não esperamos resposta)
+  // 6) Avisa o backend (fire-and-forget)
   try {
     fetch((window.API_BASE_URL || '/api') + '/auth/logout', {
-      method: 'POST',
-      credentials: 'include',
-      keepalive: true, // garante que o request continue mesmo após o reload
+      method: 'POST', credentials: 'include', keepalive: true,
     }).catch(() => {});
   } catch {}
 
-  // 6) Marca a saída para mostrar mensagem na próxima tela de login
+  // 7) Marca a saída para mostrar mensagem na próxima tela de login
   try { sessionStorage.setItem('_logout_msg', 'Sessão encerrada.'); } catch {}
 
-  // 7) HARD RELOAD — destrói TODO o estado JS, handlers, closures.
-  //    Usa replace() para não criar entrada no histórico (evita "voltar" para a app).
-  //    location.hash = '' garante que rotas hash internas não persistam.
-  console.log('[logout] redirecionando via hard reload...');
+  // 8) HARD RELOAD — destrói TODO o estado JS, handlers, closures.
+  console.log('[logout] ▶ redirecionando via hard reload...');
   try {
     location.hash = '';
-    // Pequeno timeout para o navegador processar limpeza síncrona antes de recarregar
+    // Tenta replace IMEDIATAMENTE (mais rápido); fallback assíncrono
+    try { window.location.replace('/'); return; } catch {}
     setTimeout(() => {
       try { window.location.replace('/'); }
       catch { window.location.href = '/'; }
-    }, 50);
+    }, 30);
   } catch {
     try { window.location.href = '/'; } catch {}
   }
@@ -545,6 +562,32 @@ function renderLayout() {
     e.preventDefault(); e.stopPropagation();
     closeUserMenu(); navigate('perfil');
   });
+
+  // ============================================================
+  // LOGOUT — bind DIRETO no botão (no momento do render).
+  // Não depende de delegação global. Roda em pointerdown E click
+  // (failsafe). Não fecha o menu antes — o hard reload destrói tudo.
+  // ============================================================
+  const btnLogout = $('#btn-logout');
+  if (btnLogout) {
+    const handleLogoutDirect = (e) => {
+      console.log('[logout] click direto no botão Sair, type=', e.type);
+      try { e.preventDefault(); } catch {}
+      try { e.stopPropagation(); } catch {}
+      try { e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch {}
+      doLogout(e);
+    };
+    // pointerdown roda ANTES de click — dispara o logout imediatamente
+    btnLogout.addEventListener('pointerdown', handleLogoutDirect);
+    // click é failsafe (se pointerdown não disparar em algum browser)
+    btnLogout.addEventListener('click', handleLogoutDirect);
+    // Feedback visual instantâneo de que o clique foi capturado
+    btnLogout.addEventListener('mousedown', () => {
+      btnLogout.style.transform = 'scale(0.97)';
+      setTimeout(() => { try { btnLogout.style.transform = ''; } catch {} }, 120);
+    });
+  }
+
   // Theme toggle (sistema dual light/dark)
   Theme.bindToggle('#theme-toggle-btn');
 }

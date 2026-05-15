@@ -2029,18 +2029,19 @@ input:focus, select:focus, textarea:focus {
   width: 248px;
   min-width: 228px;
   max-width: calc(100vw - 16px);
-  z-index: 99999 !important;  /* SEMPRE acima de modais, drawers, FABs, tabelas sticky e qualquer tooltip nativo */
+  z-index: 999999 !important; /* SEMPRE acima de TUDO (modais, drawers, FABs, tabelas sticky, tooltips) */
   overflow: visible !important;
   isolation: isolate;         /* cria stacking-context próprio */
   background: var(--surface-1, #ffffff);
   color: var(--text-1, #0f172a);
   border: 1px solid var(--border-2, rgba(15, 23, 42, 0.12));
-  border-radius: 14px;
+  border-radius: 18px;
   padding: 8px 0;
-  /* Sombra forte + leve glow azul para destacar acima do conteúdo */
+  /* Sombra forte + leve glow para destacar acima do conteúdo */
   box-shadow:
-    0 24px 48px -12px rgba(2, 6, 23, 0.45),
-    0 10px 20px rgba(2, 6, 23, 0.22),
+    0 20px 60px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 24px 48px -12px rgba(2, 6, 23, 0.35),
     0 0 0 1px rgba(99, 102, 241, 0.08);
   backdrop-filter: blur(10px) saturate(140%);
   -webkit-backdrop-filter: blur(10px) saturate(140%);
@@ -2053,13 +2054,39 @@ input:focus, select:focus, textarea:focus {
     opacity 0.18s ease-out,
     transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Garante clicabilidade absoluta — qualquer elemento dentro do dropdown
+   deve responder a clique mesmo se algum container pai tentou bloquear */
+.user-dropdown,
+.user-dropdown * {
+  pointer-events: auto !important;
+}
+/* Reforço: containers principais NÃO devem cortar o dropdown
+   (position:fixed escapa do flow, mas garante visibility se houver bugs) */
+.main-layout,
+.sidebar,
+.content,
+#topbar,
+#main-content,
+.user-menu-wrap,
+.user-menu-wrap *,
+header,
+.page-header,
+.page-wrapper,
+.content-wrapper,
+.cards,
+.tables {
+  overflow: visible;
+}
+/* Backdrop NÃO deve cobrir o dropdown — z-index abaixo */
+.user-menu-backdrop { z-index: 999998 !important; }
 .user-dropdown.is-hidden {
   display: none !important;
 }
 .user-dropdown.is-open {
-  opacity: 1;
-  transform: translateY(0) scale(1);
+  opacity: 1 !important;
+  transform: translateY(0) scale(1) !important;
   pointer-events: auto !important;
+  display: block !important;
 }
 /* Garante clicabilidade de TODOS os filhos do dropdown
  * (mesmo se algum pai estiver com pointer-events:none herdado) */
@@ -2113,10 +2140,13 @@ input:focus, select:focus, textarea:focus {
   transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
   border-radius: 0;
   font-family: inherit;
-  /* Ícones/spans internos não devem capturar o clique antes do botão */
 }
+/* IMPORTANTE: filhos do botão (i + span) também recebem pointer-events:auto
+   para garantir que o clique seja capturado por ELES e bubble para o button.
+   (Tentativas anteriores de usar pointer-events:none nos filhos causavam o
+   clique vazar para o backdrop, fechando o menu antes do logout disparar.) */
 .user-dropdown-item > * {
-  pointer-events: none;       /* o clique sempre cai no <button>, nunca no <i> ou <span> */
+  pointer-events: auto;
 }
 
 /* Botão Sair especificamente — z-index máximo dentro do dropdown,
@@ -2129,6 +2159,22 @@ input:focus, select:focus, textarea:focus {
   pointer-events: auto !important;
   cursor: pointer !important;
   user-select: none;
+  border-radius: 12px;
+  margin: 0 6px;
+  width: calc(100% - 12px);
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.1s ease;
+}
+#btn-logout:hover,
+.logout-btn:hover,
+[data-action="logout"]:hover {
+  background: rgba(239, 68, 68, 0.12) !important;
+  color: #ef4444 !important;
+}
+#btn-logout:active,
+.logout-btn:active,
+[data-action="logout"]:active {
+  background: rgba(239, 68, 68, 0.22) !important;
+  transform: scale(0.97);
 }
 #btn-logout:disabled,
 .logout-btn:disabled {
