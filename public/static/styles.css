@@ -168,9 +168,87 @@ html, body {
   /* Transição global de tema */
   transition: background-color 0.3s ease, color 0.3s ease;
 }
+/* ============================================================
+ * SCROLL GLOBAL — body NÃO trava (defesa)
+ * - desktop: scroll fica em #main-content (layout SaaS clássico)
+ * - mobile/tablet: body permite scroll natural se #main-content não rolar
+ * - NUNCA aplicar position:fixed/overflow:hidden no body
+ * ============================================================ */
+html {
+  width: 100%;
+  min-height: 100%;
+  /* desktop: scroll interno em #main-content. Não permite scroll no html. */
+}
 body {
   background: var(--body-bg);
   min-height: 100vh;
+  width: 100%;
+  position: relative;          /* base de empilhamento, NÃO fixed */
+  overflow-x: hidden;          /* impede scroll horizontal acidental */
+}
+#app {
+  width: 100%;
+  min-height: 100vh;
+  position: relative;
+}
+
+/* ============================================================
+ * LAYOUT PRINCIPAL — scroll só no #main-content (SaaS clássico)
+ *
+ * Estrutura HTML:
+ *   #app > .flex.h-screen
+ *     ├─ aside.sidebar              (largura fixa 260px, scroll interno)
+ *     └─ .flex-1.flex.flex-col      (resto, coluna)
+ *          ├─ #topbar                (altura natural, sticky-like)
+ *          └─ #main-content          (flex-1, overflow-auto ← AQUI ROLA)
+ *
+ * Regras:
+ *   - container raiz NÃO tem scroll
+ *   - #main-content é o ÚNICO scroller no desktop
+ *   - sidebar tem scroll próprio (lista de nav grande)
+ *   - mobile: layout vira block, sidebar fica fixed drawer, scroll vai pro #main-content
+ * ============================================================ */
+#app > .flex.h-screen {
+  width: 100%;
+  /* h-screen do Tailwind já dá height:100vh */
+  overflow: hidden;            /* o scroll interno dos filhos cuida do conteúdo */
+  max-height: 100vh;
+}
+#app > .flex.h-screen > .flex-1.flex.flex-col.overflow-hidden {
+  min-width: 0;                /* permite que flex-1 encolha (evita overflow horizontal) */
+  height: 100vh;               /* explícito */
+  overflow: hidden;            /* topbar fica, main rola */
+}
+#main-content {
+  flex: 1 1 auto;
+  overflow-y: auto !important; /* SEMPRE pode rolar vertical */
+  overflow-x: hidden !important;
+  /* iOS Safari smooth scrolling */
+  -webkit-overflow-scrolling: touch;
+  /* Espaço final para o último item não colar no rodapé */
+  padding-bottom: max(40px, env(safe-area-inset-bottom));
+  /* Garante que cliques/scroll não fiquem presos */
+  pointer-events: auto;
+  /* overscroll-behavior: contém o scroll bounce em iOS, evita "pull-to-refresh" no Chrome Android */
+  overscroll-behavior-y: contain;
+}
+/* Páginas internas — nunca devem ter scroll próprio (deixar pro #main-content) */
+#main-content > .page-container,
+#main-content > section,
+#main-content > .page-wrapper,
+#main-content > .content-wrapper {
+  width: 100%;
+  min-height: 100%;
+  overflow: visible;
+}
+/* Tabelas grandes — scroll horizontal limitado ao wrapper, nunca quebra o layout */
+.table-wrapper,
+.table-responsive,
+#main-content .card > .table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Aplica transição apenas a propriedades que mudam com o tema */
@@ -183,20 +261,28 @@ body {
     box-shadow 0.3s ease !important;
 }
 
-/* Scrollbar premium */
+/* Scrollbar premium — moderna, fina, com hover destacado */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
-  border-radius: 10px;
+  background: transparent;
+  border-radius: 20px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
-  border-radius: 10px;
-  border: 2px solid var(--scrollbar-track);
+  background: rgba(99, 102, 241, 0.40);
+  border-radius: 20px;
+  border: 2px solid transparent;
+  background-clip: content-box;
   transition: background 0.2s ease;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
-* { scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track); scrollbar-width: thin; }
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.70);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-color: rgba(99, 102, 241, 0.45) transparent; scrollbar-width: thin; }
+/* Tema dark — scrollbar com mais contraste */
+[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(129, 140, 248, 0.40); background-clip: content-box; }
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(129, 140, 248, 0.75); background-clip: content-box; }
 
 /* Seleção */
 ::selection { background: rgba(99, 102, 241, 0.35); color: #fff; }
@@ -1828,8 +1914,21 @@ canvas { transition: filter 0.3s; }
 
   /* Conteúdo principal usa toda a largura */
   #main-content { padding: 0.9rem !important; }
-  #app > div.flex.h-screen { display: block; height: auto; }
-  #app .flex-1.flex.flex-col.overflow-hidden { height: 100vh; overflow: hidden; }
+
+  /* No mobile/tablet: sidebar vira drawer fixed, então o .flex.h-screen
+     pode virar block. Mas mantemos altura controlada e scroll funcionando: */
+  #app > .flex.h-screen {
+    display: block;
+    height: 100vh;             /* mantém altura total */
+    max-height: 100vh;
+    overflow: hidden;          /* scroll vai pro main-content */
+  }
+  #app > .flex.h-screen > .flex-1.flex.flex-col.overflow-hidden {
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+  }
+  /* main-content rola normalmente (regra global já garante overflow-y:auto) */
 }
 
 /* ============================================================
@@ -1926,6 +2025,96 @@ canvas { transition: filter 0.3s; }
   #topbar #user-btn span { display: none; }
   .modal { padding: 0.8rem !important; }
 }
+
+/* ============================================================
+ * GARANTIAS FINAIS DE SCROLL — defesa em profundidade
+ *
+ * Estas regras NUNCA aplicam overflow:hidden/position:fixed no body
+ * (mesmo se algum modal/dropdown tentar). Resolve travamentos de
+ * página após fechar modal/menu (bug clássico de "body locked").
+ * ============================================================ */
+
+/* DEFESA 1: body nunca pode ser travado por classes utilitárias */
+body.modal-open,
+body.dropdown-open,
+body.menu-open,
+body[style*="overflow: hidden"],
+body[style*="overflow:hidden"] {
+  overflow: auto !important;
+  position: relative !important;
+}
+
+/* DEFESA 2: sidebar abrindo NÃO trava o body
+   (o backdrop do sidebar tem position:fixed inset:0 — clique fora fecha,
+   mas o body permanece com scroll habilitado se necessário) */
+body:has(.sidebar.open) {
+  overflow: auto;
+}
+
+/* DEFESA 3: dropdown aberto NÃO trava body (era um bug clássico)
+   Sobrepõe qualquer regra que tentar dar overflow:hidden no body */
+body:has(.user-dropdown.is-open) {
+  overflow: auto !important;
+  position: relative !important;
+}
+
+/* DEFESA 4: modais sempre rolam internamente (não confiam no body) */
+.modal,
+.modal-content,
+.modal-body {
+  max-height: 92vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* DEFESA 5: containers de página jamais cortam scroll */
+.main-layout,
+.layout,
+.dashboard,
+.page-container,
+.page-wrapper,
+.content-wrapper {
+  overflow: visible;
+}
+.main-layout { display: flex; min-height: 100vh; }
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100vh;
+}
+
+/* DEFESA 6: dropdowns/popovers internos com listas longas rolam dentro */
+.dropdown-list,
+.popover-list,
+.combobox-list,
+.select-options {
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* DEFESA 7: form-grid/cards longos dentro de modal NÃO criam scroll duplo */
+.modal .form-grid,
+.modal form,
+.modal .card { overflow: visible; }
+
+/* DEFESA 8: mobile content scrollable (correção iOS Safari) */
+@media (max-width: 1023px) {
+  #main-content {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+    /* Garante que o scroll funcione mesmo se algum filho tentou bloquear */
+    touch-action: pan-y;
+  }
+}
+
+/* DEFESA 9: tabelas dentro de cards ganham wrapper de scroll automaticamente.
+   Já existia regra `#main-content .card { overflow-x: auto }` — aqui reforça
+   que scroll vertical NÃO é cortado por overflow-x. */
+#main-content .card { overflow-x: auto; overflow-y: visible; }
 
 /* ============================================================
  * MELHORIAS GERAIS — transições suaves, foco acessível
