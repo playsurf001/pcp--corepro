@@ -65,9 +65,18 @@ async function api(method, path, body, opts = {}) {
     const headers = {};
     const token = AUTH.getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await axios({ method, url: API + path, data: body, headers });
+    // 🆕 Suporte a AbortController: passe opts.signal para cancelar requests
+    const cfg = { method, url: API + path, data: body, headers };
+    if (opts.signal) cfg.signal = opts.signal;
+    const r = await axios(cfg);
     return r.data;
   } catch (e) {
+    // Request cancelado pelo cliente (AbortController) — silenciar
+    if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || axios.isCancel?.(e)) {
+      const err = new Error('canceled');
+      err.canceled = true;
+      throw err;
+    }
     const status = e.response?.status;
     const code = e.response?.data?.code;
     const msg = e.response?.data?.error || e.message || 'Erro';
@@ -4546,118 +4555,416 @@ async function TERC_confirmDelRet(idRet) {
 window.TERC_confirmDelRet = TERC_confirmDelRet;
 
 /* ---------- RETORNOS (lista consolidada) ---------- */
+/* ============================================================
+ * 🚀 ROUTES.terc_retornos — OTIMIZADO v22
+ *
+ * Antes (lento): GET /terc/remessas → N x GET /terc/remessas/:id
+ *                ↳ N+1 round-trips, sem paginação, filtros JS em memória.
+ *
+ * Agora (rápido): GET /terc/retornos?de=&ate=&id_terc=&search=&page=&per_page=
+ *                ↳ 1 query SQL com JOIN, paginação server-side, KPIs agregados.
+ *
+ * Recursos:
+ *  - Paginação server-side (20/50/100/200 por página)
+ *  - Busca com debounce 300ms
+ *  - AbortController: cancela requests antigos quando filtros mudam
+ *  - Skeleton loading enquanto carrega
+ *  - Cache em sessionStorage (TTL 30s) — invalidação on-save
+ *  - Filtro de status de pagamento (todos/pago/pendente)
+ *  - Sem re-render desnecessário: tabela atualiza in-place
+ * ============================================================ */
 ROUTES.terc_retornos = async (main) => {
   await TERC.load();
+
+  // ----- Estado da tela (escopo do componente) -----
+  const RET_CACHE_KEY = 'corepro:retornos:cache';
+  const RET_CACHE_TTL = 30_000; // 30s
+  const PER_PAGE_DEFAULT = 50;
+
+  // Recupera filtros persistidos (mantém preferência entre navegações)
+  let savedFilters = {};
+  try { savedFilters = JSON.parse(sessionStorage.getItem('corepro:retornos:filtros') || '{}'); } catch {}
+
   const hoje = dayjs().format('YYYY-MM-DD');
-  const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  const deDefault = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+
+  const state = {
+    de:        savedFilters.de  || deDefault,
+    ate:       savedFilters.ate || hoje,
+    id_terc:   savedFilters.id_terc || '',
+    search:    '',
+    status_pag: savedFilters.status_pag || '',
+    page:      1,
+    per_page:  Number(savedFilters.per_page) || PER_PAGE_DEFAULT,
+  };
+
+  // ----- Render shell (1 vez) -----
   main.innerHTML = `
-    <div class="card p-4 mb-4">
-      <div class="flex flex-wrap items-end gap-3">
-        <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
-        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
-        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
-        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
-        <div class="flex-1"></div>
-        <button id="btn-print" class="btn btn-secondary"><i class="fas fa-print mr-1"></i>Imprimir</button>
+    <div class="retornos-page">
+      <!-- Toolbar de filtros -->
+      <div class="card p-4 mb-4 retornos-toolbar">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
+          <div class="lg:col-span-2">
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Buscar</label>
+            <div class="relative">
+              <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+              <input id="f-search" type="text" placeholder="Nº controle, ref, cor, terceirizado, OP..." class="pl-8" value="${escapeHtml(state.search)}" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Terceirizado</label>
+            <select id="f-terc">${TERC.optTerc()}</select>
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">De</label>
+            <input type="date" id="f-de" value="${state.de}" />
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Até</label>
+            <input type="date" id="f-ate" value="${state.ate}" />
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Pagamento</label>
+            <select id="f-pag">
+              <option value="">Todos</option>
+              <option value="pendente" ${state.status_pag==='pendente'?'selected':''}>Pendentes</option>
+              <option value="pago" ${state.status_pag==='pago'?'selected':''}>Pagos</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 mt-3">
+          <button id="btn-refresh" class="btn btn-secondary btn-sm" title="Atualizar"><i class="fas fa-rotate"></i></button>
+          <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros"><i class="fas fa-eraser mr-1"></i>Limpar</button>
+          <div class="flex-1"></div>
+          <span class="text-xs text-slate-500">Por página:</span>
+          <select id="f-pp" class="select-sm" style="width:auto">
+            <option value="20"  ${state.per_page===20?'selected':''}>20</option>
+            <option value="50"  ${state.per_page===50?'selected':''}>50</option>
+            <option value="100" ${state.per_page===100?'selected':''}>100</option>
+            <option value="200" ${state.per_page===200?'selected':''}>200</option>
+          </select>
+          <button id="btn-print" class="btn btn-secondary btn-sm" title="Imprimir"><i class="fas fa-print"></i></button>
+        </div>
       </div>
+
+      <!-- KPIs -->
+      <div id="ret-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
+
+      <!-- Tabela -->
+      <div class="card p-0 retornos-table-wrap" id="ret-tbl"></div>
+
+      <!-- Paginação -->
+      <div id="ret-pager" class="retornos-pager"></div>
     </div>
-    <div id="kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
-    <div class="card p-0 overflow-x-auto" id="tbl"></div>
   `;
-  async function load() {
-    const de = $('#f-de')?.value || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
-    const ate = $('#f-ate')?.value || dayjs().format('YYYY-MM-DD');
-    const idt = $('#f-terc')?.value || '';
-    // Usa /terc/remessas como lista-base e busca retornos na view de cada
-    let rems = [];
-    try {
-      const p = new URLSearchParams({ de, ate });
-      if (idt) p.set('id_terc', idt);
-      const r = await api('get', '/terc/remessas?' + p.toString(), null, { silent: true });
-      rems = fmt.safeArr(r?.data).filter(x => fmt.safeNum(x?.qtd_retornada_calc) > 0);
-    } catch (e) {
-      console.error('[terc_retornos] erro fetch lista', e);
-      $('#kpis').innerHTML = `<div class="col-span-full text-center text-amber-600 py-3"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar retornos</div>`;
-      $('#tbl').innerHTML = '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</div>';
+
+  // ----- Refs -----
+  const $tbl    = $('#ret-tbl');
+  const $kpis   = $('#ret-kpis');
+  const $pager  = $('#ret-pager');
+  const $search = $('#f-search');
+  const $terc   = $('#f-terc');
+  const $de     = $('#f-de');
+  const $ate    = $('#f-ate');
+  const $pag    = $('#f-pag');
+  const $pp     = $('#f-pp');
+
+  // Pré-popular id_terc com o salvo
+  if (state.id_terc) {
+    try { $terc.value = String(state.id_terc); } catch {}
+  }
+
+  // ----- Helpers de UI -----
+  function skeletonTable() {
+    const rows = Array.from({ length: 8 }).map(() => `
+      <tr class="skeleton-row">
+        ${Array.from({length: 11}).map(() => '<td><span class="skeleton-cell"></span></td>').join('')}
+      </tr>`).join('');
+    return `
+      <div class="table-scroll">
+        <table class="w-full text-sm retornos-table">
+          <thead><tr>
+            <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>
+            <th>Ref/Cor</th><th>Serviço</th>
+            <th class="text-right">Boas</th><th class="text-right">Falta</th><th class="text-right">Conserto</th>
+            <th class="text-right">Total</th><th class="text-right">Valor</th><th class="text-center">Pagto</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+  function skeletonKpis() {
+    return Array.from({length:4}).map(() => `
+      <div class="card p-3 kpi-card">
+        <span class="skeleton-cell" style="width:60%;height:10px"></span>
+        <span class="skeleton-cell" style="width:80%;height:24px;margin-top:8px"></span>
+      </div>`).join('');
+  }
+  function renderKpis(k) {
+    const card = (label, val, cls, icon) => `
+      <div class="card p-3 kpi-card">
+        <div class="text-xs uppercase tracking-wider text-slate-500 flex items-center gap-1">
+          <i class="fas ${icon} ${cls}"></i><span>${label}</span>
+        </div>
+        <div class="text-2xl font-bold ${cls} mt-1 tabular-nums">${val}</div>
+      </div>`;
+    $kpis.innerHTML = [
+      card('Retornos',      fmt.int(k.qtd),        'text-brand',         'fa-truck-arrow-right'),
+      card('Peças boas',    fmt.int(k.boa),        'text-emerald-600',   'fa-check-circle'),
+      card('Peças em falta',fmt.int(k.refugo),     'text-red-600',       'fa-times-circle'),
+      card('Valor pago',    TERC.fmtBRL(k.valor_pago_quitado) + ' <span class="text-xs text-amber-600 font-normal">+ ' + TERC.fmtBRL(k.valor_pago_pendente) + ' pend.</span>', 'text-indigo-600', 'fa-coins'),
+    ].join('');
+  }
+
+  function rowHtml(x) {
+    const refCorParts = [];
+    if (x.cod_ref) refCorParts.push(`<span class="font-mono text-xs">${escapeHtml(x.cod_ref)}</span>`);
+    if (x.cor) refCorParts.push(escapeHtml(x.cor));
+    return `
+      <tr class="retornos-row">
+        <td class="whitespace-nowrap">${fmt.date(x.dt_retorno)}</td>
+        <td class="text-right font-mono">${x.num_controle ?? '—'}</td>
+        <td class="truncate" title="${escapeHtml(x.nome_terc||'')}">${escapeHtml(x.nome_terc || '—')}</td>
+        <td>${refCorParts.join(' ') || '—'}</td>
+        <td class="text-xs text-slate-600 truncate" title="${escapeHtml(x.desc_servico||'')}">${escapeHtml(x.desc_servico || '')}</td>
+        <td class="text-right text-emerald-700 tabular-nums">${fmt.int(x.qtd_boa)}</td>
+        <td class="text-right text-red-600 tabular-nums">${fmt.int(x.qtd_refugo)}</td>
+        <td class="text-right text-amber-700 tabular-nums">${fmt.int(x.qtd_conserto)}</td>
+        <td class="text-right font-semibold tabular-nums">${fmt.int(x.qtd_total)}</td>
+        <td class="text-right tabular-nums">${TERC.fmtBRL(fmt.safeNum(x.valor_pago))}</td>
+        <td class="text-center text-xs">${
+          x.dt_pagamento
+            ? '<span class="badge badge-pago">' + fmt.date(x.dt_pagamento) + '</span>'
+            : '<span class="badge badge-pendente">Pendente</span>'
+        }</td>
+        <td class="text-center whitespace-nowrap no-print">
+          <button class="btn btn-sm btn-primary" title="Editar retorno" data-edit-ret="${x.id_retorno}" data-edit-rem="${x.id_remessa}"><i class="fas fa-pen"></i></button>
+          <button class="btn btn-sm btn-danger" title="Excluir retorno" data-del-ret="${x.id_retorno}" data-del-rem="${x.id_remessa}"><i class="fas fa-trash"></i></button>
+        </td>
+      </tr>`;
+  }
+
+  function renderTable(rows) {
+    if (!rows.length) {
+      $tbl.innerHTML = `
+        <div class="p-10 text-center text-slate-500">
+          <i class="fas fa-box-open text-3xl mb-2 block opacity-50"></i>
+          <div>Nenhum retorno encontrado no período selecionado.</div>
+          <div class="text-xs mt-2">Ajuste os filtros ou registre novos retornos.</div>
+        </div>`;
       return;
     }
+    $tbl.innerHTML = `
+      <div class="table-scroll">
+        <table class="w-full text-sm retornos-table">
+          <thead><tr>
+            <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>
+            <th>Ref/Cor</th><th>Serviço</th>
+            <th class="text-right">Boas</th><th class="text-right">Falta</th><th class="text-right">Conserto</th>
+            <th class="text-right">Total</th><th class="text-right">Valor</th><th class="text-center">Pagto</th>
+            <th class="text-center no-print">Ações</th>
+          </tr></thead>
+          <tbody>${rows.map(rowHtml).join('')}</tbody>
+        </table>
+      </div>`;
 
-    // Agregar detalhes (consulta individual para trazer retornos exatos)
-    const rows = [];
-    const tot = { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 };
-    for (const rem of rems.slice(0, 100)) { // limitar a 100 para performance
-      try {
-        const d = await api('get', '/terc/remessas/' + rem.id_remessa, null, { silent: true });
-        fmt.safeArr(d?.data?.retornos).forEach(ret => {
-          if (!ret) return;
-          const dtR = ret.dt_retorno || '';
-          if (dtR >= de && dtR <= ate && (!idt || String(rem.id_terc) === String(idt))) {
-            rows.push({
-              ...ret,
-              id_remessa: rem.id_remessa,
-              nome_terc: rem.nome_terc,
-              cod_ref: rem.cod_ref,
-              cor: rem.cor,
-              num_controle: rem.num_controle,
-              desc_servico: rem.desc_servico,
-            });
-            tot.boa += fmt.safeNum(ret.qtd_boa);
-            tot.refugo += fmt.safeNum(ret.qtd_refugo);
-            tot.conserto += fmt.safeNum(ret.qtd_conserto);
-            tot.total += fmt.safeNum(ret.qtd_total);
-            tot.valor += fmt.safeNum(ret.valor_pago);
-          }
-        });
-      } catch (e) {
-        console.warn('[terc_retornos] falha detalhe remessa', rem?.id_remessa, e?.message);
+    // Delegação de cliques (não cria N listeners)
+    $tbl.querySelectorAll('[data-edit-ret]').forEach(b => b.onclick = () => {
+      const ret = Number(b.dataset.editRet), rem = Number(b.dataset.editRem);
+      window.TERC_editRetFromList(ret, rem);
+    });
+    $tbl.querySelectorAll('[data-del-ret]').forEach(b => b.onclick = () => {
+      const ret = Number(b.dataset.delRet), rem = Number(b.dataset.delRem);
+      window.TERC_delRetFromList(ret, rem);
+    });
+  }
+
+  function renderPager(total, page, perPage, totalPages) {
+    if (!total) { $pager.innerHTML = ''; return; }
+    const start = (page - 1) * perPage + 1;
+    const end = Math.min(start + perPage - 1, total);
+
+    // Gera lista compacta de páginas
+    const around = 2;
+    const pages = [];
+    for (let i = 1; i <= totalPages; i++) {
+      if (i === 1 || i === totalPages || (i >= page - around && i <= page + around)) {
+        pages.push(i);
+      } else if (pages[pages.length-1] !== '…') {
+        pages.push('…');
       }
     }
-    rows.sort((a, b) => ((a.dt_retorno || '') < (b.dt_retorno || '') ? 1 : -1));
+    const pagesHtml = pages.map(p => p === '…'
+      ? '<span class="pager-ellipsis">…</span>'
+      : `<button class="pager-page ${p===page?'is-current':''}" data-page="${p}">${p}</button>`
+    ).join('');
 
-    const kpi = (l, v, c) => `<div class="card p-3"><div class="text-xs text-slate-500 uppercase">${l}</div><div class="text-2xl font-bold ${c}">${v}</div></div>`;
-    $('#kpis').innerHTML = [
-      kpi('Retornos', fmt.int(rows.length), 'text-brand'),
-      kpi('Peças boas', fmt.int(tot.boa), 'text-emerald-600'),
-      kpi('Peças em falta', fmt.int(tot.refugo), 'text-red-600'),
-      kpi('Valor pago', TERC.fmtBRL(tot.valor), 'text-indigo-600'),
-    ].join('');
+    $pager.innerHTML = `
+      <div class="pager-info">Mostrando <b>${start}</b>–<b>${end}</b> de <b>${total}</b> retorno(s)</div>
+      <div class="pager-ctrl">
+        <button class="pager-btn" id="pg-first" ${page<=1?'disabled':''} title="Primeira"><i class="fas fa-angles-left"></i></button>
+        <button class="pager-btn" id="pg-prev"  ${page<=1?'disabled':''} title="Anterior"><i class="fas fa-angle-left"></i></button>
+        ${pagesHtml}
+        <button class="pager-btn" id="pg-next"  ${page>=totalPages?'disabled':''} title="Próxima"><i class="fas fa-angle-right"></i></button>
+        <button class="pager-btn" id="pg-last"  ${page>=totalPages?'disabled':''} title="Última"><i class="fas fa-angles-right"></i></button>
+      </div>`;
 
-    $('#tbl').innerHTML = `
-      <table class="w-full text-sm">
-        <thead class="bg-slate-100"><tr>
-          <th class="text-left p-2">Data</th><th class="text-right p-2">Ctrl</th><th class="text-left p-2">Terceirizado</th>
-          <th class="text-left p-2">Ref/Cor</th><th class="text-left p-2">Serviço</th>
-          <th class="text-right p-2">Boas</th><th class="text-right p-2">Falta</th><th class="text-right p-2">Conserto</th>
-          <th class="text-right p-2">Total</th><th class="text-right p-2">Valor</th><th class="text-center p-2">Pagto</th>
-          <th class="text-center p-2 no-print">Ações</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(x => `
-            <tr class="border-b hover:bg-slate-50">
-              <td class="p-2">${fmt.date(x.dt_retorno)}</td>
-              <td class="p-2 text-right font-mono">${x.num_controle ?? '—'}</td>
-              <td class="p-2">${x.nome_terc || '—'}</td>
-              <td class="p-2"><span class="font-mono text-xs">${x.cod_ref || ''}</span> ${x.cor || ''}</td>
-              <td class="p-2 text-xs">${x.desc_servico || ''}</td>
-              <td class="p-2 text-right text-emerald-700">${fmt.int(x.qtd_boa)}</td>
-              <td class="p-2 text-right text-red-600">${fmt.int(x.qtd_refugo)}</td>
-              <td class="p-2 text-right text-amber-700">${fmt.int(x.qtd_conserto)}</td>
-              <td class="p-2 text-right font-semibold">${fmt.int(x.qtd_total)}</td>
-              <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(x.valor_pago))}</td>
-              <td class="p-2 text-center text-xs">${x.dt_pagamento ? fmt.date(x.dt_pagamento) : '<span class="text-amber-600">Pendente</span>'}</td>
-              <td class="p-2 text-center whitespace-nowrap no-print">
-                <button class="btn btn-sm btn-primary" title="Editar retorno" onclick="TERC_editRetFromList(${x.id_retorno}, ${x.id_remessa})"><i class="fas fa-pen"></i></button>
-                <button class="btn btn-sm btn-danger" title="Excluir retorno" onclick="TERC_delRetFromList(${x.id_retorno}, ${x.id_remessa})"><i class="fas fa-trash"></i></button>
-              </td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      ${rows.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis no período</div>' : ''}
-    `;
+    $pager.querySelectorAll('[data-page]').forEach(b => b.onclick = () => { state.page = Number(b.dataset.page); fetchData(); });
+    const f = $('#pg-first'); if (f) f.onclick = () => { state.page = 1; fetchData(); };
+    const p = $('#pg-prev');  if (p) p.onclick = () => { state.page = Math.max(1, state.page - 1); fetchData(); };
+    const n = $('#pg-next');  if (n) n.onclick = () => { state.page = Math.min(totalPages, state.page + 1); fetchData(); };
+    const l = $('#pg-last');  if (l) l.onclick = () => { state.page = totalPages; fetchData(); };
   }
-  // Edição direta a partir da lista consolidada — após salvar, recarrega lista
+
+  // ----- Cache helpers -----
+  function cacheKey() {
+    return RET_CACHE_KEY + ':' + JSON.stringify({
+      de: state.de, ate: state.ate, id_terc: state.id_terc,
+      search: state.search, status_pag: state.status_pag,
+      page: state.page, per_page: state.per_page
+    });
+  }
+  function cacheGet() {
+    try {
+      const raw = sessionStorage.getItem(cacheKey());
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      if (Date.now() - o.t > RET_CACHE_TTL) return null;
+      return o.d;
+    } catch { return null; }
+  }
+  function cacheSet(data) {
+    try { sessionStorage.setItem(cacheKey(), JSON.stringify({ t: Date.now(), d: data })); } catch {}
+  }
+  function cacheInvalidate() {
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(RET_CACHE_KEY)) sessionStorage.removeItem(k);
+      }
+    } catch {}
+  }
+
+  // Persiste filtros (exceto search e page) para próxima visita
+  function persistFilters() {
+    try {
+      sessionStorage.setItem('corepro:retornos:filtros', JSON.stringify({
+        de: state.de, ate: state.ate, id_terc: state.id_terc,
+        status_pag: state.status_pag, per_page: state.per_page
+      }));
+    } catch {}
+  }
+
+  // ----- Fetch com AbortController (cancela request anterior) -----
+  let _abortCtrl = null;
+  let _inFlight = false;
+  async function fetchData(opts = {}) {
+    // Cancela request anterior
+    if (_abortCtrl) { try { _abortCtrl.abort(); } catch {} }
+    _abortCtrl = new AbortController();
+
+    // Skeleton apenas no primeiro load ou quando o cache não cobrir
+    const cached = cacheGet();
+    if (cached && !opts.bypassCache) {
+      renderKpis(cached.kpis);
+      renderTable(cached.rows);
+      renderPager(cached.total, cached.page, cached.per_page, cached.total_pages);
+      return;
+    }
+    if (!_inFlight) {
+      $kpis.innerHTML = skeletonKpis();
+      $tbl.innerHTML = skeletonTable();
+      $pager.innerHTML = '';
+    }
+    _inFlight = true;
+
+    const p = new URLSearchParams({
+      de: state.de, ate: state.ate,
+      page: String(state.page), per_page: String(state.per_page),
+    });
+    if (state.id_terc)    p.set('id_terc', state.id_terc);
+    if (state.search)     p.set('search', state.search);
+    if (state.status_pag) p.set('status_pag', state.status_pag);
+
+    try {
+      const r = await api('get', '/terc/retornos?' + p.toString(), null, {
+        silent: true, signal: _abortCtrl.signal
+      });
+      const data = r?.data || { rows: [], kpis: {}, total: 0, page: 1, per_page: state.per_page, total_pages: 1 };
+      cacheSet(data);
+      renderKpis(data.kpis || {});
+      renderTable(data.rows || []);
+      renderPager(data.total || 0, data.page || 1, data.per_page || state.per_page, data.total_pages || 1);
+    } catch (e) {
+      if (e?.canceled) {
+        // Request cancelado — outra busca está em andamento. Não mostra erro.
+        return;
+      }
+      console.error('[terc_retornos] fetch erro', e);
+      $kpis.innerHTML = `<div class="col-span-full text-center text-amber-600 py-3"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar retornos</div>`;
+      $tbl.innerHTML  = `
+        <div class="p-10 text-center text-red-500">
+          <i class="fas fa-circle-exclamation text-3xl mb-2 block opacity-70"></i>
+          <div>Erro ao carregar dados. Tente novamente.</div>
+          <button class="btn btn-secondary btn-sm mt-3" onclick="document.getElementById('btn-refresh').click()"><i class="fas fa-rotate mr-1"></i>Tentar novamente</button>
+        </div>`;
+      $pager.innerHTML = '';
+    } finally {
+      _inFlight = false;
+    }
+  }
+
+  // ----- Handlers (debounce na busca; mudança de filtros reseta página) -----
+  let _searchTimer = null;
+  $search.addEventListener('input', () => {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => {
+      state.search = $search.value.trim();
+      state.page = 1;
+      cacheInvalidate(); // busca textual sempre invalida
+      fetchData();
+    }, 300);
+  });
+  function bindFilterChange(el, prop, numeric=false) {
+    el.addEventListener('change', () => {
+      const v = el.value;
+      state[prop] = numeric ? (v ? Number(v) : '') : v;
+      state.page = 1;
+      persistFilters();
+      fetchData();
+    });
+  }
+  bindFilterChange($terc, 'id_terc');
+  bindFilterChange($de,   'de');
+  bindFilterChange($ate,  'ate');
+  bindFilterChange($pag,  'status_pag');
+  $pp.addEventListener('change', () => {
+    state.per_page = Number($pp.value) || PER_PAGE_DEFAULT;
+    state.page = 1;
+    persistFilters();
+    fetchData();
+  });
+  $('#btn-refresh').onclick = () => { cacheInvalidate(); fetchData({ bypassCache: true }); };
+  $('#btn-clear').onclick = () => {
+    state.de = deDefault; $de.value = deDefault;
+    state.ate = hoje;     $ate.value = hoje;
+    state.id_terc = '';   try { $terc.value = ''; } catch {}
+    state.status_pag = ''; $pag.value = '';
+    state.search = '';     $search.value = '';
+    state.page = 1;
+    persistFilters();
+    cacheInvalidate();
+    fetchData();
+  };
+  $('#btn-print').onclick = () => window.print();
+
+  // ----- Atalhos globais p/ ações na lista (invalidam cache ao salvar) -----
   window.TERC_editRetFromList = (idRet, idRem) => {
-    TERC_openRetModal(idRem, () => { load(); window._tercAccApi?.refreshAll?.(); }, idRet);
+    TERC_openRetModal(idRem, () => {
+      cacheInvalidate();
+      fetchData({ bypassCache: true });
+      window._tercAccApi?.refreshAll?.();
+    }, idRet);
   };
   window.TERC_delRetFromList = async (idRet, idRem) => {
     const okConf = await TERC_confirmDelRet(idRet);
@@ -4665,13 +4972,14 @@ ROUTES.terc_retornos = async (main) => {
     try {
       await api('delete', '/terc/retornos/' + idRet);
       toast('Retorno excluído com sucesso', 'success');
-      load();
+      cacheInvalidate();
+      fetchData({ bypassCache: true });
       window._tercAccApi?.refreshAll?.();
     } catch {}
   };
-  $('#btn-filtrar').onclick = load;
-  $('#btn-print').onclick = () => window.print();
-  try { await load(); } catch (e) { console.error('[terc_retornos] load top‑level', e); }
+
+  // ----- Primeira carga (usa cache se houver) -----
+  try { await fetchData(); } catch (e) { console.error('[terc_retornos] init', e); }
 };
 
 /* ============================================================

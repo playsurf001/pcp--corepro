@@ -1855,6 +1855,125 @@ async function _itensRemessaComSaldo(DB: D1Database, idRemessa: number, idRetEdi
 }
 
 /* =================================================================
+ * GET /terc/retornos
+ * Endpoint OTIMIZADO para a tela "Retornos" — substitui a abordagem
+ * antiga (N+1 requests: lista remessas + para cada uma busca detalhe).
+ *
+ * Faz tudo em DUAS queries: 1 para contagem/KPIs (sem LIMIT), 1 para
+ * a página atual (com LIMIT/OFFSET). JOIN inline traz nome_terc,
+ * cod_ref, cor, num_controle, desc_servico no mesmo round-trip.
+ *
+ * Query params:
+ *   - de (YYYY-MM-DD)        — data inicial (default: 30 dias atrás)
+ *   - ate (YYYY-MM-DD)       — data final (default: hoje)
+ *   - id_terc (int)          — filtra terceirizado
+ *   - search (string)        — busca em num_controle/cod_ref/cor/nome_terc
+ *   - status_pag             — 'pago' | 'pendente' | '' (todos)
+ *   - page (1-based, default 1)
+ *   - per_page (default 50, max 200)
+ *
+ * Retorna:
+ *   {
+ *     ok: true,
+ *     data: {
+ *       rows: [...],         // página atual (no máx per_page itens)
+ *       total: N,            // total geral filtrado (sem paginação)
+ *       page: N, per_page: N, total_pages: N,
+ *       kpis: {              // agregados do filtro inteiro (não da página)
+ *         qtd: N, boa: N, refugo: N, conserto: N, total: N,
+ *         valor_pago: N, valor_pago_pendente: N, valor_pago_quitado: N
+ *       }
+ *     }
+ *   }
+ * ================================================================= */
+app.get('/terc/retornos', async (c) => {
+  const q = c.req.query();
+
+  // ---- Sanitização de inputs
+  const today = new Date().toISOString().slice(0, 10);
+  const de  = q.de  || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const ate = q.ate || today;
+  const idTerc = toInt(q.id_terc || 0);
+  const search = (q.search || '').trim();
+  const statusPag = (q.status_pag || '').trim(); // 'pago' | 'pendente' | ''
+
+  let page = Math.max(1, toInt(q.page || 1));
+  let perPage = Math.max(1, Math.min(200, toInt(q.per_page || 50)));
+  const offset = (page - 1) * perPage;
+
+  // ---- Where dinâmico (compartilhado entre count/kpi e select)
+  const where: string[] = ['rt.dt_retorno >= ?', 'rt.dt_retorno <= ?'];
+  const binds: any[] = [de, ate];
+  if (idTerc) { where.push('r.id_terc = ?'); binds.push(idTerc); }
+  if (search) {
+    where.push('(r.num_controle LIKE ? OR r.cod_ref LIKE ? OR r.cor LIKE ? OR t.nome_terc LIKE ? OR r.num_op LIKE ?)');
+    const like = `%${search}%`;
+    binds.push(like, like, like, like, like);
+  }
+  if (statusPag === 'pago')     where.push('rt.dt_pagamento IS NOT NULL');
+  if (statusPag === 'pendente') where.push('rt.dt_pagamento IS NULL');
+  const whereSql = 'WHERE ' + where.join(' AND ');
+
+  // ---- 1) KPIs + total — agregação no banco (uma única query)
+  const kpiSql = `
+    SELECT
+      COUNT(*)                                                    AS qtd,
+      COALESCE(SUM(rt.qtd_boa), 0)                                AS boa,
+      COALESCE(SUM(rt.qtd_refugo), 0)                             AS refugo,
+      COALESCE(SUM(rt.qtd_conserto), 0)                           AS conserto,
+      COALESCE(SUM(rt.qtd_total), 0)                              AS total,
+      COALESCE(SUM(rt.valor_pago), 0)                             AS valor_pago,
+      COALESCE(SUM(CASE WHEN rt.dt_pagamento IS NULL     THEN rt.valor_pago ELSE 0 END), 0) AS valor_pendente,
+      COALESCE(SUM(CASE WHEN rt.dt_pagamento IS NOT NULL THEN rt.valor_pago ELSE 0 END), 0) AS valor_quitado
+    FROM terc_retornos rt
+    JOIN terc_remessas r       ON r.id_remessa = rt.id_remessa
+    LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc
+    ${whereSql}`;
+  const kpi = await c.env.DB.prepare(kpiSql).bind(...binds).first<any>() || {};
+  const totalGeral = Number(kpi.qtd) || 0;
+  const totalPages = Math.max(1, Math.ceil(totalGeral / perPage));
+  if (page > totalPages) page = totalPages;
+  const offset2 = (page - 1) * perPage;
+
+  // ---- 2) Página atual — JOIN único, sem N+1
+  const rowsSql = `
+    SELECT
+      rt.id_retorno, rt.id_remessa, rt.dt_retorno, rt.qtd_total,
+      rt.qtd_boa, rt.qtd_refugo, rt.qtd_conserto, rt.valor_pago,
+      rt.dt_pagamento, rt.observacao,
+      r.num_controle, r.cod_ref, r.cor, r.num_op,
+      t.nome_terc,
+      sv.desc_servico
+    FROM terc_retornos rt
+    JOIN terc_remessas r       ON r.id_remessa = rt.id_remessa
+    LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc
+    LEFT JOIN terc_servicos sv ON sv.id_servico = r.id_servico
+    ${whereSql}
+    ORDER BY rt.dt_retorno DESC, rt.id_retorno DESC
+    LIMIT ? OFFSET ?`;
+  const rs = await c.env.DB.prepare(rowsSql).bind(...binds, perPage, offset2).all();
+
+  return c.json(ok({
+    rows: rs.results || [],
+    total: totalGeral,
+    page,
+    per_page: perPage,
+    total_pages: totalPages,
+    kpis: {
+      qtd: totalGeral,
+      boa: Number(kpi.boa) || 0,
+      refugo: Number(kpi.refugo) || 0,
+      conserto: Number(kpi.conserto) || 0,
+      total: Number(kpi.total) || 0,
+      valor_pago: Number(kpi.valor_pago) || 0,
+      valor_pago_pendente: Number(kpi.valor_pendente) || 0,
+      valor_pago_quitado: Number(kpi.valor_quitado) || 0,
+    },
+    filtro: { de, ate, id_terc: idTerc || null, search: search || null, status_pag: statusPag || null }
+  }));
+});
+
+/* =================================================================
  * GET /terc/remessas/:id/retorno-context
  * Devolve a estrutura pronta para a tela "Registrar Retorno":
  *   - cabeçalho da remessa
