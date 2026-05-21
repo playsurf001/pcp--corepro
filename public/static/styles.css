@@ -5109,56 +5109,62 @@ textarea.field-invalid {
 }
 
 /* ==================================================================== */
-/* PAGE STICKY HEADER v23.1 — Filtros sticky SÓLIDOS (Remessas+Retornos)  */
-/* O sticky começa DEPOIS dos KPIs/resumo. Fundo opaco, sem blur, sem    */
-/* vazamento da tabela por trás. Visual ERP premium e legível.           */
+/* PAGE STICKY HEADER v23.2 — Container ÚNICO, sólido, sem vazamento.    */
+/* TUDO o que precisa ficar fixo (KPIs/contador + filtros + ações)       */
+/* vive aqui dentro. A tabela rola estritamente por baixo deste bloco.   */
+/* Regras críticas:                                                      */
+/*   • background opaco forçado (#0B1220 dark / #FFFFFF light)            */
+/*   • z-index 9999 — fica acima de qualquer linha da tabela             */
+/*   • isolation + contain: layout — stacking context próprio             */
+/*   • SEM backdrop-filter / blur / opacity / glass                       */
+/*   • box-shadow e border-bottom criam separação visual com a tabela    */
 /* ==================================================================== */
 
 .page-sticky-header {
   position: sticky;
   top: 0;
-  z-index: 1000;
-  padding: 14px 16px;
-  border: 1px solid var(--border-1);
-  border-radius: 12px;
-  /* 🔒 Fundo SÓLIDO — nada vaza por trás */
-  background: var(--surface-1);
-  /* isolation cria um stacking context novo, evitando bugs de z-index */
+  z-index: 9999;
+  width: 100%;
+  padding: 16px 20px;
+  border-radius: 0 0 16px 16px;
+  /* 🔒 Fundo SÓLIDO obrigatório — base (caso o atributo data-theme não esteja presente) */
+  background: #0B1220 !important;
+  color: var(--text-1);
+  /* Stacking context próprio + layout containment (evita "vazamento" visual) */
   isolation: isolate;
-  /* overflow hidden mantém bordas arredondadas mesmo com filhos overflow */
-  overflow: visible; /* visible para selects abrirem; mas backdrop opaco */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-  transition: box-shadow 0.2s ease, border-color 0.2s ease;
-  /* sem backdrop-filter — evita o efeito vidro/vazado */
+  contain: layout;
+  /* overflow hidden mantém o background totalmente opaco; os selects abrem
+     normalmente pois são renderizados pelo browser fora do fluxo do DOM. */
+  overflow: hidden;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  transition: all 0.2s ease;
+  /* sem backdrop-filter — evita efeito vidro/vazado */
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+  opacity: 1;
 }
-/* Tema escuro: fundo escuro padrão CorePro */
+/* Tema escuro (explícito) — mesmo fundo, só para garantir prioridade */
 [data-theme="dark"] .page-sticky-header,
 :root:not([data-theme]) .page-sticky-header {
-  background: #0B1220;
-  border-color: rgba(255, 255, 255, 0.06);
-  border-bottom-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  background: #0B1220 !important;
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
 }
+/* Tema claro — fundo branco sólido */
 [data-theme="light"] .page-sticky-header {
-  background: #ffffff;
-  border-color: #e2e8f0;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+  background: #FFFFFF !important;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.10);
+  color: #0f172a;
 }
-/* Sombra extra quando colado no topo + bordas ajustadas */
+/* Sombra extra discreta quando o usuário rola e o sticky cola */
 .page-sticky-header.is-stuck {
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-  border-radius: 0 0 12px 12px;
-  border-top-color: transparent;
-}
-[data-theme="dark"] .page-sticky-header.is-stuck,
-:root:not([data-theme]) .page-sticky-header.is-stuck {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.50);
 }
 [data-theme="light"] .page-sticky-header.is-stuck {
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
-  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
 }
 
 /* Labels uniformes */
@@ -5173,27 +5179,28 @@ textarea.field-invalid {
 }
 [data-theme="light"] .page-sticky-header label { color: #64748b; }
 
-/* Inputs/selects premium dentro de qualquer toolbar sticky */
+/* Inputs/selects premium dentro do sticky */
 .page-sticky-header input,
 .page-sticky-header select {
-  background: var(--surface-2);
-  border: 1px solid var(--border-1);
-  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #E5E7EB;
   border-radius: 9px;
   padding: 8px 10px;
   font-size: 0.875rem;
   width: 100%;
-  transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+  transition: all 0.2s ease;
 }
 .page-sticky-header input:hover,
 .page-sticky-header select:hover {
-  border-color: rgba(99, 102, 241, 0.45);
+  border-color: rgba(99, 102, 241, 0.55);
+  background: rgba(255, 255, 255, 0.06);
 }
 .page-sticky-header input:focus,
 .page-sticky-header select:focus {
   outline: none;
   border-color: var(--primary, #6366F1);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22);
 }
 [data-theme="light"] .page-sticky-header input,
 [data-theme="light"] .page-sticky-header select {
@@ -5202,20 +5209,50 @@ textarea.field-invalid {
   color: #0f172a;
 }
 
-/* ---- Layout flex (Remessas) ---- */
-.remessas-toolbar .page-sticky-row {
+/* Linhas verticais (KPIs → filtros → ações) */
+.remessas-toolbar .page-sticky-row,
+.retornos-toolbar .page-sticky-row {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
+
+/* ----- Linha 1 (Remessas): contador + ações principais ----- */
+.remessas-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.remessas-summary-row .flex-1 { flex: 1; min-width: 8px; }
+.remessas-summary-row .btn {
+  transition: all 0.2s ease;
+}
+.remessas-summary-row .btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 14px -6px rgba(99, 102, 241, 0.45);
+}
+.remessas-summary-row .btn:active:not(:disabled) { transform: translateY(0); }
+.remessas-summary-row .btn:disabled { opacity: 0.65; cursor: progress; }
+
+/* ----- Linha 1 (Retornos): cards de resumo (KPIs) ----- */
+.ret-kpis-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.ret-kpis-grid > .col-span-full { grid-column: 1 / -1; }
+
+/* ----- Linha 2: filtros ----- */
 .page-sticky-grid {
   display: grid;
-  /* Auto-fit: a busca ocupa 2x mais espaço, demais quebram conforme largura */
+  /* Auto-fit: a busca ocupa ~2x mais; demais quebram conforme largura */
   grid-template-columns: minmax(220px, 2.2fr) repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
   align-items: end;
 }
-/* Retornos tem 5 campos, Remessas tem 6 — ambos funcionam com auto-fit */
+
+/* ----- Linha 3: ações secundárias (Limpar / paginação / imprimir) ----- */
 .page-sticky-actions {
   display: flex;
   flex-wrap: wrap;
@@ -5239,27 +5276,28 @@ textarea.field-invalid {
 /* Counter pill */
 .rem-counter {
   font-size: 0.82rem;
-  color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border-1);
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   padding: 5px 11px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
 }
-.rem-counter b { color: var(--text-1); font-weight: 700; margin: 0 2px; }
-.rem-counter .counter-sep { color: var(--text-3); margin: 0 8px; }
+.rem-counter b { color: #fff; font-weight: 700; margin: 0 2px; }
+.rem-counter .counter-sep { color: rgba(255,255,255,0.30); margin: 0 8px; }
 [data-theme="light"] .rem-counter {
   background: #f8fafc;
   border-color: #e2e8f0;
   color: #475569;
 }
 [data-theme="light"] .rem-counter b { color: #0f172a; }
+[data-theme="light"] .rem-counter .counter-sep { color: #94a3b8; }
 
 /* Botões: feedback hover + animação leve */
 .page-sticky-header .btn {
-  transition: transform .12s ease, box-shadow .15s ease, background-color .15s ease, opacity .15s ease;
+  transition: all 0.2s ease;
 }
 .page-sticky-header .btn:hover:not(:disabled) {
   transform: translateY(-1px);
@@ -5271,37 +5309,23 @@ textarea.field-invalid {
 .page-sticky-header .btn span { vertical-align: middle; }
 
 /* ==================================================================== */
-/* REMESSAS PAGE v23 — Tabela premium + sticky thead                     */
+/* REMESSAS PAGE v23.2 — Tabela premium                                  */
 /* ==================================================================== */
 .remessas-page { width: 100%; }
 
-/* Resumo (rola normal, NÃO fica fixo) */
-.remessas-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-}
-.remessas-summary .flex-1 { flex: 1; min-width: 8px; }
-.remessas-summary .btn {
-  transition: transform .12s ease, box-shadow .15s ease;
-}
-.remessas-summary .btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 14px -6px rgba(99, 102, 241, 0.45);
-}
-.remessas-summary .btn:active:not(:disabled) { transform: translateY(0); }
-.remessas-summary .btn:disabled { opacity: 0.65; cursor: progress; }
+/* Compat: ainda mantemos .remessas-summary caso algum lugar use, mas
+   agora ela vive DENTRO do sticky (sem efeito visual extra). */
+.remessas-summary { display: none; }
 
 .remessas-table-wrap {
   background: var(--surface-1);
   border: 1px solid var(--border-1);
   border-radius: 12px;
   overflow: hidden;
-  /* Garante stacking abaixo do sticky filtros (sticky tem z-index 1000) */
   position: relative;
   z-index: 1;
+  /* 🆕 v23.2: empurra a tabela para baixo do sticky com folga elegante */
+  margin-top: 18px;
 }
 [data-theme="light"] .remessas-table-wrap {
   background: #fff;
@@ -5316,18 +5340,20 @@ textarea.field-invalid {
   width: 100%;
   min-width: 1100px;
 }
-/* Thead da tabela: como o scroll vertical é no #main-content (não no .table-scroll),
-   o thead sticky aqui funciona apenas para scroll horizontal. A "fixação" vertical
-   é resolvida pelo sticky de filtros + scroll-padding-top no #main-content. */
+/* Thead da tabela: como o scroll vertical é no #main-content, o thead sticky
+   só funciona para scroll horizontal. A "fixação" vertical é coberta pelo
+   .page-sticky-header (z-index 9999) + scroll-padding-top no #main-content. */
 .remessas-table thead {
   position: sticky;
   top: 0;
   z-index: 2;
   background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
 }
-/* Quando o usuário focar/rolar até uma linha, ela aparece abaixo do sticky filtros */
+/* Quando o usuário focar/rolar até uma linha, ela aparece abaixo do sticky filtros.
+   Como o sticky agora tem ~210px (Remessas) ou ~230px (Retornos), usamos um
+   valor seguro um pouco maior. */
 .remessas-row,
-.retornos-row { scroll-margin-top: 110px; }
+.retornos-row { scroll-margin-top: 240px; }
 .remessas-table thead th {
   padding: 10px 10px;
   font-size: 0.72rem;
@@ -5369,6 +5395,9 @@ textarea.field-invalid {
 }
 [data-theme="light"] .remessas-row:hover { background: #f8fafc; }
 
+/* Retornos table-wrap: mesma folga aplicada para a tabela e o pager */
+.retornos-table-wrap { margin-top: 18px; }
+
 /* Botões pequenos da tabela: hover discreto */
 .remessas-table .btn-sm,
 .retornos-table .btn-sm {
@@ -5378,7 +5407,7 @@ textarea.field-invalid {
 .retornos-table .btn-sm:hover { transform: translateY(-1px); }
 
 /* ==================================================================== */
-/* RESPONSIVO v23                                                        */
+/* RESPONSIVO v23.2                                                      */
 /* ==================================================================== */
 @media (max-width: 1280px) {
   .page-sticky-grid {
@@ -5388,9 +5417,10 @@ textarea.field-invalid {
   .page-sticky-grid .filter-cell-search {
     grid-column: 1 / -1;
   }
+  .ret-kpis-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 768px) {
-  .page-sticky-header { padding: 10px 12px; border-radius: 10px; }
+  .page-sticky-header { padding: 12px 14px; border-radius: 0 0 12px 12px; }
   .page-sticky-grid {
     grid-template-columns: 1fr 1fr;
     gap: 8px;
@@ -5403,25 +5433,29 @@ textarea.field-invalid {
     flex-wrap: wrap;
     gap: 6px;
   }
-  .page-sticky-actions .btn span { display: none; }   /* mostra só ícone */
+  .page-sticky-actions .btn span { display: none; }
   .page-sticky-actions .btn i { margin: 0 !important; }
-  .remessas-summary {
+  .remessas-summary-row {
     flex-wrap: wrap;
     gap: 8px;
   }
-  .remessas-summary .btn { flex: 1; min-width: 0; }
-  .remessas-summary .btn span { display: inline; }
+  .remessas-summary-row .btn { flex: 1; min-width: 0; }
+  .remessas-summary-row .btn span { display: inline; }
   .rem-counter { font-size: 0.78rem; padding: 5px 10px; flex: 1 1 100%; justify-content: center; }
+  .ret-kpis-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .remessas-table { min-width: 900px; font-size: 0.82rem; }
   .remessas-table thead th,
   .remessas-table tbody td { padding: 7px 8px; }
-  /* Em mobile o sticky precisa ainda menos espaço para a 1ª linha */
-  #main-content { scroll-padding-top: 72px; }
+  /* Em mobile o sticky encolhe, mas mantemos folga generosa para a 1ª linha */
+  .remessas-row,
+  .retornos-row { scroll-margin-top: 280px; }
+  #main-content { scroll-padding-top: 96px; }
 }
 @media (max-width: 480px) {
   .page-sticky-grid { grid-template-columns: 1fr; }
   .page-sticky-actions { justify-content: stretch; }
   .page-sticky-actions .btn { flex: 1; }
+  .ret-kpis-grid { grid-template-columns: 1fr; }
 }
 
 /* Garante que o sticky cole no topo do scroller (#main-content tem padding) */

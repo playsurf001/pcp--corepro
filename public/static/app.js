@@ -2081,24 +2081,27 @@ ROUTES.terc_remessas = async (main) => {
   };
 
   // ----- Shell (renderiza 1 vez; depois só a tabela é re-renderizada) -----
+  // v23.2: TODO o topo (contador + ações + filtros) vive dentro de UM sticky único.
+  // A tabela rola por baixo, sem vazamento visual.
   main.innerHTML = `
     <div class="remessas-page">
-      <!-- Resumo (rola normal, NÃO fica fixo) — counter + ações principais -->
-      <div class="remessas-summary mb-4">
-        <span id="rem-counter" class="rem-counter" aria-live="polite"></span>
-        <div class="flex-1"></div>
-        <button id="btn-romaneio-lote" class="btn btn-secondary"
-          title="Imprime um Romaneio de Serviço com todas as remessas filtradas">
-          <i class="fas fa-print mr-1"></i><span>Romaneio em Lote</span>
-        </button>
-        <button id="btn-nova" class="btn btn-success">
-          <i class="fas fa-plus mr-1"></i><span>Nova Remessa</span>
-        </button>
-      </div>
-
-      <!-- ⬇️ Sticky começa AQUI (após o resumo) -->
+      <!-- ⬇️ Sticky único — contador + ações + filtros -->
       <div class="page-sticky-header remessas-toolbar">
         <div class="page-sticky-row">
+          <!-- Linha 1: contador + ações principais (Romaneio + Nova) -->
+          <div class="remessas-summary-row">
+            <span id="rem-counter" class="rem-counter" aria-live="polite"></span>
+            <div class="flex-1"></div>
+            <button id="btn-romaneio-lote" class="btn btn-secondary"
+              title="Imprime um Romaneio de Serviço com todas as remessas filtradas">
+              <i class="fas fa-print mr-1"></i><span>Romaneio em Lote</span>
+            </button>
+            <button id="btn-nova" class="btn btn-success">
+              <i class="fas fa-plus mr-1"></i><span>Nova Remessa</span>
+            </button>
+          </div>
+
+          <!-- Linha 2: filtros -->
           <div class="page-sticky-grid">
             <div class="filter-cell filter-cell-search">
               <label>Buscar</label>
@@ -2141,6 +2144,7 @@ ROUTES.terc_remessas = async (main) => {
             </div>
           </div>
 
+          <!-- Linha 3: ações secundárias (Limpar) -->
           <div class="page-sticky-actions">
             <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros">
               <i class="fas fa-eraser mr-1"></i><span>Limpar</span>
@@ -2149,8 +2153,8 @@ ROUTES.terc_remessas = async (main) => {
         </div>
       </div>
 
-      <!-- Tabela -->
-      <div class="card p-0 remessas-table-wrap mt-4" id="rem-tbl"></div>
+      <!-- Tabela (rola por baixo do sticky) -->
+      <div class="card p-0 remessas-table-wrap" id="rem-tbl"></div>
     </div>
   `;
 
@@ -4909,15 +4913,17 @@ ROUTES.terc_retornos = async (main) => {
   };
 
   // ----- Render shell (1 vez) -----
+  // v23.2: KPIs + filtros + paginação TUDO dentro do MESMO sticky único.
+  // Nada rola "acima" do sticky — a tabela começa abaixo dele de forma sólida.
   main.innerHTML = `
     <div class="retornos-page">
-      <!-- KPIs (rolam normalmente, NÃO ficam fixos) -->
-      <div id="ret-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
-
-      <!-- ⬇️ A partir daqui começa o sticky: filtros + paginação + tabela -->
-      <!-- Toolbar de filtros (sticky começa após os KPIs) -->
+      <!-- ⬇️ Sticky único — contém KPIs + filtros + paginação/impressão -->
       <div class="page-sticky-header retornos-toolbar">
         <div class="page-sticky-row">
+          <!-- Linha 1: cards de resumo (KPIs) -->
+          <div id="ret-kpis" class="ret-kpis-grid"></div>
+
+          <!-- Linha 2: filtros -->
           <div class="page-sticky-grid">
             <div class="filter-cell filter-cell-search">
               <label>Buscar</label>
@@ -4947,6 +4953,8 @@ ROUTES.terc_retornos = async (main) => {
               </select>
             </div>
           </div>
+
+          <!-- Linha 3: ações + paginação + impressão -->
           <div class="page-sticky-actions">
             <button id="btn-refresh" class="btn btn-secondary btn-sm" title="Atualizar"><i class="fas fa-rotate"></i></button>
             <button id="btn-clear"   class="btn btn-secondary btn-sm" title="Limpar filtros"><i class="fas fa-eraser mr-1"></i><span>Limpar</span></button>
@@ -4964,7 +4972,7 @@ ROUTES.terc_retornos = async (main) => {
       </div>
 
       <!-- Tabela (rola por baixo do sticky) -->
-      <div class="card p-0 retornos-table-wrap mt-4" id="ret-tbl"></div>
+      <div class="card p-0 retornos-table-wrap" id="ret-tbl"></div>
 
       <!-- Paginação -->
       <div id="ret-pager" class="retornos-pager"></div>
