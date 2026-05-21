@@ -12,6 +12,22 @@ export function getUser(c: Context): string {
 }
 
 /**
+ * Pega o id_empresa (tenant) do contexto autenticado.
+ * Fallback = 1 (empresa default "CorePro Confecção") para garantir
+ * compatibilidade retroativa: qualquer chamada que não tenha contexto
+ * válido cai na empresa default e não quebra o sistema.
+ *
+ * Uso padrão em rotas:
+ *   const id_empresa = getEmpresa(c);
+ *   // ... usar em WHERE e INSERT
+ */
+export function getEmpresa(c: Context): number {
+  const v = c.get('id_empresa') as any;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/**
  * Registra auditoria.
  * @param dbOrCtx — pode ser um D1Database (passa usuário como último arg)
  *                  OU um Context do Hono (usuário é extraído de c.get('user'))

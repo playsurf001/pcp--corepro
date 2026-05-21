@@ -54,7 +54,7 @@ export async function validarSessao(db: D1Database, token: string) {
     .prepare(
       `SELECT s.token, s.dt_expira,
               u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
-              u.email, u.avatar_data, u.avatar_mime
+              u.email, u.avatar_data, u.avatar_mime, u.id_empresa
        FROM sessoes s
        JOIN usuarios u ON u.id_usuario = s.id_usuario
        WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
@@ -113,6 +113,10 @@ export async function authMiddleware(c: Context<{ Bindings: Bindings }>, next: N
   }
   // Injeta usuário no contexto para as rotas usarem
   c.set('user', sess);
+  // Injeta id_empresa (tenant) com fallback=1 — garante compatibilidade
+  // com qualquer usuário legado e com a empresa default "CorePro Confecção".
+  // Toda query tenant-scoped DEVE usar c.get('id_empresa') no WHERE/INSERT.
+  c.set('id_empresa', (sess as any).id_empresa || 1);
   return next();
 }
 

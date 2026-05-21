@@ -1414,6 +1414,7 @@ async function lookupPrecoHier(
  * O cabeçalho terc_remessas guarda os totais agregados (compatibilidade com telas antigas).
  * ================================================================= */
 app.post('/terc/remessas', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
   if (!b.id_terc) return fail('Terceirizado é obrigatório');
 
@@ -1499,8 +1500,10 @@ app.post('/terc/remessas', async (c) => {
     diasFinal = rPrev.dias; dt_prev = rPrev.dt_prev;
   }
 
-  // ---- Número de controle ----
-  const nextN = await c.env.DB.prepare('SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas').first<any>();
+  // ---- Número de controle (escopado por empresa) ----
+  const nextN = await c.env.DB.prepare(
+    'SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas WHERE id_empresa=?'
+  ).bind(id_empresa).first<any>();
   const num_controle = toInt(b.num_controle) || nextN?.n || 1;
 
   // ---- Cabeçalho: usa o 1º item como "principal" para compat. com tela legada ----
@@ -1513,14 +1516,14 @@ app.post('/terc/remessas', async (c) => {
       (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
        qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
        prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
-       status, status_fin, modo, observacao, criado_por)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       status, status_fin, modo, observacao, criado_por, id_empresa)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
       head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
       totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
       diasFinal, tempoMaxItem, efic, pess, min_dia,
-      status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c)).run();
+      status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa).run();
 
   const idR = r.meta.last_row_id as number;
 
@@ -1535,18 +1538,18 @@ app.post('/terc/remessas', async (c) => {
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, id_cor, grade_num,
-         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho, num_op)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
+         qtd_total, preco_unit, valor_total, tempo_peca, observacao, ordem, ativo, id_grade_tamanho, num_op, id_empresa)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
       .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, itIdCor, toInt(it.grade_num, 1),
         it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
-        toInt(it.id_grade_tamanho) || null, itemNumOp).run();
+        toInt(it.id_grade_tamanho) || null, itemNumOp, id_empresa).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
       if (toInt(g.qtd) > 0) {
         await c.env.DB.prepare(
-          'INSERT INTO terc_remessa_item_grade (id_item, tamanho, qtd) VALUES (?, ?, ?)'
-        ).bind(idItem, g.tamanho, toInt(g.qtd)).run();
+          'INSERT INTO terc_remessa_item_grade (id_item, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
+        ).bind(idItem, g.tamanho, toInt(g.qtd), id_empresa).run();
       }
     }
   }
@@ -1556,14 +1559,14 @@ app.post('/terc/remessas', async (c) => {
   for (const g of head._grade) {
     if (toInt(g.qtd) > 0) {
       await c.env.DB.prepare(
-        'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd) VALUES (?, ?, ?)'
-      ).bind(idR, g.tamanho, toInt(g.qtd)).run();
+        'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
+      ).bind(idR, g.tamanho, toInt(g.qtd), id_empresa).run();
     }
   }
 
   // Evento + auditoria
-  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, 'CRIADA', ?, ?)`)
-    .bind(idR, `Remessa ${num_controle} criada — ${itensValidos.length} item(ns), ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c)).run();
+  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, 'CRIADA', ?, ?, ?)`)
+    .bind(idR, `Remessa ${num_controle} criada — ${itensValidos.length} item(ns), ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c), id_empresa).run();
   await audit(c, MOD, 'INS_REM', `remessa:${idR}`, 'num_controle', '', String(num_controle));
 
   return c.json(ok({
@@ -2050,6 +2053,7 @@ app.get('/terc/remessas/:id/retorno-context', async (c) => {
  *         grade: [...] } — converte automaticamente para 1 item (o 1º da remessa).
  * ================================================================= */
 app.post('/terc/retornos', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
   if (!b.id_remessa || !b.dt_retorno) return fail('id_remessa e dt_retorno são obrigatórios');
   const idRem = toInt(b.id_remessa);
@@ -2135,10 +2139,10 @@ app.post('/terc/retornos', async (c) => {
   // ---- INSERT cabeçalho ----
   const r = await c.env.DB.prepare(`
     INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
-                               valor_pago, dt_pagamento, observacao, criado_por)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                               valor_pago, dt_pagamento, observacao, criado_por, id_empresa)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(idRem, b.dt_retorno, totQtd, totBoa, totRef, totCon,
-      totValor, b.dt_pagamento || null, b.observacao || null, getUser(c)).run();
+      totValor, b.dt_pagamento || null, b.observacao || null, getUser(c), id_empresa).run();
   const idRet = r.meta.last_row_id as number;
 
   // ---- INSERT por item retornado + grade do item ----
@@ -2148,18 +2152,18 @@ app.post('/terc/retornos', async (c) => {
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_retorno_itens
         (id_retorno, id_item, id_remessa, cod_ref, desc_ref, cor, id_cor, id_servico,
-         qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         qtd_boa, qtd_refugo, qtd_conserto, qtd_total, preco_unit, valor, observacao, id_empresa)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(idRet, x.idItem, idRem,
         x.it.cod_ref, x.it.desc_ref, x.it.cor, itIdCor, x.it.id_servico,
-        x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao).run();
+        x.qtdBoa, x.qtdRef, x.qtdCon, x.qtdTot, x.preco, x.valor, x.observacao, id_empresa).run();
     const idRi = ri.meta.last_row_id as number;
     for (const g of x.grade) {
       const q = toInt(g.qtd);
       if (q > 0) {
         await c.env.DB.prepare(
-          'INSERT INTO terc_retorno_item_grade (id_ret_item, tamanho, qtd) VALUES (?, ?, ?)'
-        ).bind(idRi, g.tamanho, q).run();
+          'INSERT INTO terc_retorno_item_grade (id_ret_item, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
+        ).bind(idRi, g.tamanho, q, id_empresa).run();
         gradeAgreg[g.tamanho] = (gradeAgreg[g.tamanho] || 0) + q;
       }
     }
@@ -2168,8 +2172,8 @@ app.post('/terc/retornos', async (c) => {
   // ---- Compat. legada: replica grade agregada em terc_retorno_grade ----
   for (const [tam, q] of Object.entries(gradeAgreg)) {
     if (q > 0) {
-      await c.env.DB.prepare('INSERT INTO terc_retorno_grade (id_retorno, tamanho, qtd) VALUES (?, ?, ?)')
-        .bind(idRet, tam, q).run();
+      await c.env.DB.prepare('INSERT INTO terc_retorno_grade (id_retorno, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)')
+        .bind(idRet, tam, q, id_empresa).run();
     }
   }
 
@@ -2185,11 +2189,11 @@ app.post('/terc/retornos', async (c) => {
   await c.env.DB.prepare(`UPDATE terc_remessas SET status=?, status_fin=?, dt_recebimento=COALESCE(dt_recebimento, ?) WHERE id_remessa=?`)
     .bind(novoStatus, novoStatusFin, completo ? b.dt_retorno : null, idRem).run();
 
-  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario) VALUES (?, ?, ?, ?)`)
+  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, ?, ?, ?, ?)`)
     .bind(idRem,
       completo ? 'RETORNO_TOTAL' : 'RETORNO_PARCIAL',
       `Retorno ${totQtd} pç em ${itensValid.length} item(ns) (boa: ${totBoa}, refugo: ${totRef}, conserto: ${totCon}) — R$ ${totValor.toFixed(2)}`,
-      getUser(c)).run();
+      getUser(c), id_empresa).run();
 
   await audit(c, MOD, 'INS_RET', `retorno:${idRet}`, 'qtd_total', '', String(totQtd));
   return c.json(ok({

@@ -103,6 +103,11 @@ app.get('/auth/me', async (c) => {
   if (!tok) return c.json(ok(null));
   const sess = await validarSessao(c.env.DB, tok);
   if (!sess) return c.json(ok(null));
+  // Multi-tenant: anexa info b\u00e1sica da empresa do usu\u00e1rio (fallback id_empresa=1)
+  const id_empresa = (sess as any).id_empresa || 1;
+  const emp = await c.env.DB.prepare(
+    `SELECT id_empresa, nome, slug, plano, status FROM companies WHERE id_empresa=?`
+  ).bind(id_empresa).first<any>().catch(() => null);
   return c.json(
     ok({
       id_usuario: sess.id_usuario,
@@ -113,6 +118,8 @@ app.get('/auth/me', async (c) => {
       avatar_data: sess.avatar_data || null,
       avatar_mime: sess.avatar_mime || null,
       trocar_senha: !!sess.trocar_senha,
+      id_empresa: id_empresa,
+      empresa: emp || { id_empresa: 1, nome: 'CorePro Confec\u00e7\u00e3o', plano: 'enterprise', status: 'ativa' },
     })
   );
 });
@@ -278,16 +285,20 @@ app.post('/auth/trocar-senha', async (c) => {
 });
 
 /* ========= CRUD DE USUÁRIOS (admin) ========= */
+// Multi-tenant: admin só enxerga / edita usuários da própria empresa.
+// Fallback id_empresa=1 garante compat com dados legados.
 app.get('/usuarios', requirePerfil('admin'), async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const rs = await c.env.DB.prepare(
     `SELECT id_usuario, login, nome, perfil, ativo, trocar_senha, ultimo_login, dt_criacao
-     FROM usuarios ORDER BY login`
-  ).all();
+     FROM usuarios WHERE id_empresa = ? ORDER BY login`
+  ).bind(id_empresa).all();
   return c.json(ok(rs.results));
 });
 
 app.post('/usuarios', requirePerfil('admin'), async (c) => {
   const user = c.get('user') as any;
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json<any>();
   if (!b.login || !b.nome || !b.senha) return fail('Login, nome e senha obrigatórios.');
   if (b.senha.length < 6) return fail('Senha deve ter >= 6 caracteres.');
@@ -295,8 +306,8 @@ app.post('/usuarios', requirePerfil('admin'), async (c) => {
   const hash = await hashSenha(salt, b.senha);
   try {
     const r = await c.env.DB.prepare(
-      `INSERT INTO usuarios (login, nome, senha_hash, senha_salt, perfil, ativo, trocar_senha, criado_por)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO usuarios (login, nome, senha_hash, senha_salt, perfil, ativo, trocar_senha, criado_por, id_empresa)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       b.login.trim(),
       b.nome,
@@ -305,7 +316,8 @@ app.post('/usuarios', requirePerfil('admin'), async (c) => {
       b.perfil || 'operador',
       b.ativo ?? 1,
       b.trocar_senha ?? 1,
-      user.login
+      user.login,
+      id_empresa
     ).run();
     await audit(c.env.DB, 'AUTH', 'INS_USR', b.login, '', '', b.perfil || 'operador', user.login);
     return c.json(ok({ id_usuario: r.meta.last_row_id }));
@@ -316,19 +328,21 @@ app.post('/usuarios', requirePerfil('admin'), async (c) => {
 
 app.put('/usuarios/:id', requirePerfil('admin'), async (c) => {
   const user = c.get('user') as any;
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const id = toInt(c.req.param('id'));
   const b = await c.req.json<any>();
+  // Garante isolamento: só atualiza se o usuário pertencer à mesma empresa do admin
   await c.env.DB.prepare(
-    `UPDATE usuarios SET nome=?, perfil=?, ativo=? WHERE id_usuario=?`
-  ).bind(b.nome, b.perfil, b.ativo ?? 1, id).run();
+    `UPDATE usuarios SET nome=?, perfil=?, ativo=? WHERE id_usuario=? AND id_empresa=?`
+  ).bind(b.nome, b.perfil, b.ativo ?? 1, id, id_empresa).run();
   // Se enviou nova senha, troca
   if (b.senha) {
     if (b.senha.length < 6) return fail('Senha deve ter >= 6 caracteres.');
     const salt = randomHex(16);
     const hash = await hashSenha(salt, b.senha);
     await c.env.DB.prepare(
-      `UPDATE usuarios SET senha_hash=?, senha_salt=?, trocar_senha=? WHERE id_usuario=?`
-    ).bind(hash, salt, b.trocar_senha ?? 1, id).run();
+      `UPDATE usuarios SET senha_hash=?, senha_salt=?, trocar_senha=? WHERE id_usuario=? AND id_empresa=?`
+    ).bind(hash, salt, b.trocar_senha ?? 1, id, id_empresa).run();
   }
   await audit(c.env.DB, 'AUTH', 'UPD_USR', `usr=${id}`, '', '', b.perfil || '', user.login);
   return c.json(ok({ id_usuario: id }));
@@ -336,9 +350,11 @@ app.put('/usuarios/:id', requirePerfil('admin'), async (c) => {
 
 app.delete('/usuarios/:id', requirePerfil('admin'), async (c) => {
   const user = c.get('user') as any;
+  const id_empresa = (c.get('id_empresa') as number) || 1;
   const id = toInt(c.req.param('id'));
   if (id === user.id_usuario) return fail('Não pode desativar a si mesmo.');
-  await c.env.DB.prepare(`UPDATE usuarios SET ativo=0 WHERE id_usuario=?`).bind(id).run();
+  // Só desativa se for da mesma empresa do admin
+  await c.env.DB.prepare(`UPDATE usuarios SET ativo=0 WHERE id_usuario=? AND id_empresa=?`).bind(id, id_empresa).run();
   // Invalida sessões
   await c.env.DB.prepare(`DELETE FROM sessoes WHERE id_usuario=?`).bind(id).run();
   await audit(c.env.DB, 'AUTH', 'DEL_USR', `usr=${id}`, '', '', '', user.login);
