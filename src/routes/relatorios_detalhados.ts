@@ -1,10 +1,11 @@
 // Módulo de Relatórios Detalhados — Terceirização (CorePro)
 // Endpoints agregadores otimizados para dashboards e relatórios analíticos
+// [SPRINT 1] Multi-tenant: todas as queries filtram por id_empresa
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail } from '../lib/db';
+import { ok, fail, getEmpresa } from '../lib/db';
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
 
 /* ============================================================
  * Helpers
@@ -16,10 +17,18 @@ function periodo(q: any) {
   return { ini, fim };
 }
 
-function buildWhere(q: any, prefix = '') {
+/**
+ * Constrói cláusula WHERE adicional para filtros opcionais.
+ * SEMPRE injeta `${prefix}.id_empresa = ?` como primeiro filtro para
+ * garantir isolamento multi-tenant em 100% das queries.
+ */
+function buildWhere(q: any, prefix: string, id_empresa: number) {
   const where: string[] = [];
   const binds: any[] = [];
   const p = prefix ? prefix + '.' : '';
+  // Tenant scoping obrigatório
+  where.push(`${p}id_empresa = ?`);
+  binds.push(id_empresa);
   if (q.id_terc)    { where.push(`${p}id_terc = ?`);    binds.push(Number(q.id_terc)); }
   if (q.id_servico) { where.push(`${p}id_servico = ?`); binds.push(Number(q.id_servico)); }
   if (q.id_colecao) { where.push(`${p}id_colecao = ?`); binds.push(Number(q.id_colecao)); }
@@ -27,7 +36,7 @@ function buildWhere(q: any, prefix = '') {
   if (q.cod_ref)    { where.push(`${p}cod_ref LIKE ?`); binds.push('%' + q.cod_ref + '%'); }
   if (q.num_op)     { where.push(`${p}num_op LIKE ?`);  binds.push('%' + q.num_op + '%'); }
   if (q.status)     { where.push(`${p}status = ?`);     binds.push(q.status); }
-  return { where: where.length ? ' AND ' + where.join(' AND ') : '', binds };
+  return { where: ' AND ' + where.join(' AND '), binds };
 }
 
 /* ============================================================
@@ -35,9 +44,10 @@ function buildWhere(q: any, prefix = '') {
  * ============================================================ */
 app.get('/relatorios-det/dashboard', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
 
     // KPIs principais (remessas no período)
     const kpiRem: any = await c.env.DB.prepare(
@@ -52,7 +62,7 @@ app.get('/relatorios-det/dashboard', async (c) => {
        WHERE r.dt_saida BETWEEN ? AND ? ${f.where}`
     ).bind(ini, fim, ...f.binds).first();
 
-    // KPIs de retornos
+    // KPIs de retornos (filtro via JOIN com r.id_empresa)
     const kpiRet: any = await c.env.DB.prepare(
       `SELECT
         COUNT(*)                            AS qtd_retornos,
@@ -120,7 +130,7 @@ app.get('/relatorios-det/dashboard', async (c) => {
        GROUP BY rt.dt_retorno ORDER BY rt.dt_retorno`
     ).bind(ini, fim, ...f.binds).all();
 
-    // Retorno mensal (últimos 12 meses)
+    // Retorno mensal (últimos 12 meses) — filtrado por id_empresa via JOIN com r
     const retMensal = await c.env.DB.prepare(
       `SELECT substr(rt.dt_retorno,1,7) AS mes,
               COALESCE(SUM(rt.qtd_boa),0)    AS boa,
@@ -128,9 +138,9 @@ app.get('/relatorios-det/dashboard', async (c) => {
               COALESCE(SUM(rt.valor_pago),0) AS valor
        FROM terc_retornos rt
        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
-       WHERE rt.dt_retorno >= date('now','-12 months')
+       WHERE rt.dt_retorno >= date('now','-12 months') AND r.id_empresa = ?
        GROUP BY substr(rt.dt_retorno,1,7) ORDER BY mes`
-    ).all();
+    ).bind(id_empresa).all();
 
     return c.json(ok({
       periodo: { ini, fim },
@@ -156,7 +166,7 @@ app.get('/relatorios-det/dashboard', async (c) => {
       },
     }));
   } catch (e: any) {
-    return c.json(fail('Erro no dashboard analítico: ' + (e?.message || e)), 500);
+    return fail('Erro no dashboard analítico: ' + (e?.message || e), 500);
   }
 });
 
@@ -165,9 +175,10 @@ app.get('/relatorios-det/dashboard', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/remessas', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.desc_ref, r.cor,
               r.qtd_total, r.preco_unit, r.valor_total, r.valor_pago,
@@ -182,7 +193,7 @@ app.get('/relatorios-det/remessas', async (c) => {
     ).bind(ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro relatório remessas: ' + (e?.message || e)), 500);
+    return fail('Erro relatório remessas: ' + (e?.message || e), 500);
   }
 });
 
@@ -191,9 +202,10 @@ app.get('/relatorios-det/remessas', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/retornos', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT rt.id_retorno, rt.dt_retorno, rt.qtd_boa, rt.qtd_refugo, rt.qtd_conserto,
               rt.qtd_total, rt.valor_pago, rt.observacao,
@@ -210,7 +222,7 @@ app.get('/relatorios-det/retornos', async (c) => {
     ).bind(ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro relatório retornos: ' + (e?.message || e)), 500);
+    return fail('Erro relatório retornos: ' + (e?.message || e), 500);
   }
 });
 
@@ -219,9 +231,10 @@ app.get('/relatorios-det/retornos', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/financeiro', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
 
     const totais: any = await c.env.DB.prepare(
       `SELECT
@@ -286,15 +299,17 @@ app.get('/relatorios-det/financeiro', async (c) => {
       por_periodo:   porPeriodo.results || [],
     }));
   } catch (e: any) {
-    return c.json(fail('Erro relatório financeiro: ' + (e?.message || e)), 500);
+    return fail('Erro relatório financeiro: ' + (e?.message || e), 500);
   }
 });
 
 /* ============================================================
  * 5) RELATÓRIO POR TERCEIRIZADO (com ranking)
+ * Inicia FROM terc_terceirizados → filtro explícito t.id_empresa
  * ============================================================ */
 app.get('/relatorios-det/por-terceirizado', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -308,23 +323,26 @@ app.get('/relatorios-det/por-terceirizado', async (c) => {
               COALESCE(AVG(r.efic_pct),0)         AS efic_media,
               COUNT(DISTINCT r.id_remessa)        AS qtd_remessas
        FROM terc_terceirizados t
-       LEFT JOIN terc_remessas r ON r.id_terc = t.id_terc AND r.dt_saida BETWEEN ? AND ?
+       LEFT JOIN terc_remessas r ON r.id_terc = t.id_terc AND r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
+       WHERE t.id_empresa = ?
        GROUP BY t.id_terc
        HAVING qtd_remessas > 0
        ORDER BY total_recebido DESC`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro por terceirizado: ' + (e?.message || e)), 500);
+    return fail('Erro por terceirizado: ' + (e?.message || e), 500);
   }
 });
 
 /* ============================================================
  * 6) RELATÓRIO POR SERVIÇO
+ * Inicia FROM terc_servicos → filtro explícito s.id_empresa
  * ============================================================ */
 app.get('/relatorios-det/por-servico', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -336,15 +354,16 @@ app.get('/relatorios-det/por-servico', async (c) => {
               COALESCE(SUM(r.valor_pago),0)       AS valor_pago,
               COALESCE(AVG(r.tempo_peca),0)       AS tempo_medio
        FROM terc_servicos s
-       LEFT JOIN terc_remessas r ON r.id_servico = s.id_servico AND r.dt_saida BETWEEN ? AND ?
+       LEFT JOIN terc_remessas r ON r.id_servico = s.id_servico AND r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
+       WHERE s.id_empresa = ?
        GROUP BY s.id_servico
        HAVING qtd_remessas > 0
        ORDER BY qtd_total DESC`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro por serviço: ' + (e?.message || e)), 500);
+    return fail('Erro por serviço: ' + (e?.message || e), 500);
   }
 });
 
@@ -353,6 +372,7 @@ app.get('/relatorios-det/por-servico', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/por-produto', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -367,13 +387,13 @@ app.get('/relatorios-det/por-produto', async (c) => {
               COALESCE(SUM(r.valor_pago),0)       AS valor_pago
        FROM terc_remessas r
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
-       WHERE r.dt_saida BETWEEN ? AND ?
+       WHERE r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        GROUP BY r.cod_ref
        ORDER BY total_enviado DESC LIMIT 200`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro por produto: ' + (e?.message || e)), 500);
+    return fail('Erro por produto: ' + (e?.message || e), 500);
   }
 });
 
@@ -382,6 +402,7 @@ app.get('/relatorios-det/por-produto', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/por-cor', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -393,13 +414,13 @@ app.get('/relatorios-det/por-cor', async (c) => {
               COALESCE(SUM(r.valor_total),0)  AS custo
        FROM terc_remessas r
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
-       WHERE r.dt_saida BETWEEN ? AND ?
+       WHERE r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        GROUP BY UPPER(TRIM(r.cor))
        ORDER BY qtd_enviada DESC`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro por cor: ' + (e?.message || e)), 500);
+    return fail('Erro por cor: ' + (e?.message || e), 500);
   }
 });
 
@@ -408,6 +429,7 @@ app.get('/relatorios-det/por-cor', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/por-op', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -421,13 +443,13 @@ app.get('/relatorios-det/por-op', async (c) => {
               MIN(r.dt_saida) AS dt_inicio, MAX(COALESCE(rt.dt_retorno,r.dt_previsao)) AS dt_fim
        FROM terc_remessas r
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
-       WHERE r.dt_saida BETWEEN ? AND ?
+       WHERE r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        GROUP BY r.num_op
        ORDER BY dt_inicio DESC`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro por OP: ' + (e?.message || e)), 500);
+    return fail('Erro por OP: ' + (e?.message || e), 500);
   }
 });
 
@@ -436,9 +458,10 @@ app.get('/relatorios-det/por-op', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/faltas', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT rt.dt_retorno, rt.qtd_refugo AS qtd, rt.observacao,
               r.cod_ref, r.desc_ref, r.cor, r.num_op, r.num_controle,
@@ -452,7 +475,7 @@ app.get('/relatorios-det/faltas', async (c) => {
     ).bind(ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro faltas: ' + (e?.message || e)), 500);
+    return fail('Erro faltas: ' + (e?.message || e), 500);
   }
 });
 
@@ -461,9 +484,10 @@ app.get('/relatorios-det/faltas', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/conserto', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT rt.dt_retorno, rt.qtd_conserto AS qtd, rt.observacao,
               r.cod_ref, r.desc_ref, r.cor, r.num_op, r.num_controle,
@@ -478,7 +502,7 @@ app.get('/relatorios-det/conserto', async (c) => {
     ).bind(ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro conserto: ' + (e?.message || e)), 500);
+    return fail('Erro conserto: ' + (e?.message || e), 500);
   }
 });
 
@@ -487,9 +511,10 @@ app.get('/relatorios-det/conserto', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/producao', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT rt.dt_retorno AS dt,
               COUNT(DISTINCT r.id_remessa)      AS qtd_remessas,
@@ -504,15 +529,17 @@ app.get('/relatorios-det/producao', async (c) => {
     ).bind(ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro produção: ' + (e?.message || e)), 500);
+    return fail('Erro produção: ' + (e?.message || e), 500);
   }
 });
 
 /* ============================================================
  * 13) RANKING DE TERCEIRIZADOS (mais produtivos)
+ * Inicia FROM terc_terceirizados → filtro explícito t.id_empresa
  * ============================================================ */
 app.get('/relatorios-det/ranking', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
     const rows = await c.env.DB.prepare(
@@ -527,15 +554,16 @@ app.get('/relatorios-det/ranking', async (c) => {
                         / (COALESCE(SUM(rt.qtd_boa),0) + COALESCE(SUM(rt.qtd_refugo),0))
                    ELSE 0 END AS taxa_falta
        FROM terc_terceirizados t
-       LEFT JOIN terc_remessas r ON r.id_terc = t.id_terc AND r.dt_saida BETWEEN ? AND ?
+       LEFT JOIN terc_remessas r ON r.id_terc = t.id_terc AND r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
        LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
+       WHERE t.id_empresa = ?
        GROUP BY t.id_terc
        HAVING qtd_remessas > 0
        ORDER BY qtd_produzida DESC`
-    ).bind(ini, fim).all();
+    ).bind(ini, fim, id_empresa, id_empresa).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro ranking: ' + (e?.message || e)), 500);
+    return fail('Erro ranking: ' + (e?.message || e), 500);
   }
 });
 
@@ -544,9 +572,10 @@ app.get('/relatorios-det/ranking', async (c) => {
  * ============================================================ */
 app.get('/relatorios-det/historico', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const q = c.req.query();
     const { ini, fim } = periodo(q);
-    const f = buildWhere(q, 'r');
+    const f = buildWhere(q, 'r', id_empresa);
     const rows = await c.env.DB.prepare(
       `SELECT 'REMESSA' AS tipo, r.dt_saida AS dt, r.num_controle AS num,
               r.cod_ref, r.cor, r.qtd_total AS qtd, r.valor_total AS valor,
@@ -566,21 +595,23 @@ app.get('/relatorios-det/historico', async (c) => {
     ).bind(ini, fim, ...f.binds, ini, fim, ...f.binds).all();
     return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
   } catch (e: any) {
-    return c.json(fail('Erro histórico: ' + (e?.message || e)), 500);
+    return fail('Erro histórico: ' + (e?.message || e), 500);
   }
 });
 
 /* ============================================================
  * 15) FILTROS — listas auxiliares para selects
+ * Todas as listas filtradas por id_empresa
  * ============================================================ */
 app.get('/relatorios-det/filtros', async (c) => {
   try {
+    const id_empresa = getEmpresa(c);
     const [tercs, servs, cols, cores, ops] = await Promise.all([
-      c.env.DB.prepare(`SELECT id_terc AS id, nome_terc AS nome FROM terc_terceirizados WHERE ativo=1 ORDER BY nome_terc`).all(),
-      c.env.DB.prepare(`SELECT id_servico AS id, desc_servico AS nome FROM terc_servicos WHERE ativo=1 ORDER BY desc_servico`).all(),
-      c.env.DB.prepare(`SELECT id_colecao AS id, nome_colecao AS nome FROM terc_colecoes WHERE ativo=1 ORDER BY nome_colecao`).all(),
-      c.env.DB.prepare(`SELECT DISTINCT cor FROM terc_remessas WHERE cor IS NOT NULL AND TRIM(cor)<>'' ORDER BY cor`).all(),
-      c.env.DB.prepare(`SELECT DISTINCT num_op FROM terc_remessas WHERE num_op IS NOT NULL AND TRIM(num_op)<>'' ORDER BY num_op DESC LIMIT 200`).all(),
+      c.env.DB.prepare(`SELECT id_terc AS id, nome_terc AS nome FROM terc_terceirizados WHERE ativo=1 AND id_empresa=? ORDER BY nome_terc`).bind(id_empresa).all(),
+      c.env.DB.prepare(`SELECT id_servico AS id, desc_servico AS nome FROM terc_servicos WHERE ativo=1 AND id_empresa=? ORDER BY desc_servico`).bind(id_empresa).all(),
+      c.env.DB.prepare(`SELECT id_colecao AS id, nome_colecao AS nome FROM terc_colecoes WHERE ativo=1 AND id_empresa=? ORDER BY nome_colecao`).bind(id_empresa).all(),
+      c.env.DB.prepare(`SELECT DISTINCT cor FROM terc_remessas WHERE cor IS NOT NULL AND TRIM(cor)<>'' AND id_empresa=? ORDER BY cor`).bind(id_empresa).all(),
+      c.env.DB.prepare(`SELECT DISTINCT num_op FROM terc_remessas WHERE num_op IS NOT NULL AND TRIM(num_op)<>'' AND id_empresa=? ORDER BY num_op DESC LIMIT 200`).bind(id_empresa).all(),
     ]);
     return c.json(ok({
       terceirizados: tercs.results || [],
@@ -591,7 +622,7 @@ app.get('/relatorios-det/filtros', async (c) => {
       status: ['AguardandoEnvio','Enviado','EmProducao','Atrasado','Concluido','Retornado','Pago','Cancelado','Parcial'],
     }));
   } catch (e: any) {
-    return c.json(fail('Erro filtros: ' + (e?.message || e)), 500);
+    return fail('Erro filtros: ' + (e?.message || e), 500);
   }
 });
 

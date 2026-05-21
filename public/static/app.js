@@ -7837,6 +7837,25 @@ function bootApp() {
     if (logoutMsg) sessionStorage.removeItem('_logout_msg');
   } catch {}
 
+  // === ÁREA MASTER (Super Admin SaaS) ===
+  // Roteia para /static/master.js quando hash começa com #master.
+  // Detecção precoce para evitar piscar a tela de login normal.
+  const isMasterRoute = () => /^#?master(\/|$)/.test(location.hash || '');
+  if (isMasterRoute()) {
+    // Injeta master.js dinamicamente
+    const s = document.createElement('script');
+    s.src = '/static/master.js?v=1';
+    s.onerror = () => {
+      $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar área Master.</p></div>';
+    };
+    document.body.appendChild(s);
+    return; // não carrega app normal
+  }
+  // Listener de hash para sair/entrar da área master também
+  window.addEventListener('hashchange', () => {
+    if (isMasterRoute()) location.reload();
+  });
+
   window.addEventListener('hashchange', () => {
     // GUARDA DE ROTA: sem usuário autenticado, qualquer hashchange volta ao login
     if (!state.user) {

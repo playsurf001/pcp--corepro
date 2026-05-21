@@ -74,11 +74,58 @@ Refatoração completa das telas Remessas e Retornos com hierarquia explícita d
 - **Responsivo**: breakpoints 1280px / 768px / 480px ajustam grid de filtros, esconde labels em mobile, KPI grid vira 2 colunas → 1.
 - **Performance**: zero re-renders extras, `IntersectionObserver` apenas para sombra `.is-stuck` quando sticky cola, scroll-behavior smooth.
 
-Versão do bundle: `app.js?v=27` + `styles.css?v=27`.
-- **FASE 3** — Onboarding + Trial 7 dias (landing, /cadastro, /planos)
-- **FASE 4** — Billing (Stripe Subscriptions + webhook)
-- **FASE 5** — Super Admin (/admin com MRR/ARR)
-- **FASE 6** — Polish (UI Linear/Stripe-style, notificações, tickets, PWA, MP/Pix, 2FA, white label)
+Versão do bundle: `app.js?v=28` + `styles.css?v=28`.
+
+### 🧭 Multi-Tenant SaaS (FASE 3 — SPRINT 1 concluído, em produção)
+Transformação completa em **SaaS multiempresa profissional** com administrador master, planos mensais e estrutura de cobrança PIX. Migrations `0023_saas_master.sql` + `0024_companies_plano_check.sql`.
+
+**Backend (concluído e em PROD)**:
+- `super_admins` + `super_admin_sessoes` (auth separada, token prefix `m_`, expira em 8h)
+- `plans` (5 planos seed: trial gratuito, starter R$49,90, profissional R$99,90, premium R$199,90, enterprise R$499,90 com `max_usuarios` / `max_remessas_mes` / `max_terceirizados` / `features` JSON)
+- `subscriptions` (1 ativa por tenant via índice UNIQUE parcial) + `payments` (PIX/boleto/cartão/manual/cortesia)
+- `companies` ganha `id_plano`, `dt_suspensao`, `bloqueada_em`, `motivo_bloqueio`; CHECK expandido para `trial|starter|profissional|premium|enterprise`
+- `src/lib/master_auth.ts`:
+  - `criarSessaoMaster`, `validarSessaoMaster`, `revogarSessaoMaster`
+  - `masterAuthMiddleware` (protege `/api/master/*`)
+  - `tenantStatusGuard()` — retorna **HTTP 402 `TENANT_SUSPENDED`** (suspensa) e **HTTP 403 `TENANT_BLOCKED`** (cancelada/bloqueada). Exceções: `/api/master/*`, `/api/health`, `/api/auth/login|bootstrap|me|logout|trocar-senha`
+- `src/routes/master.ts` — 14 endpoints:
+  - `POST /api/master/auth/login`, `POST /api/master/auth/logout`, `GET /api/master/auth/me`
+  - `GET /api/master/dashboard` — KPIs globais (empresas ativas, MRR, receita 30d, inadimplentes)
+  - `GET /api/master/plans` — lista planos
+  - `GET /api/master/empresas` — lista com filtros + paginação (KPIs por empresa: usuários, remessas, último login)
+  - `GET /api/master/empresas/:id`, `POST /api/master/empresas`, `PUT /api/master/empresas/:id`
+  - `POST /api/master/empresas/:id/suspender`, `/reativar`, `/bloquear`, `/cancelar`, `/trocar-plano`
+- Tenant-scope completo em `relatorios_detalhados.ts` (15 endpoints / ~31 queries via `buildWhere(q, prefix, id_empresa)`) e `configuracoes.ts` (/parametros GET/PUT)
+- Seed: super_admin `master/master` (hash `SHA-256(salt + ':' + senha)` em hex) + empresa id=1 vinculada ao plano enterprise (cortesia perpétua)
+
+**Frontend (concluído e em PROD)**:
+- `public/static/master.js` (49 KB, IIFE standalone, dark theme com gradiente roxo/azul) — SPA própria do master
+- Rotas hash: `#master` (login) → `#master/dashboard` → `#master/empresas`, `#master/empresas/nova`, `#master/empresas/:id`, `#master/planos`
+- Token armazenado em `localStorage.corepro_master_token` (separado do usuário normal)
+- `app.js` injeta dinamicamente `master.js?v=1` quando a hash inicia com `#master`
+
+**Smoke tests PROD validados** (https://9a5c9575.corepro-confeccao.pages.dev):
+- Login master OK (token `m_…`)
+- Dashboard: empresas=1, MRR=0 (empresa founder em cortesia)
+- Empresas: lista CorePro Confecção / enterprise / 4 usuários / 141 remessas
+- 5 planos retornados corretamente
+- `master.js` HTTP 200 (49.368 bytes), cache `v=28`
+- Empresa id=1 protegida contra bloquear/suspender (founder safety)
+
+**Próximas SPRINTS** (deferred):
+- **SPRINT 2** — Enforcement de limites de plano (max_usuarios, max_remessas_mes), cron de suspensão por inadimplência, banner de trial
+- **SPRINT 3** — Integração Mercado Pago PIX (criar cobrança, webhook, tela financeira)
+- **SPRINT 4** — Signup público `/cadastro` + wizard de onboarding + e-mail transacional
+- **SPRINT 5** — Cache KV, rate limit, R2 backups, polish UX
+
+### 🔑 Acesso Master (área administrativa SaaS)
+- **URL**: https://confeccao.corepro.com.br/#master
+- **Credenciais padrão**: `master` / `master` (trocar em produção)
+- ⚠️ Área completamente separada do app operacional. Tokens master (`m_…`) não funcionam em rotas de usuário e vice-versa.
+
+- **FASE 4** — Billing real (MP PIX webhook + recorrência)
+- **FASE 5** — Onboarding público `/cadastro` + Trial 7 dias
+- **FASE 6** — Polish (UI Linear/Stripe-style, notificações, tickets, PWA, 2FA, white label)
 
 ### 📦 Código fonte (GitHub)
 - **Repositório**: https://github.com/playsurf001/pcp--corepro

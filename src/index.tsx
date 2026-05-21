@@ -3,15 +3,17 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import type { Bindings } from './lib/db';
 import { authMiddleware, requireAdmin, requirePerfil } from './lib/auth';
+import { masterAuthMiddleware, tenantStatusGuard } from './lib/master_auth';
 
 import auth from './routes/auth';
 import configuracoes from './routes/configuracoes';
 import cores from './routes/cores';
 import empresa from './routes/empresa';
+import master from './routes/master';
 import relatoriosDetalhados from './routes/relatorios_detalhados';
 import terceirizacao from './routes/terceirizacao';
 
-const app = new Hono<{ Bindings: Bindings; Variables: { user: any } }>();
+const app = new Hono<{ Bindings: Bindings; Variables: { user: any; master: any } }>();
 
 app.use('*', logger());
 app.use('/api/*', cors());
@@ -25,8 +27,20 @@ app.get('/api/health', (c) =>
   })
 );
 
-// Middleware de autenticação (protege /api/* exceto rotas públicas)
+// ────────────────────────────────────────────────────────────────────────
+// ÁREA MASTER (Super Admin) — isolada do auth comum
+// Registrar ANTES do authMiddleware geral para não conflitar.
+// ────────────────────────────────────────────────────────────────────────
+app.use('/api/master/*', masterAuthMiddleware);
+app.route('/api', master);
+
+// Middleware de autenticação (protege /api/* exceto rotas públicas e /api/master/*)
 app.use('/api/*', authMiddleware);
+
+// Tenant status guard: bloqueia empresas suspensas/bloqueadas (após auth)
+// Aplica a todas as rotas tenant-scoped — login/logout/me/health já passaram
+// porque NÃO têm c.get('user') ainda (estão em PUBLIC_PATHS) ou são tratadas.
+app.use('/api/*', tenantStatusGuard());
 
 // Auth e Terceirização: acessíveis a TODOS os usuários autenticados
 app.route('/api', auth);
@@ -79,7 +93,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=27" rel="stylesheet" />
+  <link href="/static/styles.css?v=28" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -113,7 +127,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=27"></script>
+  <script src="/static/app.js?v=28"></script>
   <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;

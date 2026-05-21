@@ -94,6 +94,8 @@ export async function authMiddleware(c: Context<{ Bindings: Bindings }>, next: N
 
   // Só protege /api/*
   if (!path.startsWith('/api/')) return next();
+  // Área master tem seu próprio middleware (masterAuthMiddleware) — não interferir.
+  if (path.startsWith('/api/master/')) return next();
   if (PUBLIC_PATHS.has(path)) return next();
 
   const token = getToken(c);
