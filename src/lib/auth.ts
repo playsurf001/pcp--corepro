@@ -54,7 +54,7 @@ export async function validarSessao(db: D1Database, token: string) {
     .prepare(
       `SELECT s.token, s.dt_expira,
               u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
-              u.email, u.avatar_data, u.avatar_mime, u.id_empresa
+              u.email, u.avatar_data, u.avatar_mime, u.id_empresa, u.is_owner
        FROM sessoes s
        JOIN usuarios u ON u.id_usuario = s.id_usuario
        WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
@@ -155,6 +155,30 @@ export function requireAdmin() {
     if (user.perfil !== 'admin') {
       return new Response(
         JSON.stringify({ ok: false, error: 'Acesso restrito a administradores.', code: 'ADMIN_REQUIRED' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return next();
+  };
+}
+
+/**
+ * Bloqueia rotas para todos exceto o Owner da empresa (perfil='admin' AND is_owner=1).
+ * Usado em ações exclusivas do dono: editar dados da empresa, mudar plano, transferir
+ * propriedade, etc. Retorna 403 com código OWNER_REQUIRED.
+ */
+export function requireOwner() {
+  return async (c: Context, next: Next) => {
+    const user = c.get('user') as any;
+    if (!user) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Não autenticado.', code: 'AUTH_REQUIRED' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (!user.is_owner || user.perfil !== 'admin') {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Apenas o dono da empresa pode realizar esta ação.', code: 'OWNER_REQUIRED' }),
         { status: 403, headers: { 'Content-Type': 'application/json' } }
       );
     }

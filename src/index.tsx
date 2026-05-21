@@ -7,6 +7,7 @@ import { authMiddleware, requireAdmin, requirePerfil } from './lib/auth';
 import auth from './routes/auth';
 import configuracoes from './routes/configuracoes';
 import cores from './routes/cores';
+import empresa from './routes/empresa';
 import relatoriosDetalhados from './routes/relatorios_detalhados';
 import terceirizacao from './routes/terceirizacao';
 
@@ -39,6 +40,7 @@ app.use('/api/parametros', adminOnly); app.use('/api/parametros/*', adminOnly);
 
 app.route('/api', configuracoes);
 app.route('/api', cores);
+app.route('/api', empresa);
 app.route('/api', relatoriosDetalhados);
 
 // SPA: uma única página, navegação por hash
