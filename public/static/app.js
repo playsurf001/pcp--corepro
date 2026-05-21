@@ -2083,8 +2083,21 @@ ROUTES.terc_remessas = async (main) => {
   // ----- Shell (renderiza 1 vez; depois só a tabela é re-renderizada) -----
   main.innerHTML = `
     <div class="remessas-page">
-      <!-- Toolbar sticky premium -->
-      <div class="page-sticky-header remessas-toolbar mb-4">
+      <!-- Resumo (rola normal, NÃO fica fixo) — counter + ações principais -->
+      <div class="remessas-summary mb-4">
+        <span id="rem-counter" class="rem-counter" aria-live="polite"></span>
+        <div class="flex-1"></div>
+        <button id="btn-romaneio-lote" class="btn btn-secondary"
+          title="Imprime um Romaneio de Serviço com todas as remessas filtradas">
+          <i class="fas fa-print mr-1"></i><span>Romaneio em Lote</span>
+        </button>
+        <button id="btn-nova" class="btn btn-success">
+          <i class="fas fa-plus mr-1"></i><span>Nova Remessa</span>
+        </button>
+      </div>
+
+      <!-- ⬇️ Sticky começa AQUI (após o resumo) -->
+      <div class="page-sticky-header remessas-toolbar">
         <div class="page-sticky-row">
           <div class="page-sticky-grid">
             <div class="filter-cell filter-cell-search">
@@ -2130,23 +2143,14 @@ ROUTES.terc_remessas = async (main) => {
 
           <div class="page-sticky-actions">
             <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros">
-              <i class="fas fa-eraser mr-1"></i>Limpar
-            </button>
-            <span id="rem-counter" class="rem-counter" aria-live="polite"></span>
-            <div class="flex-1"></div>
-            <button id="btn-romaneio-lote" class="btn btn-secondary"
-              title="Imprime um Romaneio de Serviço com todas as remessas filtradas">
-              <i class="fas fa-print mr-1"></i><span>Romaneio em Lote</span>
-            </button>
-            <button id="btn-nova" class="btn btn-success">
-              <i class="fas fa-plus mr-1"></i><span>Nova Remessa</span>
+              <i class="fas fa-eraser mr-1"></i><span>Limpar</span>
             </button>
           </div>
         </div>
       </div>
 
       <!-- Tabela -->
-      <div class="card p-0 remessas-table-wrap" id="rem-tbl"></div>
+      <div class="card p-0 remessas-table-wrap mt-4" id="rem-tbl"></div>
     </div>
   `;
 
@@ -4907,57 +4911,60 @@ ROUTES.terc_retornos = async (main) => {
   // ----- Render shell (1 vez) -----
   main.innerHTML = `
     <div class="retornos-page">
-      <!-- Toolbar de filtros (sticky premium) -->
-      <div class="page-sticky-header retornos-toolbar mb-4">
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
-          <div class="lg:col-span-2">
-            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Buscar</label>
-            <div class="relative">
-              <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-              <input id="f-search" type="text" placeholder="Nº CTRL, ref, cor, terceirizado, OP, serviço…" class="pl-8" value="${escapeHtml(state.search)}" />
+      <!-- KPIs (rolam normalmente, NÃO ficam fixos) -->
+      <div id="ret-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
+
+      <!-- ⬇️ A partir daqui começa o sticky: filtros + paginação + tabela -->
+      <!-- Toolbar de filtros (sticky começa após os KPIs) -->
+      <div class="page-sticky-header retornos-toolbar">
+        <div class="page-sticky-row">
+          <div class="page-sticky-grid">
+            <div class="filter-cell filter-cell-search">
+              <label>Buscar</label>
+              <div class="search-input-wrap">
+                <i class="fas fa-search search-icon"></i>
+                <input id="f-search" type="text" placeholder="Nº CTRL, ref, cor, terceirizado, OP, serviço…" value="${escapeHtml(state.search)}" />
+              </div>
+            </div>
+            <div class="filter-cell">
+              <label>Terceirizado</label>
+              <select id="f-terc">${TERC.optTerc()}</select>
+            </div>
+            <div class="filter-cell">
+              <label>De</label>
+              <input type="date" id="f-de" value="${state.de}" />
+            </div>
+            <div class="filter-cell">
+              <label>Até</label>
+              <input type="date" id="f-ate" value="${state.ate}" />
+            </div>
+            <div class="filter-cell">
+              <label>Pagamento</label>
+              <select id="f-pag">
+                <option value="">Todos</option>
+                <option value="pendente" ${state.status_pag==='pendente'?'selected':''}>Pendentes</option>
+                <option value="pago" ${state.status_pag==='pago'?'selected':''}>Pagos</option>
+              </select>
             </div>
           </div>
-          <div>
-            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Terceirizado</label>
-            <select id="f-terc">${TERC.optTerc()}</select>
-          </div>
-          <div>
-            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">De</label>
-            <input type="date" id="f-de" value="${state.de}" />
-          </div>
-          <div>
-            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Até</label>
-            <input type="date" id="f-ate" value="${state.ate}" />
-          </div>
-          <div>
-            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Pagamento</label>
-            <select id="f-pag">
-              <option value="">Todos</option>
-              <option value="pendente" ${state.status_pag==='pendente'?'selected':''}>Pendentes</option>
-              <option value="pago" ${state.status_pag==='pago'?'selected':''}>Pagos</option>
+          <div class="page-sticky-actions">
+            <button id="btn-refresh" class="btn btn-secondary btn-sm" title="Atualizar"><i class="fas fa-rotate"></i></button>
+            <button id="btn-clear"   class="btn btn-secondary btn-sm" title="Limpar filtros"><i class="fas fa-eraser mr-1"></i><span>Limpar</span></button>
+            <div class="flex-1"></div>
+            <span class="text-xs text-slate-500 whitespace-nowrap">Por página:</span>
+            <select id="f-pp" class="select-sm" style="width:auto">
+              <option value="20"  ${state.per_page===20?'selected':''}>20</option>
+              <option value="50"  ${state.per_page===50?'selected':''}>50</option>
+              <option value="100" ${state.per_page===100?'selected':''}>100</option>
+              <option value="200" ${state.per_page===200?'selected':''}>200</option>
             </select>
+            <button id="btn-print" class="btn btn-secondary btn-sm" title="Imprimir"><i class="fas fa-print"></i></button>
           </div>
-        </div>
-        <div class="flex flex-wrap items-center gap-2 mt-3">
-          <button id="btn-refresh" class="btn btn-secondary btn-sm" title="Atualizar"><i class="fas fa-rotate"></i></button>
-          <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros"><i class="fas fa-eraser mr-1"></i>Limpar</button>
-          <div class="flex-1"></div>
-          <span class="text-xs text-slate-500">Por página:</span>
-          <select id="f-pp" class="select-sm" style="width:auto">
-            <option value="20"  ${state.per_page===20?'selected':''}>20</option>
-            <option value="50"  ${state.per_page===50?'selected':''}>50</option>
-            <option value="100" ${state.per_page===100?'selected':''}>100</option>
-            <option value="200" ${state.per_page===200?'selected':''}>200</option>
-          </select>
-          <button id="btn-print" class="btn btn-secondary btn-sm" title="Imprimir"><i class="fas fa-print"></i></button>
         </div>
       </div>
 
-      <!-- KPIs -->
-      <div id="ret-kpis" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
-
-      <!-- Tabela -->
-      <div class="card p-0 retornos-table-wrap" id="ret-tbl"></div>
+      <!-- Tabela (rola por baixo do sticky) -->
+      <div class="card p-0 retornos-table-wrap mt-4" id="ret-tbl"></div>
 
       <!-- Paginação -->
       <div id="ret-pager" class="retornos-pager"></div>
