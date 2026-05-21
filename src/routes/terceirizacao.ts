@@ -1242,7 +1242,21 @@ app.get('/terc/remessas', async (c) => {
   if (q.num_op) { where.push('r.num_op=?'); binds.push(q.num_op); }
   if (q.atrasadas) { where.push("r.status='Atrasado'"); }
   if (q.em_producao) { where.push("r.status IN ('Enviado','EmProducao')"); }
-  if (q.search) { where.push('(r.cod_ref LIKE ? OR r.desc_ref LIKE ? OR r.num_op LIKE ? OR r.cor LIKE ? OR t.nome_terc LIKE ?)'); binds.push(`%${q.search}%`, `%${q.search}%`, `%${q.search}%`, `%${q.search}%`, `%${q.search}%`); }
+  if (q.search) {
+    // 🔎 Busca inteligente: múltiplos termos (separados por espaço) são combinados por AND,
+    // cada termo é procurado em vários campos via OR (parcial, case-insensitive via LIKE).
+    // Campos: Nº CTRL, OP, ref/cor, terceirizado, serviço, produto/coleção.
+    const terms = String(q.search).trim().split(/\s+/).filter(Boolean).slice(0, 8);
+    const fields = [
+      'r.num_controle', 'r.cod_ref', 'r.desc_ref', 'r.num_op', 'r.cor',
+      't.nome_terc', 'sv.desc_servico', 'co.nome_colecao'
+    ];
+    for (const term of terms) {
+      where.push('(' + fields.map(f => `${f} LIKE ?`).join(' OR ') + ')');
+      const like = `%${term}%`;
+      for (let i = 0; i < fields.length; i++) binds.push(like);
+    }
+  }
 
   const sql = `
     SELECT r.*,
@@ -1906,9 +1920,18 @@ app.get('/terc/retornos', async (c) => {
   const binds: any[] = [de, ate];
   if (idTerc) { where.push('r.id_terc = ?'); binds.push(idTerc); }
   if (search) {
-    where.push('(r.num_controle LIKE ? OR r.cod_ref LIKE ? OR r.cor LIKE ? OR t.nome_terc LIKE ? OR r.num_op LIKE ?)');
-    const like = `%${search}%`;
-    binds.push(like, like, like, like, like);
+    // 🔎 Busca inteligente multi-termo: cada termo (separado por espaço) é AND
+    // através dos campos via OR — busca parcial, case-insensitive via LIKE.
+    const terms = search.split(/\s+/).filter(Boolean).slice(0, 8);
+    const fields = [
+      'r.num_controle', 'r.cod_ref', 'r.desc_ref', 'r.cor',
+      't.nome_terc', 'r.num_op', 'sv.desc_servico'
+    ];
+    for (const term of terms) {
+      where.push('(' + fields.map(f => `${f} LIKE ?`).join(' OR ') + ')');
+      const like = `%${term}%`;
+      for (let i = 0; i < fields.length; i++) binds.push(like);
+    }
   }
   if (statusPag === 'pago')     where.push('rt.dt_pagamento IS NOT NULL');
   if (statusPag === 'pendente') where.push('rt.dt_pagamento IS NULL');
@@ -1928,6 +1951,7 @@ app.get('/terc/retornos', async (c) => {
     FROM terc_retornos rt
     JOIN terc_remessas r       ON r.id_remessa = rt.id_remessa
     LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc
+    LEFT JOIN terc_servicos sv ON sv.id_servico = r.id_servico
     ${whereSql}`;
   const kpi = await c.env.DB.prepare(kpiSql).bind(...binds).first<any>() || {};
   const totalGeral = Number(kpi.qtd) || 0;

@@ -2043,102 +2043,372 @@ function TERC_openTercModal(id, onSave) {
 }
 
 /* ---------- REMESSAS ---------- */
+/* ============================================================
+ * 🚀 ROUTES.terc_remessas — REFATORADO v23 (ERP Premium)
+ *
+ * Recursos:
+ *  - Toolbar sticky (top fixo com blur + sombra)
+ *  - Busca inteligente: multi-termo (200 azul embalagem ctrl 12)
+ *  - Campos buscados: CTRL, OP, ref, cor, terceirizado, serviço, produto
+ *  - Debounce 300ms na busca
+ *  - AbortController: cancela request anterior ao mudar filtros
+ *  - Cache em sessionStorage (TTL 30s) — invalida ao salvar
+ *  - Skeleton loading + tabela in-place (sem re-render do shell)
+ *  - Contador de resultados: "X remessas · Y peças"
+ *  - Thead sticky abaixo do toolbar (top:80px)
+ *  - Responsivo (mobile = filtros empilhados)
+ * ============================================================ */
 ROUTES.terc_remessas = async (main) => {
   await TERC.load();
+
+  const REM_CACHE_KEY = 'corepro:remessas:cache';
+  const REM_CACHE_TTL = 30_000; // 30s
+
+  // Filtros persistidos
+  let savedFilters = {};
+  try { savedFilters = JSON.parse(sessionStorage.getItem('corepro:remessas:filtros') || '{}'); } catch {}
+
   const hoje = dayjs().format('YYYY-MM-DD');
-  const de = dayjs().subtract(60, 'day').format('YYYY-MM-DD');
+  const deDefault = dayjs().subtract(60, 'day').format('YYYY-MM-DD');
+
+  const st = {
+    search:     '',
+    id_terc:    savedFilters.id_terc || '',
+    id_servico: savedFilters.id_servico || '',
+    status:     savedFilters.status || '',
+    de:         savedFilters.de || deDefault,
+    ate:        savedFilters.ate || hoje,
+  };
+
+  // ----- Shell (renderiza 1 vez; depois só a tabela é re-renderizada) -----
   main.innerHTML = `
-    <div class="card p-4 mb-4">
-      <div class="flex flex-wrap items-end gap-3">
-        <div><label>Busca</label><input id="f-search" placeholder="OP, Ref, Cor..." /></div>
-        <div><label>Terceirizado</label><select id="f-terc">${TERC.optTerc()}</select></div>
-        <div><label>Serviço</label><select id="f-serv">${TERC.optServicos()}</select></div>
-        <div><label>Status</label><select id="f-status"><option value="">Todos</option><option>Aberta</option><option>EmProducao</option><option>Parcial</option><option>Concluida</option><option>Cancelada</option></select></div>
-        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
-        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
-        <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Filtrar</button>
-        <div class="flex-1"></div>
-        <button id="btn-romaneio-lote" class="btn btn-secondary" title="Imprime um Romaneio de Serviço com todas as remessas filtradas"><i class="fas fa-print mr-1"></i>Romaneio em Lote</button>
-        <button id="btn-nova" class="btn btn-success"><i class="fas fa-plus mr-1"></i>Nova Remessa</button>
+    <div class="remessas-page">
+      <!-- Toolbar sticky premium -->
+      <div class="page-sticky-header remessas-toolbar mb-4">
+        <div class="page-sticky-row">
+          <div class="page-sticky-grid">
+            <div class="filter-cell filter-cell-search">
+              <label>Buscar</label>
+              <div class="search-input-wrap">
+                <i class="fas fa-search search-icon"></i>
+                <input id="f-search" type="text" autocomplete="off"
+                  placeholder="Nº CTRL, OP, ref, cor, produto, terceirizado, serviço…"
+                  value="${escapeHtml(st.search)}" />
+              </div>
+            </div>
+            <div class="filter-cell">
+              <label>Terceirizado</label>
+              <select id="f-terc">${TERC.optTerc()}</select>
+            </div>
+            <div class="filter-cell">
+              <label>Serviço</label>
+              <select id="f-serv">${TERC.optServicos()}</select>
+            </div>
+            <div class="filter-cell">
+              <label>Status</label>
+              <select id="f-status">
+                <option value="">Todos</option>
+                <option value="Aberta">Aberta</option>
+                <option value="AguardandoEnvio">Aguardando envio</option>
+                <option value="Enviado">Enviado</option>
+                <option value="EmProducao">Em produção</option>
+                <option value="Parcial">Parcial</option>
+                <option value="Concluida">Concluída</option>
+                <option value="Atrasado">Atrasada</option>
+                <option value="Cancelada">Cancelada</option>
+              </select>
+            </div>
+            <div class="filter-cell">
+              <label>De</label>
+              <input type="date" id="f-de" value="${st.de}" />
+            </div>
+            <div class="filter-cell">
+              <label>Até</label>
+              <input type="date" id="f-ate" value="${st.ate}" />
+            </div>
+          </div>
+
+          <div class="page-sticky-actions">
+            <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros">
+              <i class="fas fa-eraser mr-1"></i>Limpar
+            </button>
+            <span id="rem-counter" class="rem-counter" aria-live="polite"></span>
+            <div class="flex-1"></div>
+            <button id="btn-romaneio-lote" class="btn btn-secondary"
+              title="Imprime um Romaneio de Serviço com todas as remessas filtradas">
+              <i class="fas fa-print mr-1"></i><span>Romaneio em Lote</span>
+            </button>
+            <button id="btn-nova" class="btn btn-success">
+              <i class="fas fa-plus mr-1"></i><span>Nova Remessa</span>
+            </button>
+          </div>
+        </div>
       </div>
+
+      <!-- Tabela -->
+      <div class="card p-0 remessas-table-wrap" id="rem-tbl"></div>
     </div>
-    <div class="card p-0 overflow-x-auto" id="tbl"></div>
   `;
 
+  // Refs
+  const $tbl     = $('#rem-tbl');
+  const $counter = $('#rem-counter');
+  const $search  = $('#f-search');
+  const $terc    = $('#f-terc');
+  const $serv    = $('#f-serv');
+  const $status  = $('#f-status');
+  const $de      = $('#f-de');
+  const $ate     = $('#f-ate');
+  const $btnClear   = $('#btn-clear');
+  const $btnNova    = $('#btn-nova');
+  const $btnRomLote = $('#btn-romaneio-lote');
+
+  // Pré-popular selects com filtros salvos
+  try {
+    if (st.id_terc)    $terc.value = String(st.id_terc);
+    if (st.id_servico) $serv.value = String(st.id_servico);
+    if (st.status)     $status.value = String(st.status);
+  } catch {}
+
   let _lastRemessas = [];
-  async function load() {
+
+  // ----- Skeleton -----
+  function skeletonTable() {
+    const cols = 13;
+    const rows = Array.from({ length: 8 }).map(() => `
+      <tr class="skeleton-row">
+        ${Array.from({length: cols}).map(() => '<td><span class="skeleton-cell"></span></td>').join('')}
+      </tr>`).join('');
+    return `
+      <div class="table-scroll">
+        <table class="w-full text-sm remessas-table">
+          <thead><tr>
+            <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
+            <th>Serviço</th><th>Referência</th><th>Cor</th>
+            <th class="text-right">Qtd</th><th class="text-right">Retornada</th>
+            <th class="text-right">Valor</th><th class="text-center">Saída</th>
+            <th class="text-center">Prev.</th><th class="text-center">Status</th>
+            <th class="text-center no-print">Ações</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function rowHtml(r) {
+    const qtdTotal = fmt.safeNum(r?.qtd_total);
+    const qtdRet   = fmt.safeNum(r?.qtd_retornada_calc);
+    const retClass = (qtdRet >= qtdTotal && qtdTotal > 0) ? 'text-emerald-600' : 'text-amber-600';
+    return `
+      <tr class="remessas-row">
+        <td class="text-right font-mono tabular-nums">${r?.num_controle ?? '—'}</td>
+        <td>${escapeHtml(r?.num_op || '—')}</td>
+        <td class="truncate" title="${escapeHtml(r?.nome_terc || '')}">${escapeHtml(r?.nome_terc || '—')}</td>
+        <td class="text-xs text-slate-500 truncate" title="${escapeHtml(r?.desc_servico || '')}">${escapeHtml(r?.desc_servico || '—')}</td>
+        <td>
+          <span class="font-mono text-xs">${escapeHtml(r?.cod_ref || '')}</span>
+          ${r?.desc_ref ? `<br><span class="text-xs text-slate-500">${escapeHtml(r.desc_ref)}</span>` : ''}
+        </td>
+        <td>${escapeHtml(r?.cor || '—')}</td>
+        <td class="text-right tabular-nums">${fmt.int(qtdTotal)}</td>
+        <td class="text-right tabular-nums ${retClass}">${fmt.int(qtdRet)}</td>
+        <td class="text-right tabular-nums">${TERC.fmtBRL(fmt.safeNum(r?.valor_total))}</td>
+        <td class="text-center whitespace-nowrap">${fmt.date(r?.dt_saida)}</td>
+        <td class="text-center whitespace-nowrap">${fmt.date(r?.dt_previsao)}</td>
+        <td class="text-center">${TERC.statusBadge(r?.status, r?.atrasada)}</td>
+        <td class="text-center whitespace-nowrap no-print">
+          <button class="btn btn-sm btn-secondary" title="Detalhes" data-act="view" data-id="${r.id_remessa}"><i class="fas fa-eye"></i></button>
+          <button class="btn btn-sm btn-primary"   title="Editar"   data-act="edit" data-id="${r.id_remessa}"><i class="fas fa-edit"></i></button>
+          <button class="btn btn-sm btn-success"   title="Registrar retorno" data-act="ret" data-id="${r.id_remessa}"><i class="fas fa-truck-arrow-right"></i></button>
+          <button class="btn btn-sm btn-print" style="background:#eab308;color:#fff" title="Imprimir" data-act="print" data-id="${r.id_remessa}"><i class="fas fa-print"></i></button>
+          <button class="btn btn-sm btn-danger"    title="Excluir"  data-act="del"  data-id="${r.id_remessa}" data-num="${r.num_controle}"><i class="fas fa-trash"></i></button>
+        </td>
+      </tr>`;
+  }
+
+  function renderCounter(rs) {
+    const n = rs.length;
+    const totalPecas = rs.reduce((a, r) => a + fmt.safeNum(r?.qtd_total), 0);
+    if (!n) {
+      $counter.innerHTML = '<i class="fas fa-circle-info mr-1"></i><b>0</b> resultados';
+      return;
+    }
+    $counter.innerHTML = `
+      <i class="fas fa-truck-fast text-brand mr-1"></i>
+      <b>${fmt.int(n)}</b> ${n === 1 ? 'remessa' : 'remessas'}
+      <span class="counter-sep">·</span>
+      <i class="fas fa-cubes text-indigo-400 mr-1"></i>
+      <b>${fmt.int(totalPecas)}</b> peça${totalPecas === 1 ? '' : 's'}
+    `;
+  }
+
+  function renderTable(rs) {
+    _lastRemessas = rs;
+    renderCounter(rs);
+    if (!rs.length) {
+      $tbl.innerHTML = `
+        <div class="p-10 text-center text-slate-500">
+          <i class="fas fa-box-open text-3xl mb-2 block opacity-50"></i>
+          <div>Nenhuma remessa encontrada com os filtros atuais.</div>
+          <div class="text-xs mt-2">Tente ajustar busca, datas ou status — ou crie uma nova remessa.</div>
+        </div>`;
+      return;
+    }
+    $tbl.innerHTML = `
+      <div class="table-scroll">
+        <table class="w-full text-sm remessas-table">
+          <thead><tr>
+            <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
+            <th>Serviço</th><th>Referência</th><th>Cor</th>
+            <th class="text-right">Qtd</th><th class="text-right">Retornada</th>
+            <th class="text-right">Valor</th><th class="text-center">Saída</th>
+            <th class="text-center">Prev.</th><th class="text-center">Status</th>
+            <th class="text-center no-print">Ações</th>
+          </tr></thead>
+          <tbody>${rs.map(rowHtml).join('')}</tbody>
+        </table>
+      </div>`;
+
+    // Delegação por data-act (1 listener, performance)
+    $tbl.querySelectorAll('button[data-act]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        const act = btn.dataset.act;
+        const id  = Number(btn.dataset.id);
+        if (act === 'view')  return window.TERC_viewRem(id);
+        if (act === 'edit')  return window.TERC_editRem(id);
+        if (act === 'ret')   return window.TERC_retRem(id);
+        if (act === 'del')   return window.TERC_delRem(id, Number(btn.dataset.num));
+        if (act === 'print') return window.TERC_showPrintMenu(ev, id);
+      });
+    });
+  }
+
+  // ----- Cache -----
+  function cacheKey() {
+    return REM_CACHE_KEY + ':' + JSON.stringify(st);
+  }
+  function cacheGet() {
     try {
-      const p = new URLSearchParams();
-      if ($('#f-search')?.value) p.set('search', $('#f-search').value);
-      if ($('#f-terc')?.value) p.set('id_terc', $('#f-terc').value);
-      if ($('#f-serv')?.value) p.set('id_servico', $('#f-serv').value);
-      if ($('#f-status')?.value) p.set('status', $('#f-status').value);
-      if ($('#f-de')?.value) p.set('de', $('#f-de').value);
-      if ($('#f-ate')?.value) p.set('ate', $('#f-ate').value);
-      const r = await api('get', '/terc/remessas?' + p.toString(), null, { silent: true }).catch(e => {
-        console.error('[remessas] erro fetch', e);
-        toast(e?.response?.data?.error || 'Falha ao carregar remessas', 'error');
-        return { data: [] };
+      const raw = sessionStorage.getItem(cacheKey());
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      if (Date.now() - o.t > REM_CACHE_TTL) return null;
+      return o.d;
+    } catch { return null; }
+  }
+  function cacheSet(d) {
+    try { sessionStorage.setItem(cacheKey(), JSON.stringify({ t: Date.now(), d })); } catch {}
+  }
+  function cacheInvalidate() {
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(REM_CACHE_KEY)) sessionStorage.removeItem(k);
+      }
+    } catch {}
+  }
+
+  function persistFilters() {
+    try {
+      sessionStorage.setItem('corepro:remessas:filtros', JSON.stringify({
+        id_terc: st.id_terc, id_servico: st.id_servico, status: st.status,
+        de: st.de, ate: st.ate
+      }));
+    } catch {}
+  }
+
+  // ----- Fetch com AbortController -----
+  let _abortCtrl = null;
+  let _inFlight = false;
+  async function load(opts = {}) {
+    if (_abortCtrl) { try { _abortCtrl.abort(); } catch {} }
+    _abortCtrl = new AbortController();
+
+    const cached = cacheGet();
+    if (cached && !opts.bypassCache) {
+      renderTable(cached);
+      return;
+    }
+    if (!_inFlight) {
+      $tbl.innerHTML = skeletonTable();
+      $counter.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Buscando…';
+    }
+    _inFlight = true;
+
+    const p = new URLSearchParams();
+    if (st.search)     p.set('search',     st.search);
+    if (st.id_terc)    p.set('id_terc',    st.id_terc);
+    if (st.id_servico) p.set('id_servico', st.id_servico);
+    if (st.status)     p.set('status',     st.status);
+    if (st.de)         p.set('de',         st.de);
+    if (st.ate)        p.set('ate',        st.ate);
+
+    try {
+      const r = await api('get', '/terc/remessas?' + p.toString(), null, {
+        silent: true, signal: _abortCtrl.signal
       });
       const rs = fmt.safeArr(r?.data);
-      _lastRemessas = rs;
-      $('#tbl').innerHTML = `
-        <table class="w-full text-sm">
-          <thead class="bg-slate-100"><tr>
-            <th class="text-right p-2">Ctrl</th>
-            <th class="text-left p-2">OP</th>
-            <th class="text-left p-2">Terceirizado</th>
-            <th class="text-left p-2">Serviço</th>
-            <th class="text-left p-2">Referência</th>
-            <th class="text-left p-2">Cor</th>
-            <th class="text-right p-2">Qtd</th>
-            <th class="text-right p-2">Retornada</th>
-            <th class="text-right p-2">Valor</th>
-            <th class="text-center p-2">Saída</th>
-            <th class="text-center p-2">Prev.</th>
-            <th class="text-center p-2">Status</th>
-            <th class="text-center p-2">Ações</th>
-          </tr></thead>
-          <tbody>
-            ${rs.map(r => {
-              const qtdTotal = fmt.safeNum(r?.qtd_total);
-              const qtdRet = fmt.safeNum(r?.qtd_retornada_calc);
-              return `
-              <tr class="border-b hover:bg-slate-50">
-                <td class="p-2 text-right font-mono">${r?.num_controle ?? '—'}</td>
-                <td class="p-2">${r?.num_op || '—'}</td>
-                <td class="p-2">${r?.nome_terc || '—'}</td>
-                <td class="p-2 text-xs text-slate-600">${r?.desc_servico || '—'}</td>
-                <td class="p-2"><span class="font-mono text-xs">${r?.cod_ref || ''}</span><br><span class="text-xs text-slate-500">${r?.desc_ref || ''}</span></td>
-                <td class="p-2">${r?.cor || '—'}</td>
-                <td class="p-2 text-right">${fmt.int(qtdTotal)}</td>
-                <td class="p-2 text-right ${qtdRet >= qtdTotal && qtdTotal > 0 ? 'text-emerald-700' : 'text-amber-700'}">${fmt.int(qtdRet)}</td>
-                <td class="p-2 text-right">${TERC.fmtBRL(fmt.safeNum(r?.valor_total))}</td>
-                <td class="p-2 text-center">${fmt.date(r?.dt_saida)}</td>
-                <td class="p-2 text-center">${fmt.date(r?.dt_previsao)}</td>
-                <td class="p-2 text-center">${TERC.statusBadge(r?.status, r?.atrasada)}</td>
-                <td class="p-2 text-center whitespace-nowrap">
-                  <button class="btn btn-sm btn-secondary" title="Detalhes" onclick="TERC_viewRem(${r.id_remessa})"><i class="fas fa-eye"></i></button>
-                  <button class="btn btn-sm btn-primary" title="Editar" onclick="TERC_editRem(${r.id_remessa})"><i class="fas fa-edit"></i></button>
-                  <button class="btn btn-sm btn-success" title="Registrar retorno" onclick="TERC_retRem(${r.id_remessa})"><i class="fas fa-truck-arrow-right"></i></button>
-                  <button class="btn btn-sm" style="background:#eab308;color:white" title="Imprimir" onclick="TERC_showPrintMenu(event, ${r.id_remessa})"><i class="fas fa-print"></i></button>
-                  <button class="btn btn-sm btn-danger" title="Excluir" onclick="TERC_delRem(${r.id_remessa}, ${r.num_controle})"><i class="fas fa-trash"></i></button>
-                </td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-        ${rs.length === 0 ? '<div class="p-6 text-center text-slate-500"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</div>' : ''}
-      `;
+      cacheSet(rs);
+      renderTable(rs);
     } catch (e) {
-      console.error('[remessas] load', e);
-      $('#tbl').innerHTML = `<div class="p-6 text-center text-amber-600"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar remessas: ${e?.message || e}</div>`;
+      if (e?.canceled) return; // ignorou — outra busca em andamento
+      console.error('[remessas] fetch erro', e);
+      $tbl.innerHTML = `
+        <div class="p-10 text-center text-red-500">
+          <i class="fas fa-circle-exclamation text-3xl mb-2 block opacity-70"></i>
+          <div>Falha ao carregar remessas.</div>
+          <div class="text-xs mt-1 text-slate-500">${escapeHtml(e?.message || String(e))}</div>
+          <button class="btn btn-secondary btn-sm mt-3" id="rem-retry"><i class="fas fa-rotate mr-1"></i>Tentar novamente</button>
+        </div>`;
+      $counter.innerHTML = '<span class="text-red-400"><i class="fas fa-triangle-exclamation mr-1"></i>Erro</span>';
+      const retry = document.getElementById('rem-retry');
+      if (retry) retry.onclick = () => load({ bypassCache: true });
+    } finally {
+      _inFlight = false;
     }
   }
+
+  // ----- Handlers (debounce na busca; mudança de filtro reseta cache) -----
+  let _searchTimer = null;
+  $search.addEventListener('input', () => {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => {
+      st.search = $search.value.trim();
+      cacheInvalidate();
+      load();
+    }, 300);
+  });
+
+  function bindChange(el, prop) {
+    el.addEventListener('change', () => {
+      st[prop] = el.value;
+      persistFilters();
+      load();
+    });
+  }
+  bindChange($terc,   'id_terc');
+  bindChange($serv,   'id_servico');
+  bindChange($status, 'status');
+  bindChange($de,     'de');
+  bindChange($ate,    'ate');
+
+  $btnClear.onclick = () => {
+    st.search = '';     $search.value = '';
+    st.id_terc = '';    try { $terc.value = ''; } catch {}
+    st.id_servico = ''; try { $serv.value = ''; } catch {}
+    st.status = '';     $status.value = '';
+    st.de = deDefault;  $de.value = deDefault;
+    st.ate = hoje;      $ate.value = hoje;
+    persistFilters();
+    cacheInvalidate();
+    load();
+  };
+
+  // ----- Ações globais (re-uso de TERC_*) -----
   window.TERC_viewRem = (id) => TERC_openRemDetalhe(id);
-  window.TERC_editRem = (id) => TERC_openRemModal(id, load);
-  window.TERC_retRem = (id) => TERC_openRetModal(id, load);
-  window.TERC_delRem = (id, n) => TERC_confirmDelRem(id, n, load);
+  window.TERC_editRem = (id) => TERC_openRemModal(id, () => { cacheInvalidate(); load({ bypassCache: true }); });
+  window.TERC_retRem  = (id) => TERC_openRetModal(id,  () => { cacheInvalidate(); load({ bypassCache: true }); });
+  window.TERC_delRem  = (id, n) => TERC_confirmDelRem(id, n, () => { cacheInvalidate(); load({ bypassCache: true }); });
   // Menu flutuante de impressão (popover por clique — funciona em touch/mobile)
   window.TERC_showPrintMenu = (ev, id) => {
     ev.stopPropagation();
@@ -2188,26 +2458,62 @@ ROUTES.terc_remessas = async (main) => {
     const r = await api('get', '/terc/remessas/' + id);
     await TERC_PRINT.controleParcial(r.data);
   };
-  $('#btn-filtrar').onclick = load;
-  $('#btn-nova').onclick = () => TERC_openRemModal(null, load);
-  $('#btn-romaneio-lote').onclick = async () => {
+  // ----- Botões de ação (com loading state) -----
+  $btnNova.onclick = () => TERC_openRemModal(null, () => { cacheInvalidate(); load({ bypassCache: true }); });
+
+  $btnRomLote.onclick = async () => {
     if (!_lastRemessas.length) { toast('Filtre alguma remessa antes', 'warning'); return; }
-    // Para o romaneio em lote precisamos da grade de cada remessa — busca em paralelo (limitado a 30)
     if (_lastRemessas.length > 30) {
       if (!confirm('Imprimir ' + _lastRemessas.length + ' remessas? Recomendado ≤ 30 por romaneio. Continuar?')) return;
     }
+    const original = $btnRomLote.innerHTML;
+    $btnRomLote.disabled = true;
+    $btnRomLote.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i><span>Preparando…</span>';
     toast('Preparando romaneio em lote...', 'info');
-    const detalhes = [];
-    for (const r of _lastRemessas.slice(0, 60)) {
-      try {
-        const d = await api('get', '/terc/remessas/' + r.id_remessa, null, { silent: true });
-        detalhes.push(d.data);
-      } catch { detalhes.push(r); }
+    try {
+      const detalhes = [];
+      for (const r of _lastRemessas.slice(0, 60)) {
+        try {
+          const d = await api('get', '/terc/remessas/' + r.id_remessa, null, { silent: true });
+          detalhes.push(d.data);
+        } catch { detalhes.push(r); }
+      }
+      await TERC_PRINT.romaneio(detalhes);
+    } finally {
+      $btnRomLote.disabled = false;
+      $btnRomLote.innerHTML = original;
     }
-    await TERC_PRINT.romaneio(detalhes);
   };
-  await load();
+
+  // ----- Sticky shadow: adiciona .is-stuck quando o header cola no topo -----
+  _setupStickyShadow($('.remessas-toolbar'));
+
+  // ----- Primeira carga -----
+  try { await load(); } catch (e) { console.error('[remessas] init', e); }
 };
+
+/* ============================================================
+ * 🪄 Helper global: efeito visual quando .page-sticky-header
+ * cola no topo do scroller (#main-content). Adiciona .is-stuck
+ * para ativar sombra mais pronunciada (estilo ERP premium).
+ * ============================================================ */
+function _setupStickyShadow(el) {
+  if (!el || typeof IntersectionObserver === 'undefined') return;
+  try {
+    // Sentinel acima do header — quando ele "sai" da viewport, o header colou
+    const sentinel = document.createElement('div');
+    sentinel.style.cssText = 'height:1px;width:1px;pointer-events:none;';
+    sentinel.setAttribute('aria-hidden', 'true');
+    el.parentNode.insertBefore(sentinel, el);
+    const scroller = document.getElementById('main-content') || null;
+    const io = new IntersectionObserver(([entry]) => {
+      el.classList.toggle('is-stuck', !entry.isIntersecting);
+    }, { root: scroller, threshold: [0], rootMargin: '0px 0px 0px 0px' });
+    io.observe(sentinel);
+    // Limpeza quando o nó é removido (proteção leve)
+    el._stickyObs = io;
+  } catch (e) { /* fail-silent */ }
+}
 
 /* =================================================================
  * 🎨 Helper: hex de cor a partir do nome (mapa PT-BR + hash fallback)
@@ -4601,14 +4907,14 @@ ROUTES.terc_retornos = async (main) => {
   // ----- Render shell (1 vez) -----
   main.innerHTML = `
     <div class="retornos-page">
-      <!-- Toolbar de filtros -->
-      <div class="card p-4 mb-4 retornos-toolbar">
+      <!-- Toolbar de filtros (sticky premium) -->
+      <div class="page-sticky-header retornos-toolbar mb-4">
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
           <div class="lg:col-span-2">
             <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Buscar</label>
             <div class="relative">
               <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-              <input id="f-search" type="text" placeholder="Nº controle, ref, cor, terceirizado, OP..." class="pl-8" value="${escapeHtml(state.search)}" />
+              <input id="f-search" type="text" placeholder="Nº CTRL, ref, cor, terceirizado, OP, serviço…" class="pl-8" value="${escapeHtml(state.search)}" />
             </div>
           </div>
           <div>
@@ -4977,6 +5283,9 @@ ROUTES.terc_retornos = async (main) => {
       window._tercAccApi?.refreshAll?.();
     } catch {}
   };
+
+  // ----- Sticky shadow visual -----
+  _setupStickyShadow(document.querySelector('.retornos-toolbar'));
 
   // ----- Primeira carga (usa cache se houver) -----
   try { await fetchData(); } catch (e) { console.error('[terc_retornos] init', e); }
