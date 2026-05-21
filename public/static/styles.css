@@ -1337,20 +1337,24 @@ button.text-brand:hover { color: var(--primary-strong) !important; }
  * MODAIS
  * ============================================================ */
 .modal-backdrop {
-  position: fixed; inset: 0; z-index: 9500;
-  background: rgba(2, 6, 23, 0.65);
+  position: fixed; inset: 0;
+  /* v24: subido de 9500 → 10000 — SEMPRE acima do sticky de página (30)
+     e do thead sticky (20). Backdrop opaco/blur cobre toda a viewport. */
+  z-index: 10000;
+  background: rgba(2, 6, 23, 0.72);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   animation: fadeIn .2s ease-out;
 }
-[data-theme="light"] .modal-backdrop { background: rgba(15, 23, 42, 0.35); }
+[data-theme="light"] .modal-backdrop { background: rgba(15, 23, 42, 0.45); }
 .modal {
   position: fixed; left: 50%; top: 50%;
   transform: translate(-50%, -50%);
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 16px;
-  z-index: 9501; max-height: 92vh; overflow: auto;
+  /* v24: 9501 → 10001 — acima do backdrop. */
+  z-index: 10001; max-height: 92vh; overflow: auto;
   box-shadow: var(--shadow-lg);
   animation: modalIn .22s ease-out;
 }
@@ -5120,10 +5124,25 @@ textarea.field-invalid {
 /*   • box-shadow e border-bottom criam separação visual com a tabela    */
 /* ==================================================================== */
 
+/* ====================================================================
+ * v24 — HIERARQUIA DE Z-INDEX DEFINITIVA (ERP Premium)
+ * ---------------------------------------------------------------------
+ *   tbody / linhas               :    1
+ *   thead sticky tabela           :   20   (.remessas-table thead)
+ *   sticky filtros página         :   30   (.page-sticky-header)
+ *   topbar/sidebar/dropdowns      :  100+
+ *   modal-backdrop                : 10000  (acima de tudo, sempre)
+ *   modal (caixa central)         : 10001
+ *   user-menu / toasts / FABs     : 999999 (override emergencial)
+ *
+ *  Regra fundamental: sticky de página NUNCA pode ficar acima de modal.
+ * ==================================================================== */
 .page-sticky-header {
   position: sticky;
   top: 0;
-  z-index: 9999;
+  /* v24: rebaixado de 9999 → 30. Fica acima da tabela (thead 20) mas
+     ABAIXO de qualquer modal (10000+). Sem mais conflito visual. */
+  z-index: 30;
   width: 100%;
   padding: 16px 20px;
   border-radius: 0 0 16px 16px;
@@ -5139,11 +5158,28 @@ textarea.field-invalid {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   border: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.2s ease;
+  transition: box-shadow 0.2s ease;
   /* sem backdrop-filter — evita efeito vidro/vazado */
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   opacity: 1;
+}
+/* v24: quando há modal aberto (detectado via :has() ou body.modal-open),
+   o sticky é totalmente removido do stacking context — vira static.
+   Isso garante que NADA da página apareça acima do backdrop do modal.
+   :has() é suportado em todos os navegadores modernos (2023+). */
+body.modal-open .page-sticky-header,
+body:has(.modal-backdrop) .page-sticky-header {
+  position: static !important;
+  z-index: auto !important;
+}
+/* Mesma proteção para o thead sticky: quando modal aberto, NÃO deve
+   sobrepor o backdrop (que é fixed/full screen). */
+body.modal-open .remessas-table thead,
+body.modal-open .retornos-table thead,
+body:has(.modal-backdrop) .remessas-table thead,
+body:has(.modal-backdrop) .retornos-table thead {
+  z-index: 1 !important;
 }
 /* Tema escuro (explícito) — mesmo fundo, só para garantir prioridade */
 [data-theme="dark"] .page-sticky-header,
@@ -5512,14 +5548,15 @@ textarea.field-invalid {
   -webkit-overflow-scrolling: touch;
 }
 
-/* Thead sticky DENTRO do wrapper — opaco, sólido, prioridade alta */
+/* Thead sticky DENTRO do wrapper — opaco, sólido, hierarquia v24:
+   z-index 20 (acima das linhas: 1; abaixo do sticky filtros: 30; abaixo do modal: 10000). */
 .remessas-table thead,
 .retornos-table thead,
 .remessas-table > thead,
 .retornos-table > thead {
   position: sticky !important;
   top: 0 !important;                 /* sticky relativo ao .table-wrap */
-  z-index: 50 !important;
+  z-index: 20 !important;
   isolation: isolate;
   background: #0F172A !important;
   background-image: none !important;
@@ -5625,3 +5662,162 @@ textarea.field-invalid {
   .retornos-row { scroll-margin-top: 48px; }
 }
 
+
+/* ====================================================================
+ * v24 — CONTAINERS NOMEADOS (ERP Premium / Notion / Monday style)
+ * ---------------------------------------------------------------------
+ * Estrutura clara das telas Remessas e Retornos:
+ *
+ *   .remessas-page / .retornos-page              (root container)
+ *     ├─ #stickyHeaderContainer                  (page title + ações)
+ *     ├─ #stickyFiltersContainer (.page-sticky-header)
+ *     │     ├─ KPIs cards / counter
+ *     │     ├─ filtros (busca, terc, datas, status…)
+ *     │     └─ ações secundárias (limpar, paginação)
+ *     ├─ #tableScrollContainer (.remessas-table-wrap / .retornos-table-wrap)
+ *     │     └─ #tableContentContainer (.table-scroll)
+ *     │           └─ <table><thead sticky/><tbody></tbody></table>
+ *     └─ .retornos-pager (paginação, fora do scroll)
+ * ==================================================================== */
+
+/* Page roots — sem padding, deixa as filhas controlarem espaçamento */
+.remessas-page,
+.retornos-page {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  /* Não criar stacking context aqui — deixa sticky funcionar */
+  position: relative;
+  min-height: 100%;
+}
+
+/* Containers nomeados (todos pegam comportamento do elemento que envolvem,
+   adicionam apenas semântica + base para futuras customizações). */
+#stickyHeaderContainer {
+  position: relative;
+  z-index: 31;        /* logo acima do sticky-header — para títulos de página */
+  background: transparent;
+}
+#stickyFiltersContainer {
+  /* Quando este id é aplicado em um .page-sticky-header, ele já tem position:sticky */
+  position: relative;
+  z-index: 30;
+}
+#tableScrollContainer {
+  /* A regra .remessas-table-wrap / .retornos-table-wrap define overflow + max-height.
+     Aqui só reforçamos o stacking context próprio. */
+  position: relative;
+  isolation: isolate;
+  z-index: 1;
+}
+#tableContentContainer {
+  /* Pass-through — table renderiza dentro com thead sticky funcionando */
+  position: relative;
+  width: 100%;
+}
+
+/* ====================================================================
+ * v24 — BLOQUEIO DE SCROLL QUANDO MODAL ABERTO
+ * ---------------------------------------------------------------------
+ * Quando um modal está aberto (body.modal-open OU :has(.modal-backdrop)),
+ * o conteúdo da página NÃO deve rolar atrás do backdrop. UX premium.
+ * O modal tem seu próprio scroll interno (max-height: 92vh; overflow:auto).
+ * ==================================================================== */
+body.modal-open,
+body:has(.modal-backdrop) {
+  overflow: hidden !important;
+}
+body.modal-open #main-content,
+body:has(.modal-backdrop) #main-content {
+  overflow: hidden !important;
+  pointer-events: none; /* nada de clicar atrás do modal */
+}
+/* Mas o modal e seu backdrop precisam continuar interativos */
+body.modal-open .modal-backdrop,
+body.modal-open .modal,
+body:has(.modal-backdrop) .modal-backdrop,
+body:has(.modal-backdrop) .modal {
+  pointer-events: auto;
+}
+
+/* ====================================================================
+ * v24 — PAGE HEADER (título + ações fora do sticky de filtros)
+ * ---------------------------------------------------------------------
+ * Para telas que queiram ter um título fixo separado dos filtros, este
+ * .page-title-bar fica sticky no topo, antes dos filtros. Hoje Remessas
+ * e Retornos não usam (o título vem do topbar global), mas o container
+ * #stickyHeaderContainer está pronto para receber. Tudo backwards-compat.
+ * ==================================================================== */
+.page-title-bar {
+  position: sticky;
+  top: 0;
+  z-index: 31;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: #0B1220;
+  color: var(--text-1);
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+[data-theme="light"] .page-title-bar {
+  background: #FFFFFF;
+  color: #0f172a;
+  border-bottom: 1px solid rgba(15,23,42,0.08);
+}
+.page-title-bar h1 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+.page-title-bar .page-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Quando .page-title-bar está presente, o .page-sticky-header (filtros)
+   precisa colar logo ABAIXO dele. */
+.page-title-bar + .page-sticky-header,
+.page-title-bar + #stickyFiltersContainer {
+  top: 52px;  /* altura aproximada do título; ajusta visualmente */
+}
+
+/* ====================================================================
+ * v24 — REFORÇO FINAL: backgrounds 100% opacos no sticky de filtros
+ * ---------------------------------------------------------------------
+ * Defesa em profundidade: qualquer regra que tente aplicar transparência
+ * ao sticky de filtros é sobrescrita aqui.
+ * ==================================================================== */
+.page-sticky-header,
+#stickyFiltersContainer.page-sticky-header {
+  /* dark default */
+  background-color: #0B1220 !important;
+  background-image: none !important;
+}
+[data-theme="dark"] .page-sticky-header,
+[data-theme="dark"] #stickyFiltersContainer.page-sticky-header {
+  background-color: #0B1220 !important;
+  background-image: none !important;
+}
+[data-theme="light"] .page-sticky-header,
+[data-theme="light"] #stickyFiltersContainer.page-sticky-header {
+  background-color: #FFFFFF !important;
+  background-image: none !important;
+}
+
+/* Card dos KPIs no Retornos — fundo sólido dentro do sticky escuro */
+.page-sticky-header .ret-kpis-grid .kpi-card,
+.page-sticky-header .ret-kpis-grid .card {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: var(--text-1) !important;
+  backdrop-filter: none !important;
+}
+[data-theme="light"] .page-sticky-header .ret-kpis-grid .kpi-card,
+[data-theme="light"] .page-sticky-header .ret-kpis-grid .card {
+  background: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}

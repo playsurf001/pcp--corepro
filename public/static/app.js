@@ -311,6 +311,36 @@ function podeAcessar(item) {
 }
 window.isOwner = isOwner;
 
+/* ============================================================
+ * v24 — MODAL OPEN TRACKER (fallback :has() + bloqueio scroll)
+ * ---------------------------------------------------------------
+ * Observa o <body> e, sempre que existe um .modal-backdrop filho,
+ * marca body.modal-open. Isso permite que o CSS (que já tem regras
+ * com :has(.modal-backdrop)) tenha um fallback robusto para 100%
+ * dos navegadores e também desabilite o scroll do #main-content
+ * enquanto o modal estiver aberto (UX premium ERP).
+ * ============================================================ */
+(function setupModalOpenTracker() {
+  if (window.__modalTrackerInit) return;
+  window.__modalTrackerInit = true;
+  function syncModalOpen() {
+    const hasModal = !!document.querySelector('.modal-backdrop');
+    document.body.classList.toggle('modal-open', hasModal);
+  }
+  // Roda 1 vez no boot
+  if (document.body) syncModalOpen();
+  // Observa mudanças no body (adicionou/removeu modal)
+  const mo = new MutationObserver(syncModalOpen);
+  if (document.body) {
+    mo.observe(document.body, { childList: true, subtree: false });
+  } else {
+    document.addEventListener('DOMContentLoaded', () => {
+      mo.observe(document.body, { childList: true, subtree: false });
+      syncModalOpen();
+    });
+  }
+})();
+
 /* Helpers de avatar (compartilhados pelo sidebar/topbar/perfil) */
 function avatarHTML(user, size /* 'sm'|'md'|'lg'|'' */) {
   const cls = size ? ` ${size}` : '';
@@ -2090,8 +2120,16 @@ ROUTES.terc_remessas = async (main) => {
   // A tabela rola por baixo, sem vazamento visual.
   main.innerHTML = `
     <div class="remessas-page">
+      <!-- ============================================================
+       * v24 — REMESSAS LAYOUT (ERP Premium)
+       *
+       *  #stickyFiltersContainer  → contador + ações + filtros (sticky top)
+       *  #tableScrollContainer    → área scrollável (única que rola)
+       *    └─ #tableContentContainer → <table> com thead sticky
+       * ============================================================ -->
+
       <!-- ⬇️ Sticky único — contador + ações + filtros -->
-      <div class="page-sticky-header remessas-toolbar">
+      <div id="stickyFiltersContainer" class="page-sticky-header remessas-toolbar">
         <div class="page-sticky-row">
           <!-- Linha 1: contador + ações principais (Romaneio + Nova) -->
           <div class="remessas-summary-row">
@@ -2158,8 +2196,8 @@ ROUTES.terc_remessas = async (main) => {
         </div>
       </div>
 
-      <!-- Tabela (rola por baixo do sticky) -->
-      <div class="card p-0 remessas-table-wrap" id="rem-tbl"></div>
+      <!-- ⬇️ Container scrollável (única região que rola) -->
+      <div id="rem-tbl" class="card p-0 remessas-table-wrap" data-container="tableScrollContainer"></div>
     </div>
   `;
 
@@ -2193,7 +2231,7 @@ ROUTES.terc_remessas = async (main) => {
         ${Array.from({length: cols}).map(() => '<td><span class="skeleton-cell"></span></td>').join('')}
       </tr>`).join('');
     return `
-      <div class="table-scroll">
+      <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm remessas-table">
           <thead><tr>
             <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
@@ -2268,7 +2306,7 @@ ROUTES.terc_remessas = async (main) => {
       return;
     }
     $tbl.innerHTML = `
-      <div class="table-scroll">
+      <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm remessas-table">
           <thead><tr>
             <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
@@ -4946,8 +4984,16 @@ ROUTES.terc_retornos = async (main) => {
   // Nada rola "acima" do sticky — a tabela começa abaixo dele de forma sólida.
   main.innerHTML = `
     <div class="retornos-page">
+      <!-- ============================================================
+       * v24 — RETORNOS LAYOUT (ERP Premium)
+       *
+       *  #stickyFiltersContainer  → KPIs + filtros + paginação (sticky top)
+       *  #tableScrollContainer    → área scrollável (única que rola)
+       *    └─ #tableContentContainer → <table> com thead sticky
+       * ============================================================ -->
+
       <!-- ⬇️ Sticky único — contém KPIs + filtros + paginação/impressão -->
-      <div class="page-sticky-header retornos-toolbar">
+      <div id="stickyFiltersContainer" class="page-sticky-header retornos-toolbar">
         <div class="page-sticky-row">
           <!-- Linha 1: cards de resumo (KPIs) -->
           <div id="ret-kpis" class="ret-kpis-grid"></div>
@@ -5000,10 +5046,10 @@ ROUTES.terc_retornos = async (main) => {
         </div>
       </div>
 
-      <!-- Tabela (rola por baixo do sticky) -->
-      <div class="card p-0 retornos-table-wrap" id="ret-tbl"></div>
+      <!-- ⬇️ Container scrollável (única região que rola) -->
+      <div id="ret-tbl" class="card p-0 retornos-table-wrap" data-container="tableScrollContainer"></div>
 
-      <!-- Paginação -->
+      <!-- Paginação (fora do scroll, sob a tabela) -->
       <div id="ret-pager" class="retornos-pager"></div>
     </div>
   `;
@@ -5031,7 +5077,7 @@ ROUTES.terc_retornos = async (main) => {
         ${Array.from({length: 11}).map(() => '<td><span class="skeleton-cell"></span></td>').join('')}
       </tr>`).join('');
     return `
-      <div class="table-scroll">
+      <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm retornos-table">
           <thead><tr>
             <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>
@@ -5105,7 +5151,7 @@ ROUTES.terc_retornos = async (main) => {
       return;
     }
     $tbl.innerHTML = `
-      <div class="table-scroll">
+      <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm retornos-table">
           <thead><tr>
             <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>

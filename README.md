@@ -53,6 +53,28 @@ Migration `0022_rbac_owner.sql` + tenant scope completo no backend operacional:
 
 **Próximas fases planejadas (não iniciadas):**
 - **FASE 2.1** — Tenant scope em `relatorios_detalhados.ts` + criação/gerenciamento de empresas (Super Admin)
+
+### 🎨 UI v24 — Layout Premium ERP (Remessas + Retornos)
+Refatoração completa das telas Remessas e Retornos com hierarquia explícita de containers e z-index — visual no nível de Notion, Monday, ClickUp:
+
+- **Containers nomeados** (CSS + HTML): `#stickyFiltersContainer` (KPIs + filtros + ações, sticky no topo), `#tableScrollContainer` (única região scrollável, `.remessas-table-wrap` / `.retornos-table-wrap`), `#tableContentContainer` (a `<table>` com `<thead>` sticky)
+- **Hierarquia de z-index definitiva** (sem mais conflitos):
+  - tbody/linhas: 1
+  - thead sticky tabela: 20
+  - sticky filtros página: 30 (antes era 9999, conflitando com modais!)
+  - modal-backdrop: 10000 (antes 9500)
+  - modal: 10001 (antes 9501)
+- **Backgrounds 100% sólidos** no sticky de filtros (`#0B1220` dark / `#FFFFFF` light) — zero transparência, zero vazamento
+- **Modal-open tracker**: `MutationObserver` global observa `.modal-backdrop` no DOM e marca `body.modal-open` automaticamente. CSS usa `:has(.modal-backdrop)` + `body.modal-open` (fallback) para:
+  - Tirar o sticky do stacking context (`position: static`) — nada da página vaza acima do backdrop
+  - Bloquear scroll do `#main-content` enquanto modal aberto (`overflow: hidden`)
+  - Desabilitar `pointer-events` atrás do modal — clique só na caixa central
+- **Thead sticky robusto**: `position: sticky; top: 0; z-index: 20` dentro do scroll-wrapper. Linha do `<th>` 100% opaca (`#0F172A` / `#FFFFFF`), com box-shadow inferior suave. Acompanha o scroll vertical da tabela sem flickering.
+- **Scroll único**: o `#tableScrollContainer` é o único elemento que rola (vertical + horizontal), com `max-height: calc(100vh - var(--sticky-h) - 56px)`. `--sticky-h` é medido em runtime pelo `ResizeObserver`.
+- **Responsivo**: breakpoints 1280px / 768px / 480px ajustam grid de filtros, esconde labels em mobile, KPI grid vira 2 colunas → 1.
+- **Performance**: zero re-renders extras, `IntersectionObserver` apenas para sombra `.is-stuck` quando sticky cola, scroll-behavior smooth.
+
+Versão do bundle: `app.js?v=27` + `styles.css?v=27`.
 - **FASE 3** — Onboarding + Trial 7 dias (landing, /cadastro, /planos)
 - **FASE 4** — Billing (Stripe Subscriptions + webhook)
 - **FASE 5** — Super Admin (/admin com MRR/ARR)
