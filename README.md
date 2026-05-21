@@ -17,7 +17,24 @@ Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecç�
 - **URL anterior (mantido como espelho)**: https://pcp-confeccao.pages.dev
 - **Health**: https://confeccao.corepro.com.br/api/health
 - **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → corepro-confeccao
-- **D1 Database**: `pcp-confeccao-prod` (`cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — 10 migrations aplicadas
+- **D1 Database**: `pcp-confeccao-prod` (`cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — 21 migrations aplicadas
+
+### 🏢 Multi-Tenant SaaS (FASE 1 — concluída)
+A partir da migration `0021_multi_tenant_foundation.sql`, o sistema é **multi-tenant ready**:
+- Tabela `companies` (id_empresa, nome, cnpj, slug, plano, status, trial_ate, logo)
+- Empresa default id=1 **"CorePro Confecção"** — todos os dados atuais herdam essa empresa
+- Coluna `id_empresa INTEGER NOT NULL DEFAULT 1` em 23 tabelas tenant-scoped
+- Middleware Hono injeta `c.get('id_empresa')` em toda request autenticada (fallback=1)
+- `/api/auth/me` expõe `id_empresa` + objeto `empresa` completo
+- Helper `getEmpresa(c)` em `src/lib/db.ts` para uso futuro
+- Zero impacto para o usuário atual — sistema continua idêntico
+
+**Próximas fases planejadas (não iniciadas):**
+- **FASE 2** — Auth + RBAC moderno (JWT, refresh tokens, roles Owner/Admin/Gerente/Funcionário, gestão de empresa via UI)
+- **FASE 3** — Onboarding + Trial 7 dias (landing, /cadastro, /planos)
+- **FASE 4** — Billing (Stripe Subscriptions + webhook)
+- **FASE 5** — Super Admin (/admin com MRR/ARR)
+- **FASE 6** — Polish (UI Linear/Stripe-style, notificações, tickets, PWA, MP/Pix, 2FA, white label)
 
 ### 📦 Código fonte (GitHub)
 - **Repositório**: https://github.com/playsurf001/pcp--corepro
