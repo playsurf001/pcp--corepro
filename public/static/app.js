@@ -2504,6 +2504,11 @@ ROUTES.terc_remessas = async (main) => {
  * 🪄 Helper global: efeito visual quando .page-sticky-header
  * cola no topo do scroller (#main-content). Adiciona .is-stuck
  * para ativar sombra mais pronunciada (estilo ERP premium).
+ *
+ * v23.3: também mede a altura do sticky e exporta como CSS var
+ * --sticky-h no #main-content, para que o <thead> da tabela
+ * possa usar top: var(--sticky-h) e ficar fixo logo abaixo
+ * dos filtros (cabeçalho de colunas sempre visível).
  * ============================================================ */
 function _setupStickyShadow(el) {
   if (!el || typeof IntersectionObserver === 'undefined') return;
@@ -2518,8 +2523,27 @@ function _setupStickyShadow(el) {
       el.classList.toggle('is-stuck', !entry.isIntersecting);
     }, { root: scroller, threshold: [0], rootMargin: '0px 0px 0px 0px' });
     io.observe(sentinel);
-    // Limpeza quando o nó é removido (proteção leve)
     el._stickyObs = io;
+
+    // 🆕 v23.3: mede a altura do sticky e publica como CSS var
+    // (usado pelo <thead> sticky das tabelas).
+    const publishHeight = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height || 0);
+      if (h > 0) {
+        const target = scroller || document.documentElement;
+        target.style.setProperty('--sticky-h', h + 'px');
+        // também propaga no html como fallback global
+        document.documentElement.style.setProperty('--sticky-h', h + 'px');
+      }
+    };
+    publishHeight();
+    // Reage a mudanças (filtros adicionam linhas em mobile, etc.)
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(publishHeight);
+      ro.observe(el);
+      el._stickyResizeObs = ro;
+    }
+    window.addEventListener('resize', publishHeight, { passive: true });
   } catch (e) { /* fail-silent */ }
 }
 

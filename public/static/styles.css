@@ -5470,3 +5470,158 @@ textarea.field-invalid {
   .remessas-table { font-size: 0.7rem; }
 }
 
+/* ==================================================================== */
+/* THEAD STICKY v23.3 — Cabeçalho de colunas SEMPRE visível              */
+/* ---------------------------------------------------------------------- */
+/* Abordagem profissional ERP:                                            */
+/* O .remessas-table-wrap / .retornos-table-wrap vira o PRÓPRIO scroller  */
+/* da tabela (vertical E horizontal), com max-height calculado a partir   */
+/* da altura da viewport menos o sticky de filtros (--sticky-h).          */
+/* Dentro dele, <thead> tem position:sticky;top:0; — fica ETERNAMENTE     */
+/* visível enquanto o usuário rola somente o tbody.                       */
+/*                                                                       */
+/* Vantagem: a barra de filtros (page-sticky-header) e o thead da tabela */
+/* convivem perfeitamente sem disputa de scroll: cada um no seu domínio. */
+/* ==================================================================== */
+
+/* Fallback global caso o JS ainda não tenha publicado a altura real */
+:root { --sticky-h: 220px; }
+
+/* Wrapper das tabelas é o SCROLLER interno (vertical + horizontal).
+   max-height: viewport - sticky filtros - margens. Sobrescreve a regra
+   global `#main-content .card { overflow-x: auto; overflow-y: visible }`. */
+#main-content .card.remessas-table-wrap,
+#main-content .card.retornos-table-wrap,
+.remessas-table-wrap,
+.retornos-table-wrap {
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+  /* Folga de 56px = topbar + margens + paginação */
+  max-height: calc(100vh - var(--sticky-h, 220px) - 56px);
+  position: relative;
+  isolation: isolate;
+  /* Border-radius com overflow:auto NÃO clipa o thead sticky pois ele
+     desenha por cima da própria área de scroll — visual fica perfeito. */
+}
+
+/* O .table-scroll antigo agora é só um pass-through; o scroll já está
+   no wrapper. Mantemos visible para o thead conseguir sticky. */
+.remessas-table-wrap .table-scroll,
+.retornos-table-wrap .table-scroll {
+  overflow: visible;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Thead sticky DENTRO do wrapper — opaco, sólido, prioridade alta */
+.remessas-table thead,
+.retornos-table thead,
+.remessas-table > thead,
+.retornos-table > thead {
+  position: sticky !important;
+  top: 0 !important;                 /* sticky relativo ao .table-wrap */
+  z-index: 50 !important;
+  isolation: isolate;
+  background: #0F172A !important;
+  background-image: none !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  opacity: 1 !important;
+}
+/* O <th> também precisa ser opaco — evita "vazamento" entre células */
+.remessas-table thead th,
+.retornos-table thead th,
+.remessas-table > thead > tr > th,
+.retornos-table > thead > tr > th {
+  background: #0F172A !important;
+  background-image: none !important;
+  border-bottom: 0 !important;
+  backdrop-filter: none !important;
+  opacity: 1 !important;
+  /* Mantém z-index dentro do thead para colunas ficarem agrupadas */
+  position: relative;
+  z-index: 1;
+}
+/* Tema claro */
+[data-theme="light"] .remessas-table thead,
+[data-theme="light"] .retornos-table thead {
+  background: #FFFFFF !important;
+  background-image: none !important;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.10);
+  border-bottom: 1px solid #e2e8f0;
+}
+[data-theme="light"] .remessas-table thead th,
+[data-theme="light"] .retornos-table thead th {
+  background: #FFFFFF !important;
+  background-image: none !important;
+  border-bottom: 0 !important;
+}
+
+/* Rolagem suave e scrollbar fina — scroller principal */
+#main-content {
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.30) transparent;
+}
+#main-content::-webkit-scrollbar { width: 10px; height: 10px; }
+#main-content::-webkit-scrollbar-track { background: transparent; }
+#main-content::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.30);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+#main-content::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.55); background-clip: content-box; }
+[data-theme="light"] #main-content {
+  scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
+}
+[data-theme="light"] #main-content::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  background-clip: content-box;
+}
+
+/* Scrollbar fino também nos wrappers de tabela (que agora rolam) */
+.remessas-table-wrap,
+.retornos-table-wrap {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+  scroll-behavior: smooth;
+}
+.remessas-table-wrap::-webkit-scrollbar,
+.retornos-table-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
+.remessas-table-wrap::-webkit-scrollbar-track,
+.retornos-table-wrap::-webkit-scrollbar-track { background: transparent; }
+.remessas-table-wrap::-webkit-scrollbar-thumb,
+.retornos-table-wrap::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.remessas-table-wrap::-webkit-scrollbar-thumb:hover,
+.retornos-table-wrap::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.60);
+  background-clip: content-box;
+}
+
+/* Anchor/scroll programático: agora as linhas vivem dentro do .table-wrap
+   (com thead sticky no topo dele), então scroll-margin-top só precisa
+   cobrir a altura do thead (~36px). */
+.remessas-row,
+.retornos-row { scroll-margin-top: 56px; }
+
+/* Mobile: max-height usa svh (small viewport height) para evitar
+   problemas com a barra de URL no Safari/Chrome iOS. */
+@media (max-width: 768px) {
+  :root { --sticky-h: 260px; }
+  .remessas-table-wrap,
+  .retornos-table-wrap {
+    max-height: calc(100svh - var(--sticky-h, 260px) - 40px);
+  }
+  .remessas-table thead,
+  .retornos-table thead { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.40); }
+  .remessas-row,
+  .retornos-row { scroll-margin-top: 48px; }
+}
+
