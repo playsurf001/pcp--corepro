@@ -289,6 +289,7 @@ const NAV = [
   { id: 'terc_importador',       label: 'Importação',        icon: 'fa-file-excel',       group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Sistema',       collapsible: true, adminOnly: true },
+  { id: 'minha_empresa',         label: 'Minha Empresa',     icon: 'fa-building',         group: 'Sistema',       collapsible: true, ownerOnly: true },
   { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Sistema',       collapsible: true, adminOnly: true },
 ];
 
@@ -298,13 +299,17 @@ const NAV = [
  *  - qualquer outro perfil: APENAS itens marcados com tercOnly
  */
 function isAdmin() { return state.user?.perfil === 'admin'; }
+function isOwner() { return !!state.user?.is_owner && state.user?.perfil === 'admin'; }
 function podeAcessar(item) {
   if (!item) return false;
   // 'perfil' é sempre acessível ao usuário autenticado
   if (item && item.id === 'perfil') return true;
+  // ownerOnly: apenas o dono da empresa (is_owner=1 + admin) vê
+  if (item.ownerOnly) return isOwner();
   if (isAdmin()) return true;
   return !!item.tercOnly;
 }
+window.isOwner = isOwner;
 
 /* Helpers de avatar (compartilhados pelo sidebar/topbar/perfil) */
 function avatarHTML(user, size /* 'sm'|'md'|'lg'|'' */) {
@@ -7198,6 +7203,225 @@ ROUTES.configuracoes = async (main) => {
       toast('Erro ao salvar: ' + (e?.response?.data?.error || e.message), 'error');
     } finally {
       btn.disabled = false; btn.innerHTML = '<i class="fas fa-save mr-1"></i>Salvar Configurações';
+    }
+  };
+};
+
+/* ============================================================
+ * MINHA EMPRESA — gestão dos dados da empresa (Owner-only)
+ * Multi-tenant FASE 2 — só o dono (is_owner=1 + admin) pode editar
+ * ============================================================ */
+ROUTES.minha_empresa = async (main) => {
+  if (!isOwner()) {
+    main.innerHTML = `
+      <div class="max-w-2xl mx-auto">
+        <div class="card p-8 text-center">
+          <i class="fas fa-lock text-5xl text-amber-500 mb-4"></i>
+          <div class="text-xl font-bold mb-2">Acesso restrito</div>
+          <div class="text-sm text-slate-500 mb-4">Apenas o <strong>dono</strong> da empresa pode visualizar e editar estes dados.</div>
+          <button class="btn btn-secondary" onclick="navigate('dashboard')">
+            <i class="fas fa-arrow-left mr-1"></i>Voltar ao Dashboard
+          </button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  let emp = null;
+  try {
+    const r = await api('get', '/empresa', null, { silent: true });
+    emp = r.data || {};
+  } catch (e) {
+    main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle mr-2"></i>Falha ao carregar dados da empresa: ${e?.response?.data?.error || e.message}</div>`;
+    return;
+  }
+
+  const planosLabel = { free: 'Grátis', basic: 'Básico', pro: 'Profissional', enterprise: 'Enterprise' };
+  const statusBadge = {
+    ativa:     '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">Ativa</span>',
+    suspensa:  '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Suspensa</span>',
+    cancelada: '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">Cancelada</span>',
+  };
+  const esc = (v) => String(v ?? '').replace(/"/g, '&quot;');
+
+  main.innerHTML = `
+    <div class="max-w-4xl mx-auto space-y-4">
+      <!-- Header com identidade da empresa -->
+      <div class="card p-6">
+        <div class="flex items-center gap-4 mb-5 pb-4 border-b border-slate-200/10">
+          <div class="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white shadow-lg">
+            <i class="fas fa-building text-2xl"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-lg font-bold truncate">${esc(emp.nome || 'Minha Empresa')}</span>
+              ${statusBadge[emp.status] || ''}
+              <span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                <i class="fas fa-gem mr-1"></i>${planosLabel[emp.plano] || emp.plano || '—'}
+              </span>
+            </div>
+            <div class="text-sm text-slate-500 mt-0.5">
+              <i class="fas fa-id-badge mr-1"></i>ID: ${emp.id_empresa} ·
+              <i class="fas fa-calendar-day ml-2 mr-1"></i>Desde ${(emp.dt_criacao || '').slice(0, 10) || '—'}
+            </div>
+          </div>
+        </div>
+
+        <!-- Aviso Owner -->
+        <div class="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 p-3 mb-5 flex items-start gap-2">
+          <i class="fas fa-crown text-amber-500 mt-0.5"></i>
+          <div class="text-sm text-amber-800 dark:text-amber-200">
+            Você é o <strong>dono</strong> desta empresa. Essas informações aparecerão em romaneios, relatórios e documentos oficiais.
+          </div>
+        </div>
+
+        <!-- Formulário -->
+        <form id="form-empresa" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="md:col-span-2">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-signature mr-1 text-slate-400"></i>Razão Social / Nome Fantasia <span class="text-rose-500">*</span>
+            </label>
+            <input type="text" name="nome" required maxlength="120" value="${esc(emp.nome)}"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-id-card mr-1 text-slate-400"></i>CNPJ
+            </label>
+            <input type="text" name="cnpj" maxlength="20" value="${esc(emp.cnpj)}"
+                   placeholder="00.000.000/0000-00"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-phone mr-1 text-slate-400"></i>Telefone
+            </label>
+            <input type="text" name="telefone" maxlength="30" value="${esc(emp.telefone)}"
+                   placeholder="(00) 0000-0000"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div class="md:col-span-2">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-envelope mr-1 text-slate-400"></i>E-mail de Contato
+            </label>
+            <input type="email" name="email_contato" maxlength="120" value="${esc(emp.email_contato)}"
+                   placeholder="contato@empresa.com"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div class="md:col-span-2">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-map-marker-alt mr-1 text-slate-400"></i>Endereço
+            </label>
+            <input type="text" name="endereco" maxlength="200" value="${esc(emp.endereco)}"
+                   placeholder="Rua, número, bairro"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+              <i class="fas fa-city mr-1 text-slate-400"></i>Cidade
+            </label>
+            <input type="text" name="cidade" maxlength="80" value="${esc(emp.cidade)}"
+                   class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                <i class="fas fa-flag mr-1 text-slate-400"></i>UF
+              </label>
+              <input type="text" name="uf" maxlength="2" value="${esc(emp.uf)}"
+                     placeholder="RS" style="text-transform:uppercase;"
+                     class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                <i class="fas fa-mail-bulk mr-1 text-slate-400"></i>CEP
+              </label>
+              <input type="text" name="cep" maxlength="10" value="${esc(emp.cep)}"
+                     placeholder="00000-000"
+                     class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-300/30 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+            </div>
+          </div>
+
+          <div class="md:col-span-2 mt-4 flex flex-col sm:flex-row justify-end gap-2 pt-4 border-t border-slate-200/10">
+            <button type="button" id="btn-emp-cancel" class="btn btn-secondary">
+              <i class="fas fa-rotate mr-1"></i>Recarregar
+            </button>
+            <button type="submit" id="btn-emp-save" class="btn btn-primary">
+              <i class="fas fa-save mr-1"></i>Salvar Dados da Empresa
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Card informativo -->
+      <div class="card p-5">
+        <div class="flex items-start gap-3">
+          <i class="fas fa-info-circle text-blue-500 text-xl mt-0.5"></i>
+          <div class="text-sm text-slate-600 dark:text-slate-400">
+            <div class="font-semibold mb-1">Sobre os dados da empresa</div>
+            <ul class="list-disc list-inside space-y-1">
+              <li>O <strong>nome</strong> é exibido em todos os documentos impressos (romaneios, relatórios).</li>
+              <li><strong>CNPJ</strong>, <strong>endereço</strong> e <strong>contato</strong> aparecem nos cabeçalhos de relatórios oficiais.</li>
+              <li>Plano e status são gerenciados pela plataforma — entre em contato com o suporte para alterações.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  $('#btn-emp-cancel').onclick = () => ROUTES.minha_empresa(main);
+
+  $('#form-empresa').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const btn = $('#btn-emp-save');
+    const form = $('#form-empresa');
+    const fd = new FormData(form);
+    const payload = {
+      nome:          (fd.get('nome') || '').toString().trim(),
+      cnpj:          (fd.get('cnpj') || '').toString().trim(),
+      telefone:      (fd.get('telefone') || '').toString().trim(),
+      email_contato: (fd.get('email_contato') || '').toString().trim(),
+      endereco:      (fd.get('endereco') || '').toString().trim(),
+      cidade:        (fd.get('cidade') || '').toString().trim(),
+      uf:            (fd.get('uf') || '').toString().trim().toUpperCase(),
+      cep:           (fd.get('cep') || '').toString().trim(),
+    };
+
+    if (!payload.nome) {
+      toast('Informe o nome da empresa.', 'warning');
+      form.querySelector('[name=nome]')?.focus();
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Salvando…';
+    try {
+      const r = await api('put', '/empresa', payload);
+      const novo = r.data || {};
+      // Atualiza o usuário em memória para refletir o novo nome da empresa
+      if (state.user?.empresa) {
+        state.user.empresa.nome = novo.nome;
+        AUTH.setUser?.(state.user);
+      }
+      toast('Dados da empresa salvos com sucesso.', 'success');
+      ROUTES.minha_empresa(main);
+    } catch (e) {
+      const code = e?.response?.data?.code;
+      const msg = e?.response?.data?.error || e.message;
+      if (code === 'OWNER_REQUIRED') {
+        toast('Apenas o dono da empresa pode salvar essas alterações.', 'error');
+      } else {
+        toast('Erro ao salvar: ' + msg, 'error');
+      }
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-save mr-1"></i>Salvar Dados da Empresa';
     }
   };
 };

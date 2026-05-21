@@ -17,7 +17,7 @@ Plataforma SaaS de **PCP, balanceamento e gestão de produção** para confecç�
 - **URL anterior (mantido como espelho)**: https://pcp-confeccao.pages.dev
 - **Health**: https://confeccao.corepro.com.br/api/health
 - **Dashboard do Cloudflare**: https://dash.cloudflare.com/ → Pages → corepro-confeccao
-- **D1 Database**: `pcp-confeccao-prod` (`cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — 21 migrations aplicadas
+- **D1 Database**: `pcp-confeccao-prod` (`cb4cd8ca-3f6e-43bd-ad3d-b90488916399`) — 22 migrations aplicadas
 
 ### 🏢 Multi-Tenant SaaS (FASE 1 — concluída)
 A partir da migration `0021_multi_tenant_foundation.sql`, o sistema é **multi-tenant ready**:
@@ -29,8 +29,30 @@ A partir da migration `0021_multi_tenant_foundation.sql`, o sistema é **multi-t
 - Helper `getEmpresa(c)` em `src/lib/db.ts` para uso futuro
 - Zero impacto para o usuário atual — sistema continua idêntico
 
+### 🏢 Multi-Tenant SaaS (FASE 2 — concluída, em produção)
+Migration `0022_rbac_owner.sql` + tenant scope completo no backend operacional:
+- `usuarios` ganha `is_owner INTEGER NOT NULL DEFAULT 0` + `dt_atualizacao TEXT`
+- Eleição automática: `MIN(id_usuario) WHERE perfil='admin' AND ativo=1` → owner por empresa
+- Índice condicional `idx_usuarios_owner ON usuarios(id_empresa, is_owner) WHERE is_owner=1` garante 1 owner por empresa
+- `companies` ganha `telefone, email_contato, endereco, cidade, uf, cep` para dados de contato
+- Helper `requireOwner()` em `src/lib/auth.ts` retorna 403 `OWNER_REQUIRED` se não for owner
+- `/api/auth/me` agora retorna `is_owner: boolean` (consumido pelo frontend)
+- **Cobertura tenant aplicada** (~257 queries, ~95% do código operacional):
+  - `terceirizacao.ts` (~3.286 linhas): Preços, Variações, Cores, Cleanup, Importar produtos, Importar preços, Importar remessas, Remessas (GET/POST/PUT/DELETE/next-num), Retornos (GET/context/POST/PUT/DELETE), Resumo, Dashboard, Status transitions (enviar/iniciar-producao/cancelar), retornar-tudo, preview-retorno, Financeiro (pendentes/pagar/pagar-lote), Alertas, Timeline, Grades-tamanho (8 rotas)
+  - `cores.ts`: GET/POST/PUT/DELETE/DELETE-all/import — todos isolados por empresa
+  - Helpers `resolveColorId`, `lookupPrecoHier`, `_itensRemessaComSaldo` aceitam `id_empresa` (default=1 para compat)
+- **Rotas novas** Owner-only:
+  - `GET /api/empresa` — dados completos da empresa (qualquer usuário autenticado)
+  - `PUT /api/empresa` — edição **(Owner-only)** com middleware `requireOwner()`
+- **Frontend**:
+  - Item de menu "Minha Empresa" (ícone `fa-building`) visível apenas ao Owner
+  - Tela `#minha_empresa` com formulário responsivo: nome (obrigatório), CNPJ, telefone, e-mail, endereço, cidade, UF, CEP
+  - Badges visuais para `plano` e `status` da empresa
+  - Tratamento de erros com código `OWNER_REQUIRED` mostra toast amigável
+- **Pendência (baixo risco)**: `relatorios_detalhados.ts` (27 queries só-leitura) ainda sem `AND id_empresa=?` explícito — sem risco de vazamento porque há apenas 1 empresa em PROD. Será incluído em FASE 2.1 antes da abertura do cadastro público.
+
 **Próximas fases planejadas (não iniciadas):**
-- **FASE 2** — Auth + RBAC moderno (JWT, refresh tokens, roles Owner/Admin/Gerente/Funcionário, gestão de empresa via UI)
+- **FASE 2.1** — Tenant scope em `relatorios_detalhados.ts` + criação/gerenciamento de empresas (Super Admin)
 - **FASE 3** — Onboarding + Trial 7 dias (landing, /cadastro, /planos)
 - **FASE 4** — Billing (Stripe Subscriptions + webhook)
 - **FASE 5** — Super Admin (/admin com MRR/ARR)

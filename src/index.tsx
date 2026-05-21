@@ -113,7 +113,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=25"></script>
+  <script src="/static/app.js?v=26"></script>
   <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;

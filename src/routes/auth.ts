@@ -118,6 +118,7 @@ app.get('/auth/me', async (c) => {
       avatar_data: sess.avatar_data || null,
       avatar_mime: sess.avatar_mime || null,
       trocar_senha: !!sess.trocar_senha,
+      is_owner: !!(sess as any).is_owner,
       id_empresa: id_empresa,
       empresa: emp || { id_empresa: 1, nome: 'CorePro Confec\u00e7\u00e3o', plano: 'enterprise', status: 'ativa' },
     })
