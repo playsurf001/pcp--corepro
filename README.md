@@ -112,11 +112,89 @@ Transformação completa em **SaaS multiempresa profissional** com administrador
 - `master.js` HTTP 200 (49.368 bytes), cache `v=28`
 - Empresa id=1 protegida contra bloquear/suspender (founder safety)
 
-**Próximas SPRINTS** (deferred):
-- **SPRINT 2** — Enforcement de limites de plano (max_usuarios, max_remessas_mes), cron de suspensão por inadimplência, banner de trial
-- **SPRINT 3** — Integração Mercado Pago PIX (criar cobrança, webhook, tela financeira)
-- **SPRINT 4** — Signup público `/cadastro` + wizard de onboarding + e-mail transacional
-- **SPRINT 5** — Cache KV, rate limit, R2 backups, polish UX
+### 🧭 FASE 3 — SPRINTS 2-5 (concluídas e em produção, deploy 2026-05-21)
+
+**SPRINT 2 — Enforcement de limites de plano + cron de suspensão** ✅
+- `src/lib/plan_limits.ts` — engine de enforcement:
+  - `LimitExceededError` (HTTP 402 + code `PLAN_LIMIT_EXCEEDED` + `recurso/atual/limite/plano`)
+  - `assertLimit(db, id_empresa, 'usuarios'|'terceirizados'|'remessas_mes')`
+  - `getPlanLimits()` — empresa id=1 sempre ilimitada (founder), fallback Starter
+  - `getUsageSummary()` — dados completos para banner/tela de assinatura
+- Aplicado em:
+  - `POST /api/usuarios` + `PUT /api/usuarios/:id` (reativação) → `assertLimit('usuarios')`
+  - `POST /api/terc/terceirizados` → `assertLimit('terceirizados')`
+  - `POST /api/terc/remessas` → `assertLimit('remessas_mes')`
+- `GET /api/empresa/uso` — endpoint para o banner global + tela "Assinatura"
+- 3 cron endpoints (manuais ou via Cloudflare Cron Triggers futuramente):
+  - `POST /api/master/jobs/expire-trials` — suspende empresas com trial expirado
+  - `GET /api/master/jobs/preview-expire-trials` — preview sem executar
+  - `GET /api/master/jobs/proximas-cobrancas` — empresas com cobrança vencida
+
+**SPRINT 3 — Integração Mercado Pago PIX + tela financeira** ✅
+- `src/lib/mercadopago.ts` — wrapper Fetch (compatível Cloudflare Workers, sem SDK):
+  - `criarPixMP(token, req)` — cria preferência PIX
+  - `consultarPagamentoMP(token, id)` — usado pelo webhook para validação
+  - **Modo MOCK automático** quando `MP_ACCESS_TOKEN` ausente — gera QR fake + base64 + ID `MOCK-{ref}-{ts}`, permitindo desenvolvimento sem credenciais reais
+- `src/routes/billing.ts` — 9 endpoints (~17.8 KB):
+  - **Master**: `POST /api/master/billing/empresas/:id/cobrar`, `GET /api/master/billing/payments`, `POST /api/master/billing/payments/:id/aprovar|cancelar|sync`, `GET /api/master/billing/resumo`
+  - **Usuário**: `GET /api/billing/minhas-faturas`, `GET /api/billing/proxima-fatura`, `POST /api/billing/gerar-cobranca`
+  - **Webhook público**: `POST /api/public/mp/webhook` (re-consulta MP por segurança)
+- `aplicarPagamentoAprovado()` helper — atualiza `payment.status='aprovado'`, `subscription.status='ativa'`, `dt_proxima_cobranca += 30d`, reativa empresa automaticamente
+- **Frontend Master** (`master.js` v=2): nova rota `#master/financeiro` com 4 KPIs (MRR/Receita/Aprovados/Suspensas), gráfico mini de receita por mês (barras CSS gradient), tabela de payments com filtros (busca + status) e ações (Aprovar/Sync/Cancelar), modal "Nova cobrança" com seletor de empresa
+- **Frontend Usuário** (`app.js` v=30): nova rota `#minha_assinatura` (owner-only) com header (status badge + botão Pagar PIX), uso vs limites com barras de progresso coloridas (verde→amarelo→vermelho conforme %), features do plano, próxima cobrança, histórico de faturas e modal PIX (QR + copia-e-cola + botão "Já paguei")
+
+**SPRINT 4 — Signup público `/cadastro` + onboarding** ✅
+- `src/routes/signup.ts` — 3 endpoints públicos:
+  - `GET /api/public/planos` — lista de planos visíveis
+  - `POST /api/public/signup/check` — valida e-mail/slug livre antes do envio
+  - `POST /api/public/signup` — cria empresa + subscription + admin + sessão em uma transação
+- **14 dias de trial gratuito** automático com plano `trial`
+- Auto session token retornado (login imediato — usuário já entra logado)
+- Slug + login com retry/suffix em caso de colisão (`-{randomHex(2)}`)
+- `migrations/0025_usuarios_login_per_empresa.sql` — index helper (rebuild abandonado por FK constraint, login global UNIQUE mantido)
+- `public/static/cadastro.js` (17 KB, IIFE standalone, dark theme purple/blue): badge "14 DIAS GRÁTIS · SEM CARTÃO", grid 2 col (planos com "MAIS POPULAR" no Profissional + form), pós-submit salva token + auto-redirect em 3s
+- Rota: `https://app.url/#cadastro`
+
+**SPRINT 5 — Rate limit + polish UX + middleware fix** ✅
+- `src/lib/rate_limit.ts` — middleware factory `rateLimit({ key, max, windowSec })` por isolate Cloudflare Workers (in-memory `Map` com TTL):
+  - `/api/master/auth/login`: 10/60s
+  - `/api/public/signup`: 5/60s
+  - `/api/public/signup/check`: 30/60s
+  - `/api/public/mp/webhook`: 60/60s (alto pois MP pode hammer)
+  - `/api/auth/login`: 15/60s
+  - Retorna **HTTP 429** + header `Retry-After`
+- 🔥 **FIX CRÍTICO** — Middleware order bug: `app.route('/api', billing)` estava registrado ANTES de `app.use('/api/*', authMiddleware)`, fazendo com que `c.get('id_empresa')` viesse `undefined`. Solução: authMiddleware + tenantStatusGuard registrados PRIMEIRO, depois routes
+- `tenantStatusGuard()` excepted paths: `/api/public/*`, `/api/auth/perfil`, `/api/empresa`, `/api/empresa/uso`, `/api/billing/*` (usuário suspenso ainda pode pagar)
+- **Frontend** — Interceptor global no `api()` (`app.js`):
+  - `code: 'PLAN_LIMIT_EXCEEDED'` → modal amigável com CTA "Fazer upgrade do plano" → navega para `#minha_assinatura`
+  - `code: 'TENANT_SUSPENDED'` → modal vermelho com CTA "Pagar agora via PIX" → navega para `#minha_assinatura`
+  - `code: 'TENANT_BLOCKED'` / `TENANT_CANCELED` → modal não-dispensável com "Falar com suporte"
+- **Banner global sticky** (`checkTrialBanner()`):
+  - Empresa suspensa → faixa vermelha urgente (não dispensável)
+  - Subscription pendente → faixa amarela
+  - Trial ≤ 7 dias → faixa azul → "Escolher plano"
+  - Trial > 7 dias → faixa ciano discreta dispensável por sessão
+  - Trial expirado → faixa vermelha não-dispensável
+
+**Smoke tests PROD validados** (https://corepro-confeccao.pages.dev — deploy 2df85a5b):
+- Homepage + assets (`app.js?v=30`, `cadastro.js?v=2`, `master.js?v=2`) → HTTP 200
+- `GET /api/public/planos` → 4 planos visíveis
+- `POST /api/public/signup` → empresa #2 criada (login `joao`, token, trial 14d)
+- `GET /api/empresa/uso` → trial 15 dias restantes, plano Starter, uso 1/2 usuários
+- `POST /api/billing/gerar-cobranca` → MOCK PIX gerado (qr_code + qr_base64)
+- Limit enforcement local: 3 usuários OK no Profissional, 4º → 402 `PLAN_LIMIT_EXCEEDED`
+- Rate limit local: 15 logins OK, 16º → 429
+- Tenant guard local: suspender empresa → `/api/usuarios` HTTP 402 `TENANT_SUSPENDED`, `/api/empresa/uso` HTTP 200 (exceção)
+- Master `/api/master/billing/resumo` → MRR + receita_mes + por_mes
+- Reativação após pagamento aprovado → empresa volta para `ativa` + subscription + dt_proxima_cobranca +30d
+
+**Configuração opcional para MP real** (deferred):
+```bash
+npx wrangler pages secret put MP_ACCESS_TOKEN --project-name corepro-confeccao
+npx wrangler pages secret put PUBLIC_BASE_URL --project-name corepro-confeccao
+# value: https://corepro-confeccao.pages.dev
+```
+Sem essas vars o sistema opera em modo MOCK (QR fake, status manual via "Aprovar" no master/financeiro).
 
 ### 🔑 Acesso Master (área administrativa SaaS)
 - **URL**: https://confeccao.corepro.com.br/#master

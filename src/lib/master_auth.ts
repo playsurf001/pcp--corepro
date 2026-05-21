@@ -119,15 +119,21 @@ export function tenantStatusGuard() {
     const path = new URL(c.req.url).pathname;
     // Master tem seu próprio fluxo
     if (path.startsWith('/api/master/')) return next();
+    // Endpoints públicos (webhooks, signup) — sem auth de empresa
+    if (path.startsWith('/api/public/')) return next();
     // Rotas que devem permanecer acessíveis mesmo quando empresa está suspensa:
-    // o usuário precisa poder logar para ver o aviso e (no futuro) pagar a fatura.
+    // o usuário precisa poder logar para ver o aviso e pagar a fatura.
     if (
       path === '/api/health' ||
       path === '/api/auth/login' ||
       path === '/api/auth/bootstrap' ||
       path === '/api/auth/me' ||
       path === '/api/auth/logout' ||
-      path === '/api/auth/trocar-senha'
+      path === '/api/auth/trocar-senha' ||
+      path === '/api/auth/perfil' ||
+      path === '/api/empresa' ||
+      path === '/api/empresa/uso' ||
+      path.startsWith('/api/billing/') // usuário precisa poder pagar mesmo suspenso
     ) return next();
 
     const user = c.get('user') as any;

@@ -3,6 +3,12 @@ import type { Context } from 'hono';
 
 export type Bindings = {
   DB: D1Database;
+  // SPRINT 3 — Mercado Pago PIX. Configurar via:
+  //   wrangler pages secret put MP_ACCESS_TOKEN --project-name corepro-confeccao
+  // Se ausente, o sistema opera em modo MOCK (gera QR fake para desenvolvimento).
+  MP_ACCESS_TOKEN?: string;
+  // Base URL pública (para montar notification_url do MP). Ex: https://confeccao.corepro.com.br
+  PUBLIC_BASE_URL?: string;
 };
 
 /** Pega o login do usuário autenticado do contexto (ou 'sistema') */

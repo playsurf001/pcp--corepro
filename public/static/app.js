@@ -92,11 +92,133 @@ async function api(method, path, body, opts = {}) {
       renderTrocarSenhaObrigatoria();
       throw e;
     }
+    // 🆕 SPRINT 5 — Interceptor de cobrança/limites SaaS
+    // 402 Payment Required: tenant suspenso por inadimplência OU limite de plano excedido
+    if (status === 402 && !opts.silent) {
+      const data = e.response?.data || {};
+      if (code === 'PLAN_LIMIT_EXCEEDED') {
+        showPlanLimitModal(data);
+        throw e;
+      }
+      if (code === 'TENANT_SUSPENDED' || code === 'TENANT_BLOCKED' || code === 'TENANT_CANCELED') {
+        showTenantBlockedModal(data, code);
+        throw e;
+      }
+    }
     if (!opts.silent) toast(msg, 'error');
     throw e;
   }
 }
 window.api = api;
+
+/* ============================================================
+ * 🆕 SPRINT 5 — MODAIS DE COBRANÇA / LIMITES SaaS
+ * Interceptor exibe modal amigável em vez de toast quando:
+ *  - PLAN_LIMIT_EXCEEDED → CTA "Fazer upgrade" → #minha_assinatura
+ *  - TENANT_SUSPENDED    → CTA "Pagar agora"  → #minha_assinatura
+ * ============================================================ */
+function showPlanLimitModal(data) {
+  // Evita modais duplicados sobrepostos
+  if (document.getElementById('plan-limit-modal')) return;
+  const limite = data.limite ?? '—';
+  const atual  = data.atual  ?? '—';
+  const recurso = data.recurso || data.kind || 'recurso';
+  const recursoLabel = {
+    usuarios: 'usuários ativos',
+    terceirizados: 'terceirizados',
+    remessas_mes: 'remessas no mês',
+  }[recurso] || recurso;
+  const plano = data.plano || 'atual';
+
+  const modal = document.createElement('div');
+  modal.id = 'plan-limit-modal';
+  modal.className = 'modal-backdrop';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(15,23,42,0.7);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border:1px solid rgba(168,85,247,0.3);border-radius:18px;max-width:480px;width:100%;padding:32px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);color:#f1f5f9">
+      <div style="width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#dc2626);display:flex;align-items:center;justify-content:center;margin:0 auto 20px">
+        <i class="fas fa-bolt" style="font-size:32px;color:#fff"></i>
+      </div>
+      <h2 style="font-size:22px;font-weight:700;text-align:center;margin-bottom:8px">Limite do plano atingido</h2>
+      <p style="font-size:14px;text-align:center;color:#94a3b8;margin-bottom:20px">
+        Seu plano <strong style="color:#a78bfa">${plano}</strong> permite até <strong>${limite}</strong> ${recursoLabel}.
+        Você já utilizou <strong style="color:#f59e0b">${atual}/${limite}</strong>.
+      </p>
+      <div style="background:rgba(168,85,247,0.1);border:1px solid rgba(168,85,247,0.3);border-radius:12px;padding:14px;margin-bottom:20px;font-size:13px;color:#cbd5e1;text-align:center">
+        <i class="fas fa-arrow-up-right-dots" style="color:#a78bfa;margin-right:6px"></i>
+        Faça upgrade para um plano superior e continue crescendo sem limites.
+      </div>
+      <div style="display:flex;gap:10px">
+        <button id="plm-close" style="flex:1;padding:12px;border-radius:10px;background:rgba(148,163,184,0.15);color:#cbd5e1;border:1px solid rgba(148,163,184,0.2);font-weight:600;cursor:pointer">Fechar</button>
+        <button id="plm-upgrade" style="flex:2;padding:12px;border-radius:10px;background:linear-gradient(135deg,#a855f7,#6366f1);color:#fff;border:none;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(168,85,247,0.4)">
+          <i class="fas fa-rocket mr-1"></i> Fazer upgrade do plano
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('#plm-close').onclick = close;
+  modal.querySelector('#plm-upgrade').onclick = () => { close(); navigate('minha_assinatura'); };
+  modal.onclick = (ev) => { if (ev.target === modal) close(); };
+}
+
+function showTenantBlockedModal(data, code) {
+  if (document.getElementById('tenant-blocked-modal')) return;
+  const map = {
+    TENANT_SUSPENDED: {
+      titulo: 'Conta suspensa por falta de pagamento',
+      cor1: '#f59e0b', cor2: '#dc2626',
+      icon: 'fa-circle-exclamation',
+      msg: 'Sua assinatura está em atraso. Acesse "Assinatura" para gerar um PIX e reativar imediatamente.',
+      cta: 'Pagar agora via PIX',
+    },
+    TENANT_BLOCKED: {
+      titulo: 'Conta bloqueada',
+      cor1: '#dc2626', cor2: '#7f1d1d',
+      icon: 'fa-ban',
+      msg: 'Esta conta foi bloqueada pela administração. Entre em contato com o suporte para regularização.',
+      cta: 'Falar com suporte',
+    },
+    TENANT_CANCELED: {
+      titulo: 'Assinatura cancelada',
+      cor1: '#64748b', cor2: '#334155',
+      icon: 'fa-circle-xmark',
+      msg: 'Esta assinatura foi cancelada. Para reativar entre em contato com o suporte.',
+      cta: 'Entrar em contato',
+    },
+  };
+  const cfg = map[code] || map.TENANT_SUSPENDED;
+  const modal = document.createElement('div');
+  modal.id = 'tenant-blocked-modal';
+  modal.className = 'modal-backdrop';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(15,23,42,0.85);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);border:1px solid rgba(${code==='TENANT_BLOCKED'?'220,38,38':'245,158,11'},0.4);border-radius:18px;max-width:480px;width:100%;padding:32px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.6);color:#f1f5f9">
+      <div style="width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,${cfg.cor1},${cfg.cor2});display:flex;align-items:center;justify-content:center;margin:0 auto 20px">
+        <i class="fas ${cfg.icon}" style="font-size:32px;color:#fff"></i>
+      </div>
+      <h2 style="font-size:22px;font-weight:700;text-align:center;margin-bottom:12px">${cfg.titulo}</h2>
+      <p style="font-size:14px;text-align:center;color:#cbd5e1;margin-bottom:24px;line-height:1.6">${cfg.msg}</p>
+      <div style="display:flex;gap:10px">
+        ${code === 'TENANT_SUSPENDED' ? `
+          <button id="tbm-pay" style="flex:1;padding:14px;border-radius:10px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border:none;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(16,185,129,0.4)">
+            <i class="fas fa-qrcode mr-1"></i> ${cfg.cta}
+          </button>
+        ` : `
+          <button id="tbm-logout" style="flex:1;padding:14px;border-radius:10px;background:rgba(148,163,184,0.15);color:#cbd5e1;border:1px solid rgba(148,163,184,0.2);font-weight:600;cursor:pointer">
+            <i class="fas fa-sign-out-alt mr-1"></i> Sair
+          </button>
+        `}
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('#tbm-pay')?.addEventListener('click', () => { close(); navigate('minha_assinatura'); });
+  modal.querySelector('#tbm-logout')?.addEventListener('click', () => { close(); doLogout(); });
+  // Bloqueante: não fecha clicando fora
+}
+window.showPlanLimitModal = showPlanLimitModal;
+window.showTenantBlockedModal = showTenantBlockedModal;
 
 /* ---------- Estado global ---------- */
 const state = {
@@ -290,6 +412,7 @@ const NAV = [
   { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Sistema',       collapsible: true, tercOnly: true },
   { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Sistema',       collapsible: true, adminOnly: true },
   { id: 'minha_empresa',         label: 'Minha Empresa',     icon: 'fa-building',         group: 'Sistema',       collapsible: true, ownerOnly: true },
+  { id: 'minha_assinatura',      label: 'Assinatura & Plano',icon: 'fa-credit-card',      group: 'Sistema',       collapsible: true, ownerOnly: true },
   { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Sistema',       collapsible: true, adminOnly: true },
 ];
 
@@ -7473,6 +7596,361 @@ ROUTES.minha_empresa = async (main) => {
 };
 
 /* ============================================================
+ * 🆕 SPRINT 3 — MINHA ASSINATURA / PLANO (self-service de cobrança)
+ * Owner-only. Mostra:
+ *  - Plano atual + features
+ *  - Uso vs limites (barras de progresso)
+ *  - Trial / próxima cobrança
+ *  - PIX self-service (gerar QR + copia-e-cola)
+ *  - Histórico de faturas
+ * ============================================================ */
+ROUTES.minha_assinatura = async (main) => {
+  if (!isOwner()) {
+    main.innerHTML = `
+      <div class="max-w-2xl mx-auto">
+        <div class="card p-8 text-center">
+          <i class="fas fa-lock text-5xl text-amber-500 mb-4"></i>
+          <div class="text-xl font-bold mb-2">Acesso restrito</div>
+          <div class="text-sm text-slate-500 mb-4">Apenas o <strong>dono</strong> da empresa pode visualizar e gerenciar a assinatura.</div>
+          <button class="btn btn-secondary" onclick="navigate('dashboard')">
+            <i class="fas fa-arrow-left mr-1"></i>Voltar ao Dashboard
+          </button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  main.innerHTML = `<div class="text-center py-16"><i class="fas fa-spinner fa-spin text-3xl text-brand"></i><div class="text-xs text-slate-400 mt-3 uppercase tracking-widest">Carregando assinatura…</div></div>`;
+
+  let uso = null, proxima = null, faturas = [];
+  try {
+    const [ru, rp, rf] = await Promise.all([
+      api('get', '/empresa/uso', null, { silent: true }).catch(() => null),
+      api('get', '/billing/proxima-fatura', null, { silent: true }).catch(() => null),
+      api('get', '/billing/minhas-faturas', null, { silent: true }).catch(() => null),
+    ]);
+    uso = ru?.data || null;
+    proxima = rp?.data || null;
+    faturas = rf?.data || [];
+  } catch (e) {
+    main.innerHTML = `<div class="card p-6 text-red-600"><i class="fas fa-exclamation-triangle mr-2"></i>Falha ao carregar dados da assinatura: ${e?.response?.data?.error || e.message}</div>`;
+    return;
+  }
+
+  if (!uso) {
+    main.innerHTML = `<div class="card p-6 text-amber-700"><i class="fas fa-info-circle mr-2"></i>Não foi possível carregar os dados de uso da assinatura.</div>`;
+    return;
+  }
+
+  const plano = uso.plano || {};
+  const features = uso.features || {};
+  const u = uso.uso || {};
+  const sub = proxima?.subscription || null;
+  const trialDias = uso.trial_dias_restantes;
+  const isTrial = (sub?.status === 'trial') || (typeof trialDias === 'number');
+  const fmtBRL = (v) => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
+  const fmtDate = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : '—';
+
+  // Barra de progresso com cores baseadas em %
+  const progressBar = (atual, max, label, icon) => {
+    if (max === null || max === undefined || max === -1 || max === 'ilimitado') {
+      return `
+        <div class="rounded-lg p-4" style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2)">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-semibold"><i class="fas ${icon} mr-1 text-emerald-500"></i>${label}</span>
+            <span class="text-xs px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-700 font-bold">ILIMITADO</span>
+          </div>
+          <div class="text-2xl font-bold text-emerald-600">${atual}</div>
+          <div class="text-xs text-slate-500">utilizados</div>
+        </div>`;
+    }
+    const pct = max > 0 ? Math.min(100, Math.round((atual / max) * 100)) : 0;
+    let cor = '#10b981';     // verde
+    if (pct >= 70) cor = '#f59e0b';  // amarelo
+    if (pct >= 90) cor = '#ef4444';  // vermelho
+    return `
+      <div class="rounded-lg p-4" style="background:rgba(148,163,184,0.06);border:1px solid rgba(148,163,184,0.15)">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-sm font-semibold"><i class="fas ${icon} mr-1" style="color:${cor}"></i>${label}</span>
+          <span class="text-xs font-bold" style="color:${cor}">${pct}%</span>
+        </div>
+        <div class="text-2xl font-bold">${atual} <span class="text-sm font-normal text-slate-500">/ ${max}</span></div>
+        <div class="mt-2 h-2 rounded-full overflow-hidden" style="background:rgba(148,163,184,0.15)">
+          <div style="height:100%;width:${pct}%;background:${cor};transition:width .4s ease"></div>
+        </div>
+      </div>`;
+  };
+
+  // Status badge da assinatura
+  const statusBadge = (() => {
+    if (sub?.status === 'ativa') return '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"><i class="fas fa-check-circle mr-1"></i>Ativa</span>';
+    if (sub?.status === 'trial' || isTrial) return `<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"><i class="fas fa-rocket mr-1"></i>Trial</span>`;
+    if (sub?.status === 'pendente') return '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"><i class="fas fa-clock mr-1"></i>Pendente</span>';
+    if (sub?.status === 'suspensa') return '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"><i class="fas fa-circle-exclamation mr-1"></i>Suspensa</span>';
+    return '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-slate-100 text-slate-700">—</span>';
+  })();
+
+  // Features do plano
+  const featList = [
+    { key: 'feat_relatorios_avancados', label: 'Relatórios avançados', icon: 'fa-chart-line' },
+    { key: 'feat_api',                  label: 'Acesso à API',         icon: 'fa-code' },
+    { key: 'feat_export_excel',         label: 'Exportação Excel/PDF', icon: 'fa-file-export' },
+    { key: 'feat_audit_log',            label: 'Log de auditoria',     icon: 'fa-clipboard-list' },
+    { key: 'feat_multi_filial',         label: 'Multi-filial',         icon: 'fa-building' },
+  ];
+
+  main.innerHTML = `
+    <div class="max-w-5xl mx-auto space-y-4">
+      <!-- HEADER -->
+      <div class="card p-6">
+        <div class="flex items-center gap-4">
+          <div class="w-14 h-14 rounded-xl flex items-center justify-center text-white shadow-lg" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+            <i class="fas fa-credit-card text-2xl"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-lg font-bold">Plano ${plano.nome || '—'}</span>
+              ${statusBadge}
+            </div>
+            <div class="text-sm text-slate-500 mt-0.5">
+              ${plano.preco_mensal ? fmtBRL(plano.preco_mensal) + '/mês' : 'Plano grátis'}
+              ${plano.descricao ? ' · ' + plano.descricao : ''}
+            </div>
+          </div>
+          <button class="btn btn-primary" id="btn-gerar-pix">
+            <i class="fas fa-qrcode mr-1"></i>Pagar com PIX
+          </button>
+        </div>
+
+        ${isTrial && typeof trialDias === 'number' ? `
+          <div class="rounded-lg mt-4 p-3 flex items-start gap-2" style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25)">
+            <i class="fas fa-rocket text-blue-500 mt-0.5"></i>
+            <div class="text-sm text-blue-700 dark:text-blue-200">
+              <strong>Período de avaliação:</strong> ${trialDias > 0 ? trialDias + ' dias restantes' : 'expirou'} ·
+              ${sub?.trial_ate ? 'Termina em ' + fmtDate(sub.trial_ate) : ''}
+            </div>
+          </div>` : ''}
+
+        ${sub?.status === 'suspensa' ? `
+          <div class="rounded-lg mt-4 p-3 flex items-start gap-2" style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3)">
+            <i class="fas fa-circle-exclamation text-amber-500 mt-0.5"></i>
+            <div class="text-sm text-amber-700 dark:text-amber-200">
+              <strong>Conta suspensa por inadimplência.</strong> Pague o PIX abaixo para reativar imediatamente.
+            </div>
+          </div>` : ''}
+      </div>
+
+      <!-- USO vs LIMITES -->
+      <div class="card p-6">
+        <h3 class="text-base font-bold mb-4"><i class="fas fa-gauge-high mr-2 text-brand"></i>Uso vs. limites do plano</h3>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${progressBar(u.usuarios?.atual ?? 0,      u.usuarios?.max,      'Usuários ativos',  'fa-users')}
+          ${progressBar(u.terceirizados?.atual ?? 0, u.terceirizados?.max, 'Terceirizados',    'fa-handshake')}
+          ${progressBar(u.remessas_mes?.atual ?? 0,  u.remessas_mes?.max,  'Remessas neste mês','fa-truck-fast')}
+        </div>
+      </div>
+
+      <!-- FEATURES + PRÓXIMA COBRANÇA -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="card p-6">
+          <h3 class="text-base font-bold mb-3"><i class="fas fa-star mr-2 text-amber-500"></i>Recursos do plano</h3>
+          <ul class="space-y-2 text-sm">
+            ${featList.map(f => `
+              <li class="flex items-center gap-2">
+                ${features[f.key] ? '<i class="fas fa-check-circle text-emerald-500"></i>' : '<i class="fas fa-times-circle text-slate-400"></i>'}
+                <span class="${features[f.key] ? '' : 'text-slate-400 line-through'}">
+                  <i class="fas ${f.icon} mr-1 text-slate-400"></i>${f.label}
+                </span>
+              </li>`).join('')}
+          </ul>
+        </div>
+
+        <div class="card p-6">
+          <h3 class="text-base font-bold mb-3"><i class="fas fa-calendar-day mr-2 text-brand"></i>Próxima cobrança</h3>
+          ${sub ? `
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between border-b border-slate-200/10 pb-2">
+                <span class="text-slate-500">Valor</span>
+                <span class="font-bold text-lg">${fmtBRL(sub.valor_mensal)}</span>
+              </div>
+              <div class="flex justify-between border-b border-slate-200/10 pb-2">
+                <span class="text-slate-500">Data</span>
+                <span class="font-semibold">${fmtDate(sub.dt_proxima_cobranca)}</span>
+              </div>
+              <div class="flex justify-between border-b border-slate-200/10 pb-2">
+                <span class="text-slate-500">Método</span>
+                <span class="font-semibold"><i class="fas fa-qrcode mr-1 text-emerald-500"></i>PIX (Mercado Pago)</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Auto-renovação</span>
+                <span class="font-semibold">Sim</span>
+              </div>
+            </div>` : '<div class="text-sm text-slate-500">Sem assinatura ativa.</div>'}
+        </div>
+      </div>
+
+      <!-- HISTÓRICO DE FATURAS -->
+      <div class="card p-6">
+        <h3 class="text-base font-bold mb-3"><i class="fas fa-receipt mr-2 text-brand"></i>Histórico de faturas</h3>
+        ${faturas.length === 0 ? '<div class="text-sm text-slate-500 text-center py-6">Nenhuma fatura ainda. Quando emitirmos uma cobrança ela aparecerá aqui.</div>' : `
+          <div class="overflow-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-100 dark:bg-slate-800"><tr>
+                <th class="p-2 text-left">Referência</th>
+                <th class="p-2 text-left">Vencimento</th>
+                <th class="p-2 text-right">Valor</th>
+                <th class="p-2 text-center">Status</th>
+                <th class="p-2 text-left">Pago em</th>
+              </tr></thead>
+              <tbody>
+                ${faturas.map(f => {
+                  const statusMap = {
+                    pendente:  '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-amber-100 text-amber-700">Pendente</span>',
+                    aprovado:  '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-700">Pago</span>',
+                    cancelado: '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-slate-200 text-slate-600">Cancelado</span>',
+                    rejeitado: '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-rose-100 text-rose-700">Rejeitado</span>',
+                    estornado: '<span class="px-2 py-0.5 rounded-md text-xs font-semibold bg-purple-100 text-purple-700">Estornado</span>',
+                  };
+                  return `
+                    <tr class="border-t border-slate-200/10">
+                      <td class="p-2 font-mono text-xs">${f.referencia || ('#' + f.id_payment)}</td>
+                      <td class="p-2">${fmtDate(f.dt_vencimento || f.dt_geracao)}</td>
+                      <td class="p-2 text-right font-semibold">${fmtBRL(f.valor)}</td>
+                      <td class="p-2 text-center">${statusMap[f.status] || f.status}</td>
+                      <td class="p-2 text-xs">${f.dt_pagamento ? new Date(f.dt_pagamento).toLocaleString('pt-BR') : '—'}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>`}
+      </div>
+
+      <!-- AÇÕES SECUNDÁRIAS -->
+      <div class="card p-4">
+        <div class="flex flex-wrap gap-2 justify-between items-center">
+          <div class="text-xs text-slate-500">
+            <i class="fas fa-shield-halved mr-1 text-emerald-500"></i>
+            Pagamentos processados via <strong>Mercado Pago</strong>. PIX com confirmação automática.
+          </div>
+          <button class="btn btn-secondary text-sm" onclick="navigate('minha_assinatura')">
+            <i class="fas fa-rotate mr-1"></i>Atualizar
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  // === Ação: GERAR PIX ===
+  $('#btn-gerar-pix').onclick = async () => {
+    const btn = $('#btn-gerar-pix');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Gerando…';
+    try {
+      const r = await api('post', '/billing/gerar-cobranca', {});
+      const pay = r.data || {};
+      mostrarModalPix(pay);
+    } catch (e) {
+      // erro já tratado pelo interceptor
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-qrcode mr-1"></i>Pagar com PIX';
+    }
+  };
+};
+
+/** Modal com QR code PIX + copia-e-cola */
+function mostrarModalPix(pay) {
+  const fmtBRL = (v) => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
+  const qr = pay.qr_code_base64 || '';
+  const qrText = pay.qr_code || '';
+  const valor = pay.valor || pay.transaction_amount || 0;
+  const ref = pay.referencia || pay.id_payment || '—';
+  const expira = pay.dt_expiracao ? new Date(pay.dt_expiracao).toLocaleString('pt-BR') : '';
+
+  const existing = document.getElementById('pix-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'pix-modal';
+  modal.className = 'modal-backdrop';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(15,23,42,0.85);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:#fff;color:#0f172a;border-radius:18px;max-width:480px;width:100%;padding:28px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);position:relative">
+      <button id="pix-close" style="position:absolute;top:14px;right:14px;width:32px;height:32px;border-radius:50%;background:rgba(148,163,184,0.15);border:none;cursor:pointer;font-size:16px">×</button>
+      <div style="text-align:center;margin-bottom:16px">
+        <div style="width:60px;height:60px;border-radius:50%;background:linear-gradient(135deg,#10b981,#059669);display:inline-flex;align-items:center;justify-content:center;margin-bottom:10px">
+          <i class="fas fa-qrcode" style="color:#fff;font-size:26px"></i>
+        </div>
+        <h2 style="font-size:20px;font-weight:700;margin-bottom:4px">Pagar via PIX</h2>
+        <div style="font-size:13px;color:#64748b">Escaneie o QR ou copie o código abaixo</div>
+      </div>
+      <div style="background:#f1f5f9;border-radius:12px;padding:16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Valor</div>
+          <div style="font-size:24px;font-weight:800;color:#10b981">${fmtBRL(valor)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em">Referência</div>
+          <div style="font-size:12px;font-family:monospace;color:#475569">${ref}</div>
+        </div>
+      </div>
+
+      ${qr ? `
+        <div style="text-align:center;background:#fff;padding:16px;border-radius:12px;border:2px dashed #cbd5e1;margin-bottom:14px">
+          <img src="data:image/png;base64,${qr}" alt="QR PIX" style="width:200px;height:200px;display:block;margin:0 auto"/>
+        </div>` : ''}
+
+      ${qrText ? `
+        <div style="margin-bottom:14px">
+          <label style="font-size:12px;color:#64748b;display:block;margin-bottom:6px"><i class="fas fa-clipboard mr-1"></i>Código PIX copia-e-cola</label>
+          <div style="display:flex;gap:6px">
+            <input id="pix-text" readonly value="${qrText.replace(/"/g,'&quot;')}" style="flex:1;padding:10px;font-family:monospace;font-size:11px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc"/>
+            <button id="pix-copy" style="padding:10px 14px;background:#10b981;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer"><i class="fas fa-copy"></i></button>
+          </div>
+        </div>` : ''}
+
+      ${expira ? `<div style="font-size:11px;color:#64748b;text-align:center;margin-bottom:14px"><i class="fas fa-clock mr-1"></i>Expira em ${expira}</div>` : ''}
+
+      <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;font-size:12px;color:#065f46;text-align:center">
+        <i class="fas fa-circle-info mr-1"></i>
+        A confirmação é automática. Após o pagamento sua conta será reativada em segundos.
+      </div>
+
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button id="pix-refresh" style="flex:1;padding:12px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-weight:600;cursor:pointer">
+          <i class="fas fa-rotate mr-1"></i>Já paguei (verificar)
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  modal.querySelector('#pix-close').onclick = close;
+  modal.onclick = (ev) => { if (ev.target === modal) close(); };
+
+  const copyBtn = modal.querySelector('#pix-copy');
+  if (copyBtn) copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(qrText);
+      copyBtn.innerHTML = '<i class="fas fa-check"></i>';
+      copyBtn.style.background = '#059669';
+      setTimeout(() => { copyBtn.innerHTML = '<i class="fas fa-copy"></i>'; copyBtn.style.background = '#10b981'; }, 1500);
+      toast('Código PIX copiado!', 'success');
+    } catch {
+      toast('Não foi possível copiar. Copie manualmente.', 'error');
+    }
+  };
+
+  const refreshBtn = modal.querySelector('#pix-refresh');
+  if (refreshBtn) refreshBtn.onclick = async () => {
+    refreshBtn.disabled = true;
+    refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Verificando…';
+    // Recarrega a tela após 1s para dar tempo de o webhook chegar (em produção)
+    setTimeout(() => { close(); navigate('minha_assinatura'); }, 1200);
+  };
+}
+window.mostrarModalPix = mostrarModalPix;
+
+/* ============================================================
  * PERFIL DO USUÁRIO — edição de dados pessoais e foto/avatar
  * ============================================================ */
 ROUTES.perfil = async (main) => {
@@ -7827,7 +8305,137 @@ function bootApp() {
   renderLayout();
   const initial = (location.hash || '#dashboard').slice(1);
   navigate(initial || 'dashboard');
+  // 🆕 SPRINT 5 — Banner global de trial / cobrança (fetch async, não bloqueia render)
+  setTimeout(() => checkTrialBanner(), 200);
 }
+
+/* ============================================================
+ * 🆕 SPRINT 5 — BANNER GLOBAL DE TRIAL / COBRANÇA / SUSPENSÃO
+ * Aparece no topo do topbar quando:
+ *  - Trial em vigor com < 7 dias restantes
+ *  - Assinatura em status 'pendente' ou 'suspensa'
+ * Estilo: faixa fina sticky no topo da janela, dismissível por sessão.
+ * ============================================================ */
+async function checkTrialBanner() {
+  try {
+    // Só consultamos se houver usuário autenticado
+    if (!state.user) return;
+    const r = await api('get', '/empresa/uso', null, { silent: true });
+    const data = r?.data;
+    if (!data) return;
+
+    const sub = data.subscription || null;
+    const trialDias = data.trial_dias_restantes;
+    const empresa = state.user.empresa || {};
+    const empresaStatus = empresa.status;
+
+    // Decide se mostra banner
+    let banner = null;
+    // 1) Empresa suspensa → urgente vermelho
+    if (empresaStatus === 'suspensa') {
+      banner = {
+        tipo: 'suspensa',
+        cor: 'linear-gradient(90deg,#dc2626,#b91c1c)',
+        icon: 'fa-circle-exclamation',
+        texto: '<strong>Sua conta está suspensa.</strong> Pague o PIX e reative imediatamente.',
+        cta: 'Pagar agora',
+        dismissible: false,
+      };
+    }
+    // 2) Assinatura pendente → aviso amarelo
+    else if (sub?.status === 'pendente') {
+      banner = {
+        tipo: 'pendente',
+        cor: 'linear-gradient(90deg,#f59e0b,#d97706)',
+        icon: 'fa-clock',
+        texto: '<strong>Pagamento pendente.</strong> Há uma fatura aguardando pagamento.',
+        cta: 'Ver fatura',
+        dismissible: true,
+      };
+    }
+    // 3) Trial expirando (≤ 7 dias)
+    else if (typeof trialDias === 'number' && trialDias <= 7 && trialDias > 0) {
+      banner = {
+        tipo: 'trial-fim',
+        cor: 'linear-gradient(90deg,#3b82f6,#6366f1)',
+        icon: 'fa-rocket',
+        texto: `<strong>Trial acaba em ${trialDias} dia${trialDias > 1 ? 's' : ''}.</strong> Escolha um plano para continuar usando o CorePro sem interrupção.`,
+        cta: 'Escolher plano',
+        dismissible: true,
+      };
+    }
+    // 4) Trial expirado
+    else if (typeof trialDias === 'number' && trialDias <= 0 && sub?.status === 'trial') {
+      banner = {
+        tipo: 'trial-expirado',
+        cor: 'linear-gradient(90deg,#dc2626,#991b1b)',
+        icon: 'fa-bell',
+        texto: '<strong>Seu trial expirou.</strong> Pague seu primeiro mês para continuar.',
+        cta: 'Pagar agora',
+        dismissible: false,
+      };
+    }
+    // 5) Trial confortável (> 7 dias): banner discreto azul claro
+    else if (typeof trialDias === 'number' && trialDias > 7) {
+      const dismissedKey = '_trial_banner_dismissed_' + (state.user.id_empresa || '');
+      if (sessionStorage.getItem(dismissedKey)) return;
+      banner = {
+        tipo: 'trial',
+        cor: 'linear-gradient(90deg,#0891b2,#0e7490)',
+        icon: 'fa-star',
+        texto: `<strong>${trialDias} dias de trial</strong> · Aproveite todos os recursos premium até ${sub?.trial_ate ? new Date(sub.trial_ate).toLocaleDateString('pt-BR') : ''}.`,
+        cta: 'Ver planos',
+        dismissible: true,
+      };
+    }
+
+    if (!banner) return;
+    renderTrialBanner(banner);
+  } catch (e) {
+    // 402/TENANT_SUSPENDED já tratado pelo interceptor — não polui o console
+    if (e?.response?.status !== 402) console.warn('[checkTrialBanner]', e?.message);
+  }
+}
+window.checkTrialBanner = checkTrialBanner;
+
+function renderTrialBanner(banner) {
+  // Remove anterior se existir
+  document.getElementById('trial-banner')?.remove();
+
+  const el = document.createElement('div');
+  el.id = 'trial-banner';
+  el.style.cssText = `
+    position:sticky;top:0;z-index:9998;
+    background:${banner.cor};
+    color:#fff;font-size:13px;font-weight:500;
+    padding:8px 16px;display:flex;align-items:center;gap:10px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.15);
+  `;
+  el.innerHTML = `
+    <i class="fas ${banner.icon}" style="font-size:14px"></i>
+    <span style="flex:1;line-height:1.4">${banner.texto}</span>
+    <button id="tb-cta" style="background:rgba(255,255,255,0.2);color:#fff;border:1px solid rgba(255,255,255,0.3);padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">
+      ${banner.cta} <i class="fas fa-arrow-right ml-1"></i>
+    </button>
+    ${banner.dismissible ? '<button id="tb-close" aria-label="Fechar" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:0 4px;opacity:0.8" title="Fechar até o próximo login">×</button>' : ''}
+  `;
+
+  // Insere antes do #topbar
+  const topbar = document.getElementById('topbar');
+  if (topbar?.parentNode) {
+    topbar.parentNode.insertBefore(el, topbar);
+  } else {
+    document.body.insertBefore(el, document.body.firstChild);
+  }
+
+  el.querySelector('#tb-cta').onclick = () => navigate('minha_assinatura');
+  el.querySelector('#tb-close')?.addEventListener('click', () => {
+    el.remove();
+    const dismissedKey = '_trial_banner_dismissed_' + (state.user?.id_empresa || '');
+    try { sessionStorage.setItem(dismissedKey, '1'); } catch {}
+  });
+}
+window.renderTrialBanner = renderTrialBanner;
 
 (async function init() {
   // Recupera mensagem de logout vinda do hard reload (se houver)
@@ -7844,16 +8452,30 @@ function bootApp() {
   if (isMasterRoute()) {
     // Injeta master.js dinamicamente
     const s = document.createElement('script');
-    s.src = '/static/master.js?v=1';
+    s.src = '/static/master.js?v=2';
     s.onerror = () => {
       $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar área Master.</p></div>';
     };
     document.body.appendChild(s);
     return; // não carrega app normal
   }
-  // Listener de hash para sair/entrar da área master também
+
+  // === CADASTRO PÚBLICO (SaaS Signup) ===
+  // Quando hash começa com #cadastro, carrega tela de signup standalone.
+  const isCadastroRoute = () => /^#?cadastro(\/|$)/.test(location.hash || '');
+  if (isCadastroRoute()) {
+    const s = document.createElement('script');
+    s.src = '/static/cadastro.js?v=2';
+    s.onerror = () => {
+      $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar página de cadastro.</p></div>';
+    };
+    document.body.appendChild(s);
+    return;
+  }
+
+  // Listener de hash para sair/entrar das áreas isoladas
   window.addEventListener('hashchange', () => {
-    if (isMasterRoute()) location.reload();
+    if (isMasterRoute() || isCadastroRoute()) location.reload();
   });
 
   window.addEventListener('hashchange', () => {

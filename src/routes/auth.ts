@@ -10,6 +10,7 @@ import {
   validarSessao,
   requirePerfil,
 } from '../lib/auth';
+import { assertLimit, LimitExceededError } from '../lib/plan_limits';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -303,6 +304,17 @@ app.post('/usuarios', requirePerfil('admin'), async (c) => {
   const b = await c.req.json<any>();
   if (!b.login || !b.nome || !b.senha) return fail('Login, nome e senha obrigatórios.');
   if (b.senha.length < 6) return fail('Senha deve ter >= 6 caracteres.');
+
+  // SPRINT 2 — Limite de usuários do plano (apenas se ativo=1)
+  if ((b.ativo ?? 1) === 1) {
+    try {
+      await assertLimit(c.env.DB, id_empresa, 'usuarios');
+    } catch (e) {
+      if (e instanceof LimitExceededError) return e.toResponse();
+      throw e;
+    }
+  }
+
   const salt = randomHex(16);
   const hash = await hashSenha(salt, b.senha);
   try {
@@ -332,6 +344,22 @@ app.put('/usuarios/:id', requirePerfil('admin'), async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const id = toInt(c.req.param('id'));
   const b = await c.req.json<any>();
+
+  // SPRINT 2 — Se está REATIVANDO usuário inativo, valida limite
+  if ((b.ativo ?? 1) === 1) {
+    const cur: any = await c.env.DB.prepare(
+      `SELECT ativo FROM usuarios WHERE id_usuario=? AND id_empresa=?`
+    ).bind(id, id_empresa).first();
+    if (cur && Number(cur.ativo) === 0) {
+      try {
+        await assertLimit(c.env.DB, id_empresa, 'usuarios');
+      } catch (e) {
+        if (e instanceof LimitExceededError) return e.toResponse();
+        throw e;
+      }
+    }
+  }
+
   // Garante isolamento: só atualiza se o usuário pertencer à mesma empresa do admin
   await c.env.DB.prepare(
     `UPDATE usuarios SET nome=?, perfil=?, ativo=? WHERE id_usuario=? AND id_empresa=?`

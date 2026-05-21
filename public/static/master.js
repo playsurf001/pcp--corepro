@@ -225,6 +225,7 @@
         <nav class="master-nav">
           <a data-r="dashboard"><i class="fas fa-chart-line w-5"></i> Dashboard</a>
           <a data-r="empresas"><i class="fas fa-building w-5"></i> Empresas</a>
+          <a data-r="financeiro"><i class="fas fa-credit-card w-5"></i> Financeiro</a>
           <a data-r="planos"><i class="fas fa-layer-group w-5"></i> Planos</a>
         </nav>
         <div class="master-user">
@@ -834,6 +835,282 @@
   }
 
   /* ============================================================
+   * 🆕 SPRINT 3 — TELA: FINANCEIRO
+   * KPIs (MRR/Receita/Aprovados/Suspensas) + lista de payments + ações
+   * ============================================================ */
+  async function viewFinanceiro() {
+    const main = $('#m-main');
+    main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando financeiro…</div>';
+    try {
+      const [rResumo, rPayments, rEmpresas] = await Promise.all([
+        api('get', '/master/billing/resumo'),
+        api('get', '/master/billing/payments?limit=100'),
+        api('get', '/master/empresas?limit=500'),
+      ]);
+      const resumo = rResumo.data || {};
+      const payments = rPayments.data || [];
+      const empresas = (rEmpresas.data?.list || rEmpresas.data || []).filter(e => e.id_empresa !== 1);
+
+      const statusBadge = {
+        pendente:  '<span class="master-badge" style="background:rgba(245,158,11,.2);color:#fbbf24">Pendente</span>',
+        aprovado:  '<span class="master-badge ativa">Aprovado</span>',
+        cancelado: '<span class="master-badge" style="background:rgba(100,116,139,.2);color:#94a3b8">Cancelado</span>',
+        rejeitado: '<span class="master-badge" style="background:rgba(239,68,68,.2);color:#fca5a5">Rejeitado</span>',
+        estornado: '<span class="master-badge" style="background:rgba(168,85,247,.2);color:#c4b5fd">Estornado</span>',
+      };
+
+      main.innerHTML = `
+        <div class="master-header">
+          <div>
+            <h2>Financeiro</h2>
+            <div class="subtitle">Cobranças, pagamentos PIX e receita consolidada</div>
+          </div>
+          <button class="master-btn master-btn-primary" id="m-fin-cobrar"><i class="fas fa-file-invoice-dollar"></i> Nova cobrança</button>
+        </div>
+
+        <!-- KPIs -->
+        <div class="master-kpi">
+          <div class="master-card">
+            <div class="label"><i class="fas fa-arrows-spin mr-1"></i> MRR ativo</div>
+            <div class="value">${fmt.money(resumo.mrr || 0)}</div>
+            <div class="delta">Subscriptions com status=ativa</div>
+          </div>
+          <div class="master-card">
+            <div class="label"><i class="fas fa-coins mr-1"></i> Receita do mês</div>
+            <div class="value">${fmt.money(resumo.receita_mes || 0)}</div>
+            <div class="delta">${new Date().toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</div>
+          </div>
+          <div class="master-card">
+            <div class="label"><i class="fas fa-check-circle mr-1"></i> Pagamentos aprovados</div>
+            <div class="value">${fmt.int(resumo.pagamentos_aprovados || 0)}</div>
+            <div class="delta">Históricos no total</div>
+          </div>
+          <div class="master-card">
+            <div class="label"><i class="fas fa-circle-exclamation mr-1"></i> Empresas suspensas</div>
+            <div class="value" style="color:${(resumo.empresas_suspensas||0) > 0 ? '#fbbf24' : '#fff'}">${fmt.int(resumo.empresas_suspensas || 0)}</div>
+            <div class="delta">Por inadimplência</div>
+          </div>
+        </div>
+
+        <!-- Receita por mês (mini gráfico via barras CSS) -->
+        ${Array.isArray(resumo.por_mes) && resumo.por_mes.length > 0 ? `
+          <div class="master-card" style="margin-bottom:20px">
+            <h3 style="font-size:.95rem;font-weight:700;color:#fff;margin-bottom:14px;">
+              <i class="fas fa-chart-column mr-1" style="color:#60a5fa"></i> Receita nos últimos meses
+            </h3>
+            <div style="display:flex;align-items:flex-end;gap:10px;height:140px;padding:0 4px;">
+              ${(() => {
+                const maxV = Math.max(...resumo.por_mes.map(m => Number(m.total || 0)), 1);
+                return resumo.por_mes.map(m => {
+                  const v = Number(m.total || 0);
+                  const h = Math.max(4, Math.round((v / maxV) * 120));
+                  return `
+                    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;">
+                      <div style="font-size:.7rem;color:#94a3b8;font-weight:600;">${fmt.money(v).replace('R$ ','')}</div>
+                      <div style="width:100%;height:${h}px;background:linear-gradient(180deg,#7c3aed,#2563eb);border-radius:6px 6px 0 0;"></div>
+                      <div style="font-size:.65rem;color:#64748b;text-transform:uppercase;">${m.mes}</div>
+                    </div>`;
+                }).join('');
+              })()}
+            </div>
+          </div>` : ''}
+
+        <!-- Tabela de pagamentos -->
+        <div class="master-card" style="padding:0;overflow:hidden;">
+          <div style="padding:18px 22px;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center;">
+            <h3 style="font-size:.95rem;font-weight:700;color:#fff;">
+              <i class="fas fa-list mr-1" style="color:#a78bfa"></i> Últimos pagamentos
+            </h3>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="search" id="m-fin-search" placeholder="Buscar empresa/referência…" 
+                     style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:7px 12px;border-radius:8px;font-size:.85rem;width:240px"/>
+              <select id="m-fin-status" style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:7px 12px;border-radius:8px;font-size:.85rem;">
+                <option value="">Todos status</option>
+                <option value="pendente">Pendentes</option>
+                <option value="aprovado">Aprovados</option>
+                <option value="cancelado">Cancelados</option>
+                <option value="rejeitado">Rejeitados</option>
+              </select>
+            </div>
+          </div>
+          ${payments.length === 0 ? `
+            <div class="master-empty"><i class="fas fa-folder-open"></i><p>Nenhum pagamento ainda.</p></div>
+          ` : `
+            <div style="overflow:auto;max-height:600px;">
+              <table class="master-table" style="background:transparent;">
+                <thead>
+                  <tr>
+                    <th>Empresa</th>
+                    <th>Referência</th>
+                    <th style="text-align:right;">Valor</th>
+                    <th>Status</th>
+                    <th>Vencimento</th>
+                    <th>Pago em</th>
+                    <th style="text-align:right;">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="m-fin-tbody">
+                  ${renderPaymentsRows(payments, statusBadge)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>
+      `;
+
+      // Filtros locais
+      const allPayments = payments.slice();
+      const reapplyFilters = () => {
+        const q = ($('#m-fin-search')?.value || '').toLowerCase().trim();
+        const s = $('#m-fin-status')?.value || '';
+        let filtered = allPayments;
+        if (q) {
+          filtered = filtered.filter(p =>
+            (p.empresa_nome || '').toLowerCase().includes(q) ||
+            (p.referencia || '').toLowerCase().includes(q) ||
+            String(p.id_payment).includes(q)
+          );
+        }
+        if (s) filtered = filtered.filter(p => p.status === s);
+        const tbody = $('#m-fin-tbody');
+        if (tbody) tbody.innerHTML = renderPaymentsRows(filtered, statusBadge);
+        bindPaymentActions();
+      };
+      $('#m-fin-search')?.addEventListener('input', reapplyFilters);
+      $('#m-fin-status')?.addEventListener('change', reapplyFilters);
+
+      // Ação: Nova cobrança
+      $('#m-fin-cobrar').onclick = () => openCriarCobrancaModal(empresas);
+
+      bindPaymentActions();
+    } catch (e) {
+      main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
+    }
+  }
+
+  function renderPaymentsRows(payments, statusBadge) {
+    return payments.map(p => {
+      const aprovado = p.status === 'aprovado';
+      const pendente = p.status === 'pendente';
+      return `
+        <tr data-pay="${p.id_payment}">
+          <td>
+            <strong style="color:#fff;">${p.empresa_nome || ('Empresa ' + p.id_empresa)}</strong>
+            <div style="font-size:.7rem;color:#64748b;">#${p.id_empresa}</div>
+          </td>
+          <td style="font-family:monospace;font-size:.78rem;">${p.referencia || ('#' + p.id_payment)}</td>
+          <td style="text-align:right;font-weight:700;color:${aprovado ? '#34d399' : '#fff'};">${fmt.money(p.valor)}</td>
+          <td>${statusBadge[p.status] || p.status}</td>
+          <td style="font-size:.78rem;color:#94a3b8;">${p.dt_vencimento ? new Date(p.dt_vencimento).toLocaleDateString('pt-BR') : '—'}</td>
+          <td style="font-size:.78rem;color:#94a3b8;">${p.dt_pagamento ? new Date(p.dt_pagamento).toLocaleString('pt-BR') : '—'}</td>
+          <td style="text-align:right;">
+            ${pendente ? `
+              <button class="master-btn master-btn-secondary" data-act="aprovar" data-id="${p.id_payment}" title="Aprovar manualmente" style="padding:5px 10px;font-size:.75rem;"><i class="fas fa-check"></i></button>
+              <button class="master-btn master-btn-secondary" data-act="sync" data-id="${p.id_payment}" title="Sincronizar com MP" style="padding:5px 10px;font-size:.75rem;"><i class="fas fa-rotate"></i></button>
+              <button class="master-btn master-btn-secondary" data-act="cancelar" data-id="${p.id_payment}" title="Cancelar cobrança" style="padding:5px 10px;font-size:.75rem;color:#fca5a5;"><i class="fas fa-times"></i></button>
+            ` : `
+              <button class="master-btn master-btn-secondary" data-act="sync" data-id="${p.id_payment}" title="Sincronizar com MP" style="padding:5px 10px;font-size:.75rem;"><i class="fas fa-rotate"></i></button>
+            `}
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function bindPaymentActions() {
+    $$('#m-fin-tbody [data-act]').forEach(btn => {
+      btn.onclick = async () => {
+        const act = btn.dataset.act;
+        const id = btn.dataset.id;
+        if (!id) return;
+        const confirmMsg = {
+          aprovar: 'Aprovar este pagamento manualmente? A empresa será reativada.',
+          cancelar: 'Cancelar esta cobrança?',
+          sync: 'Sincronizar status com Mercado Pago?',
+        }[act];
+        if (act !== 'sync' && !confirm(confirmMsg)) return;
+
+        btn.disabled = true;
+        const original = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        try {
+          await api('post', `/master/billing/payments/${id}/${act}`);
+          toast(`Ação "${act}" executada.`, 'success');
+          viewFinanceiro();
+        } catch (e) {
+          toast(e.message || 'Erro na ação', 'error');
+          btn.disabled = false;
+          btn.innerHTML = original;
+        }
+      };
+    });
+  }
+
+  function openCriarCobrancaModal(empresas) {
+    const opts = empresas.map(e =>
+      `<option value="${e.id_empresa}">${e.nome} (#${e.id_empresa}) — ${e.plano_codigo || e.plano || ''}</option>`
+    ).join('');
+
+    modal(`
+      <h3 style="font-size:1.1rem;font-weight:700;color:#fff;margin-bottom:14px;">
+        <i class="fas fa-file-invoice-dollar" style="color:#a78bfa"></i> Criar nova cobrança PIX
+      </h3>
+      <div style="color:#94a3b8;font-size:.85rem;margin-bottom:18px;">
+        Gera uma cobrança PIX para a empresa selecionada. Se houver assinatura ativa, o valor padrão é o do plano.
+      </div>
+      <form id="m-cobrar-form" style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <label style="display:block;font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:6px;">Empresa</label>
+          <select name="id_empresa" required style="width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:10px;border-radius:8px;font-size:.9rem;">
+            <option value="">— Selecione —</option>
+            ${opts}
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:6px;">Valor (opcional — usa plano se vazio)</label>
+          <input type="number" step="0.01" min="0.01" name="valor" placeholder="0.00" 
+                 style="width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:10px;border-radius:8px;font-size:.9rem;"/>
+        </div>
+        <div>
+          <label style="display:block;font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:6px;">Descrição (opcional)</label>
+          <input type="text" name="descricao" placeholder="Ex.: Mensalidade janeiro/2026" 
+                 style="width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:10px;border-radius:8px;font-size:.9rem;"/>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px;">
+          <button type="button" class="master-btn master-btn-secondary" id="m-cobrar-cancel">Cancelar</button>
+          <button type="submit" class="master-btn master-btn-primary"><i class="fas fa-paper-plane"></i> Gerar PIX</button>
+        </div>
+      </form>
+    `);
+
+    const closeModal = () => document.querySelector('.master-modal-bg')?.remove();
+    $('#m-cobrar-cancel').onclick = closeModal;
+
+    $('#m-cobrar-form').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target);
+      const id = fd.get('id_empresa');
+      if (!id) return;
+      const valor = fd.get('valor');
+      const body = {};
+      if (valor && Number(valor) > 0) body.valor = Number(valor);
+      const desc = fd.get('descricao');
+      if (desc) body.descricao = String(desc);
+      const btn = ev.target.querySelector('button[type=submit]');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Gerando…';
+      try {
+        await api('post', `/master/billing/empresas/${id}/cobrar`, body);
+        toast('Cobrança PIX gerada com sucesso!', 'success');
+        closeModal();
+        viewFinanceiro();
+      } catch (e) {
+        toast(e.message || 'Erro ao gerar cobrança', 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> Gerar PIX';
+      }
+    };
+  }
+
+  /* ============================================================
    * ROUTER
    * ============================================================ */
   function dispatch() {
@@ -851,6 +1128,7 @@
       return viewEmpresas();
     }
     if (top === 'planos') { highlightNav('planos'); return viewPlanos(); }
+    if (top === 'financeiro') { highlightNav('financeiro'); return viewFinanceiro(); }
     // fallback
     location.hash = '#master/dashboard';
   }

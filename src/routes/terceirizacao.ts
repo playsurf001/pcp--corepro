@@ -3,6 +3,7 @@
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
 import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
+import { assertLimit, LimitExceededError } from '../lib/plan_limits';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -712,6 +713,15 @@ app.post('/terc/terceirizados', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
   if (!b.nome_terc) return fail('nome_terc é obrigatório');
+
+  // SPRINT 2 — Limite de terceirizados do plano
+  try {
+    await assertLimit(c.env.DB, id_empresa, 'terceirizados');
+  } catch (e) {
+    if (e instanceof LimitExceededError) return e.toResponse();
+    throw e;
+  }
+
   try {
     const r = await c.env.DB.prepare(`
       INSERT INTO terc_terceirizados (nome_terc, id_setor, cpf_cnpj, telefone, email, endereco, qtd_pessoas, min_trab_dia, efic_padrao, prazo_padrao, situacao, observacao, ativo, criado_por, id_empresa)
@@ -1478,6 +1488,14 @@ app.post('/terc/remessas', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
   if (!b.id_terc) return fail('Terceirizado é obrigatório');
+
+  // SPRINT 2 — Limite de remessas/mês do plano
+  try {
+    await assertLimit(c.env.DB, id_empresa, 'remessas_mes');
+  } catch (e) {
+    if (e instanceof LimitExceededError) return e.toResponse();
+    throw e;
+  }
 
   // ---- Normalizar para estrutura multi-itens ----
   let itens: any[] = Array.isArray(b.itens) ? b.itens : [];

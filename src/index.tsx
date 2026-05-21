@@ -4,13 +4,16 @@ import { logger } from 'hono/logger';
 import type { Bindings } from './lib/db';
 import { authMiddleware, requireAdmin, requirePerfil } from './lib/auth';
 import { masterAuthMiddleware, tenantStatusGuard } from './lib/master_auth';
+import { rateLimit } from './lib/rate_limit';
 
 import auth from './routes/auth';
+import billing from './routes/billing';
 import configuracoes from './routes/configuracoes';
 import cores from './routes/cores';
 import empresa from './routes/empresa';
 import master from './routes/master';
 import relatoriosDetalhados from './routes/relatorios_detalhados';
+import signup from './routes/signup';
 import terceirizacao from './routes/terceirizacao';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any; master: any } }>();
@@ -32,15 +35,29 @@ app.get('/api/health', (c) =>
 // Registrar ANTES do authMiddleware geral para não conflitar.
 // ────────────────────────────────────────────────────────────────────────
 app.use('/api/master/*', masterAuthMiddleware);
+// Rate limits da área master (login) — protege contra brute force
+app.use('/api/master/auth/login', rateLimit({ key: 'master-login', max: 10, windowSec: 60 }));
 app.route('/api', master);
 
+// SPRINT 5 — Rate limits para endpoints públicos críticos
+app.use('/api/public/signup',       rateLimit({ key: 'signup',  max: 5,  windowSec: 60 }));
+app.use('/api/public/signup/check', rateLimit({ key: 'check',   max: 30, windowSec: 60 }));
+app.use('/api/public/mp/webhook',   rateLimit({ key: 'webhook', max: 60, windowSec: 60 }));
+app.use('/api/auth/login',          rateLimit({ key: 'login',   max: 15, windowSec: 60 }));
+
 // Middleware de autenticação (protege /api/* exceto rotas públicas e /api/master/*)
+// IMPORTANTE: registrar ANTES dos route handlers de billing/signup para que
+// /api/billing/* (usuário) receba c.get('user') e c.get('id_empresa').
+// /api/public/* é isento dentro do authMiddleware.
 app.use('/api/*', authMiddleware);
 
-// Tenant status guard: bloqueia empresas suspensas/bloqueadas (após auth)
-// Aplica a todas as rotas tenant-scoped — login/logout/me/health já passaram
-// porque NÃO têm c.get('user') ainda (estão em PUBLIC_PATHS) ou são tratadas.
+// Tenant status guard: bloqueia empresas suspensas/bloqueadas (após auth).
+// Exceções (login/me/billing/empresa/uso/public) tratadas dentro do guard.
 app.use('/api/*', tenantStatusGuard());
+
+// Signup público (/api/public/*) + Billing (/api/billing/* + /api/public/mp/webhook)
+app.route('/api', signup);
+app.route('/api', billing);
 
 // Auth e Terceirização: acessíveis a TODOS os usuários autenticados
 app.route('/api', auth);
@@ -93,7 +110,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=28" rel="stylesheet" />
+  <link href="/static/styles.css?v=30" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -127,7 +144,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=28"></script>
+  <script src="/static/app.js?v=30"></script>
   <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;

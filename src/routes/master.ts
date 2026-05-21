@@ -472,4 +472,106 @@ app.get('/master/empresas/:id/usuarios', async (c) => {
   }
 });
 
+/* ============================================================
+ * SPRINT 2 — JOBS (cron / on-demand)
+ * ============================================================ */
+
+/**
+ * POST /master/jobs/expire-trials
+ * Expira trials vencidos:
+ *   - companies com status='trial' AND date(trial_ate) < date('now') → status='suspensa'
+ *   - subscriptions correspondentes → status='suspensa'
+ *
+ * Pode ser chamado:
+ *   - manualmente pelo super_admin no painel
+ *   - via Cloudflare Cron Trigger (futuro)
+ *
+ * Empresa id=1 (fundadora) é IMUNE.
+ */
+app.post('/master/jobs/expire-trials', async (c) => {
+  try {
+    // Lista candidatos (excluindo id=1)
+    const cand: any = await c.env.DB.prepare(
+      `SELECT id_empresa, nome, plano, trial_ate
+         FROM companies
+        WHERE id_empresa <> 1
+          AND status = 'trial'
+          AND trial_ate IS NOT NULL
+          AND date(trial_ate) < date('now')`
+    ).all();
+    const ids = (cand.results || []).map((r: any) => r.id_empresa);
+
+    if (ids.length === 0) {
+      return c.json(ok({ processadas: 0, empresas: [] }));
+    }
+
+    // Suspende empresas
+    for (const id of ids) {
+      await c.env.DB.prepare(
+        `UPDATE companies
+            SET status = 'suspensa',
+                dt_suspensao = datetime('now'),
+                dt_atualizacao = datetime('now')
+          WHERE id_empresa = ?`
+      ).bind(id).run();
+      await c.env.DB.prepare(
+        `UPDATE subscriptions
+            SET status = 'suspensa',
+                dt_atualizacao = datetime('now')
+          WHERE id_empresa = ? AND status IN ('ativa','trial','pendente')`
+      ).bind(id).run();
+    }
+
+    return c.json(ok({ processadas: ids.length, empresas: cand.results }));
+  } catch (e: any) {
+    return fail('Erro ao expirar trials: ' + (e?.message || e), 500);
+  }
+});
+
+/**
+ * GET /master/jobs/preview-expire-trials — pré-visualiza quais empresas
+ * seriam suspensas sem executar nada (útil para o painel)
+ */
+app.get('/master/jobs/preview-expire-trials', async (c) => {
+  try {
+    const cand: any = await c.env.DB.prepare(
+      `SELECT id_empresa, nome, slug, plano, trial_ate,
+              CAST(julianday('now') - julianday(trial_ate) AS INTEGER) AS dias_vencido
+         FROM companies
+        WHERE id_empresa <> 1
+          AND status = 'trial'
+          AND trial_ate IS NOT NULL
+          AND date(trial_ate) < date('now')
+        ORDER BY trial_ate`
+    ).all();
+    return c.json(ok({ qtd: (cand.results || []).length, empresas: cand.results || [] }));
+  } catch (e: any) {
+    return fail('Erro preview: ' + (e?.message || e), 500);
+  }
+});
+
+/**
+ * GET /master/jobs/proximas-cobrancas
+ * Lista subscriptions com dt_proxima_cobranca nos próximos 7 dias
+ */
+app.get('/master/jobs/proximas-cobrancas', async (c) => {
+  try {
+    const r: any = await c.env.DB.prepare(
+      `SELECT s.id_sub, s.id_empresa, c.nome AS empresa, p.codigo AS plano,
+              s.preco_aplicado, s.dt_proxima_cobranca, s.status,
+              CAST(julianday(s.dt_proxima_cobranca) - julianday('now') AS INTEGER) AS dias_para_vencer
+         FROM subscriptions s
+         JOIN companies c ON c.id_empresa = s.id_empresa
+         LEFT JOIN plans p ON p.id_plano = s.id_plano
+        WHERE s.status IN ('ativa','pendente')
+          AND s.dt_proxima_cobranca IS NOT NULL
+          AND date(s.dt_proxima_cobranca) <= date('now','+7 days')
+        ORDER BY s.dt_proxima_cobranca`
+    ).all();
+    return c.json(ok({ qtd: (r.results || []).length, items: r.results || [] }));
+  } catch (e: any) {
+    return fail('Erro: ' + (e?.message || e), 500);
+  }
+});
+
 export default app;
