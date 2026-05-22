@@ -3433,17 +3433,16 @@ async function TERC_openRemModal(id, onSave) {
         <span>Total: <b id="tot-valor" class="text-emerald-700">R$ 0,00</b></span>
         <span class="text-slate-500">Previsão: <b id="tot-prev">—</b></span>
       </div>
-      <div class="flex gap-2 flex-wrap">
-        <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+      <div class="rem-modal-actions">
+        <button id="m-cancel" class="btn btn-secondary rem-action-btn">
+          <i class="fas fa-times mr-1"></i>Cancelar
+        </button>
         ${edit ? `
-          <button id="m-print-rom-sel" class="btn" style="background:#7c3aed;color:#fff" title="Selecionar produtos e gerar romaneio">
+          <button id="m-print-rom-sel" class="btn rem-action-btn rem-btn-rom" title="Selecionar produtos e gerar romaneio">
             <i class="fas fa-print mr-1"></i>Gerar romaneio selecionado
           </button>
         ` : ''}
-        <button id="m-rascunho" class="btn btn-secondary" title="Salva o estado atual no navegador para continuar depois">
-          <i class="fas fa-bookmark mr-1"></i>Salvar rascunho
-        </button>
-        <button id="m-save" class="btn btn-primary">
+        <button id="m-save" class="btn btn-primary rem-action-btn rem-btn-save">
           <i class="fas fa-save mr-1"></i>Salvar remessa
         </button>
       </div>
@@ -3501,72 +3500,8 @@ async function TERC_openRemModal(id, onSave) {
     });
   }
 
-  // ---- RASCUNHO LOCAL (localStorage) ----
-  // Cada sessão de Nova Remessa pode salvar/recuperar 1 rascunho.
-  // Edição de remessa existente NÃO usa rascunho (escopo: novas).
-  const RASCUNHO_KEY = 'corepro:remessa:rascunho';
-  function _coletarEstado() {
-    return {
-      ts: Date.now(),
-      cabecalho: {
-        num_op: $('#m-op')?.value || '',
-        id_terc: $('#m-terc')?.value || '',
-        id_colecao: $('#m-col')?.value || '',
-        dt_saida: $('#m-dts')?.value || '',
-        dt_inicio: $('#m-dti')?.value || '',
-        qtd_pessoas: $('#m-pess')?.value || '',
-        min_trab_dia: $('#m-min')?.value || '',
-        efic_pct: $('#m-ef')?.value || '',
-        prazo_dias: $('#m-pz')?.value || '',
-        status: $('#m-status')?.value || 'AguardandoEnvio',
-        observacao: $('#m-obs')?.value || '',
-      },
-      itens: itens.map(it => ({
-        id_produto: it.id_produto, cod_ref: it.cod_ref, desc_ref: it.desc_ref,
-        id_servico: it.id_servico, cor: it.cor,
-        preco_unit: it.preco_unit, tempo_peca: it.tempo_peca,
-        grade: it.grade, id_grade_tamanho: it.id_grade_tamanho,
-        num_op: it.num_op, _num_op_manual: it._num_op_manual,
-      })),
-    };
-  }
-  function _aplicarEstado(s) {
-    if (!s || !s.cabecalho) return;
-    const h = s.cabecalho;
-    if ($('#m-op'))    $('#m-op').value    = h.num_op || '';
-    if ($('#m-terc'))  $('#m-terc').value  = h.id_terc || '';
-    if ($('#m-col'))   $('#m-col').value   = h.id_colecao || '';
-    if ($('#m-dts'))   $('#m-dts').value   = h.dt_saida || '';
-    if ($('#m-dti'))   $('#m-dti').value   = h.dt_inicio || '';
-    if ($('#m-pess'))  $('#m-pess').value  = h.qtd_pessoas || 1;
-    if ($('#m-min'))   $('#m-min').value   = h.min_trab_dia || 480;
-    if ($('#m-ef'))    $('#m-ef').value    = h.efic_pct || 0.8;
-    if ($('#m-pz'))    $('#m-pz').value    = h.prazo_dias || 0;
-    if ($('#m-status'))$('#m-status').value= h.status || 'AguardandoEnvio';
-    if ($('#m-obs'))   $('#m-obs').value   = h.observacao || '';
-    if (Array.isArray(s.itens) && s.itens.length > 0) {
-      itens = s.itens.map(it => newItem(it));
-      mountItens();
-    }
-  }
-  // Oferece restaurar rascunho ao abrir Nova Remessa
-  if (!edit) {
-    try {
-      const raw = localStorage.getItem(RASCUNHO_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        const ageMin = Math.round((Date.now() - (data.ts || 0)) / 60000);
-        setTimeout(() => {
-          if (confirm(`Existe um rascunho salvo há ${ageMin} min. Deseja recuperá-lo?`)) {
-            _aplicarEstado(data);
-            toast('Rascunho recuperado', 'success');
-          } else {
-            localStorage.removeItem(RASCUNHO_KEY);
-          }
-        }, 200);
-      }
-    } catch {}
-  }
+  // ---- Limpeza defensiva: remove rascunho legado do localStorage (feature descontinuada) ----
+  try { localStorage.removeItem('corepro:remessa:rascunho'); } catch {}
 
   // ---- Toggle modo avançado ----
   $('#m-adv').onchange = (e) => $('#m-advanced').classList.toggle('hidden', !e.target.checked);
@@ -4240,20 +4175,6 @@ async function TERC_openRemModal(id, onSave) {
     };
   }
 
-  // ---- Salvar rascunho (localStorage) ----
-  const btnRas = $('#m-rascunho');
-  if (btnRas) {
-    btnRas.onclick = () => {
-      try {
-        const data = _coletarEstado();
-        localStorage.setItem(RASCUNHO_KEY, JSON.stringify(data));
-        toast('Rascunho salvo no navegador', 'success');
-      } catch (e) {
-        toast('Falha ao salvar rascunho', 'error');
-      }
-    };
-  }
-
   // ---- Helpers de validação visual ----
   // Marca um campo como inválido com borda vermelha + mensagem amigável abaixo
   function _markInvalid(input, msg) {
@@ -4479,8 +4400,6 @@ async function TERC_openRemModal(id, onSave) {
       if (edit) await api('put', '/terc/remessas/' + id, body);
       else await api('post', '/terc/remessas', body);
       toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
-      // Limpa rascunho local após salvar com sucesso
-      try { localStorage.removeItem(RASCUNHO_KEY); } catch {}
       m.remove();
       if (onSave) onSave();
     } catch {}
