@@ -511,14 +511,17 @@ function renderLayout() {
                 <button type="button" class="nav-group-toggle" aria-expanded="${open}" aria-controls="nav-grp-${g}">
                   <i class="fas fa-cogs nav-group-icon"></i>
                   <span class="nav-group-label-inline">${g}</span>
+                  <span class="nav-group-count">${items.length}</span>
                   <i class="fas fa-chevron-down nav-group-caret"></i>
                 </button>
-                <div class="nav-group-items" id="nav-grp-${g}">
-                  ${items.map(i => `
-                    <a href="#${i.id}" data-route="${i.id}" class="nav-item">
-                      <i class="fas ${i.icon}"></i>
-                      <span>${i.label}</span>
-                    </a>`).join('')}
+                <div class="nav-group-items" id="nav-grp-${g}" role="region" aria-labelledby="nav-grp-${g}-toggle">
+                  <div class="nav-group-inner">
+                    ${items.map(i => `
+                      <a href="#${i.id}" data-route="${i.id}" class="nav-item">
+                        <i class="fas ${i.icon}"></i>
+                        <span>${i.label}</span>
+                      </a>`).join('')}
+                  </div>
                 </div>
               </div>`;
           }
@@ -1545,6 +1548,401 @@ const TERC_PRINT = {
       }
     }
     return linhas;
+  },
+
+  /* ================================================================
+   * 🆕 SELETOR DE PRODUTOS ANTES DE GERAR O ROMANEIO (premium UX)
+   * Abre um modal dark com lista de TODOS os itens (de uma ou múltiplas
+   * remessas), com checkboxes individuais + filtros (todos/cor/serviço)
+   * + footer sticky com KPIs (selecionados / qtd total / valor total)
+   * + botões "Cancelar" e "Gerar Romaneio".
+   *
+   * Quando o usuário confirma, devolve as remessas com `itens` FILTRADAS
+   * (preservando o restante da remessa) e chama `romaneio(remessasFiltradas)`.
+   * Se a remessa for legado (sem itens), permite selecionar a remessa inteira.
+   * ================================================================ */
+  async romaneioComSelecao(remessas, opts = {}) {
+    if (!Array.isArray(remessas)) remessas = [remessas];
+    if (remessas.length === 0) { toast('Sem remessas', 'warning'); return; }
+
+    // ───────── Achata em "candidatos" (linhas selecionáveis) ─────────
+    // Cada candidato = referência a um item específico de uma remessa
+    // (ou à remessa legado completa quando não há itens).
+    const candidatos = [];
+    let idxGlobal = 0;
+    for (let rIdx = 0; rIdx < remessas.length; rIdx++) {
+      const r = remessas[rIdx];
+      const itens = Array.isArray(r.itens) ? r.itens.filter(i => i && (i.ativo == null || i.ativo === 1 || i.ativo === true)) : [];
+      if (itens.length > 0) {
+        for (let iIdx = 0; iIdx < itens.length; iIdx++) {
+          const it = itens[iIdx];
+          let qtdItem = 0;
+          if (Array.isArray(it.grade)) qtdItem = it.grade.reduce((a, g) => a + (Number(g.qtd) || 0), 0);
+          else if (it.grade && typeof it.grade === 'object') qtdItem = Object.values(it.grade).reduce((a, q) => a + (Number(q) || 0), 0);
+          if (!qtdItem) qtdItem = Number(it.qtd_total) || 0;
+          const precoItem = Number(it.preco_unit) || 0;
+          const valorItem = Number(it.valor_total) || (qtdItem * precoItem);
+          candidatos.push({
+            uid: 'i' + (idxGlobal++),
+            rIdx, iIdx,
+            num_controle: r.num_controle,
+            num_op: (it.num_op && String(it.num_op).trim()) ? it.num_op : r.num_op,
+            cod_ref: it.cod_ref || r.cod_ref,
+            desc_ref: it.desc_ref || r.desc_ref,
+            desc_servico: it.desc_servico || r.desc_servico,
+            cor: it.cor || '',
+            qtd_total: qtdItem,
+            preco_unit: precoItem,
+            valor_total: valorItem,
+            grade: it.grade,
+            _isItem: true,
+          });
+        }
+      } else {
+        candidatos.push({
+          uid: 'r' + (idxGlobal++),
+          rIdx, iIdx: null,
+          num_controle: r.num_controle,
+          num_op: r.num_op,
+          cod_ref: r.cod_ref,
+          desc_ref: r.desc_ref,
+          desc_servico: r.desc_servico,
+          cor: r.cor || '',
+          qtd_total: Number(r.qtd_total) || 0,
+          preco_unit: Number(r.preco_unit) || 0,
+          valor_total: Number(r.valor_total) || 0,
+          grade: r.grade,
+          _isItem: false,
+        });
+      }
+    }
+
+    if (candidatos.length === 0) {
+      toast('Não há produtos para imprimir.', 'warning');
+      return;
+    }
+
+    // Casos triviais: 1 único item → pula seletor e imprime direto
+    if (candidatos.length === 1 && opts.skipIfOnly) {
+      return this.romaneio(remessas, opts);
+    }
+
+    // ───────── Renderiza o modal premium ─────────
+    return new Promise((resolve) => {
+      const selecionados = new Set(candidatos.map(c => c.uid)); // padrão: todos selecionados
+      const fmtBRL = (v) => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
+      const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+      // Listas únicas para filtros rápidos
+      const coresUnicas = [...new Set(candidatos.map(c => c.cor).filter(Boolean))].sort();
+      const servicosUnicos = [...new Set(candidatos.map(c => c.desc_servico).filter(Boolean))].sort();
+
+      const m = document.createElement('div');
+      m.id = 'romaneio-selector-modal';
+      m.className = 'modal-backdrop romaneio-selector-bd';
+      m.innerHTML = `
+        <div class="romaneio-selector-card">
+          <!-- Header -->
+          <div class="rs-header">
+            <div>
+              <div class="rs-title">
+                <i class="fas fa-print"></i>
+                Selecionar produtos para o romaneio
+              </div>
+              <div class="rs-subtitle">${candidatos.length} produto${candidatos.length !== 1 ? 's' : ''} disponíve${candidatos.length !== 1 ? 'is' : 'l'} em ${remessas.length} remessa${remessas.length !== 1 ? 's' : ''}</div>
+            </div>
+            <button class="rs-close" id="rs-close" aria-label="Fechar"><i class="fas fa-times"></i></button>
+          </div>
+
+          <!-- Toolbar -->
+          <div class="rs-toolbar">
+            <div class="rs-search-wrap">
+              <i class="fas fa-search"></i>
+              <input type="search" id="rs-search" placeholder="Buscar por referência, descrição, cor ou serviço…" />
+            </div>
+            <div class="rs-quick-filters">
+              <button class="rs-chip rs-chip-primary" id="rs-all" title="Marcar todos os visíveis">
+                <i class="fas fa-check-double"></i> Selecionar todos
+              </button>
+              <button class="rs-chip" id="rs-none" title="Desmarcar todos">
+                <i class="fas fa-square"></i> Desmarcar todos
+              </button>
+              <button class="rs-chip" id="rs-invert" title="Inverter seleção">
+                <i class="fas fa-arrows-rotate"></i> Inverter
+              </button>
+            </div>
+          </div>
+
+          ${coresUnicas.length > 1 || servicosUnicos.length > 1 ? `
+            <div class="rs-quick-section">
+              ${coresUnicas.length > 1 ? `
+                <div class="rs-quick-row">
+                  <span class="rs-quick-label"><i class="fas fa-palette"></i> Cor:</span>
+                  <div class="rs-pill-group">
+                    ${coresUnicas.map(c => `<button class="rs-pill" data-by-cor="${esc(c)}">${esc(c)}</button>`).join('')}
+                  </div>
+                </div>
+              ` : ''}
+              ${servicosUnicos.length > 1 ? `
+                <div class="rs-quick-row">
+                  <span class="rs-quick-label"><i class="fas fa-screwdriver-wrench"></i> Serviço:</span>
+                  <div class="rs-pill-group">
+                    ${servicosUnicos.map(s => `<button class="rs-pill" data-by-serv="${esc(s)}">${esc(s)}</button>`).join('')}
+                  </div>
+                </div>
+              ` : ''}
+            </div>
+          ` : ''}
+
+          <!-- Lista de produtos (rolável) -->
+          <div class="rs-list-wrap">
+            <div class="rs-list-head">
+              <span class="rs-col-check"><i class="fas fa-check" style="opacity:0.4"></i></span>
+              <span class="rs-col-ref">REFERÊNCIA</span>
+              <span class="rs-col-desc">DESCRIÇÃO / SERVIÇO</span>
+              <span class="rs-col-cor">COR</span>
+              <span class="rs-col-qtd">QTD</span>
+              <span class="rs-col-valor">VALOR</span>
+            </div>
+            <div class="rs-list" id="rs-list">
+              ${candidatos.map(c => `
+                <label class="rs-row" data-uid="${c.uid}"
+                       data-search="${esc((c.cod_ref || '') + ' ' + (c.desc_ref || '') + ' ' + (c.desc_servico || '') + ' ' + (c.cor || ''))}"
+                       data-cor="${esc(c.cor || '')}"
+                       data-serv="${esc(c.desc_servico || '')}">
+                  <span class="rs-col-check">
+                    <input type="checkbox" data-uid="${c.uid}" checked class="rs-checkbox" />
+                  </span>
+                  <span class="rs-col-ref">
+                    <span class="rs-ref-code">${esc(c.cod_ref || '—')}</span>
+                    ${c.num_op ? `<span class="rs-ref-op">OP ${esc(c.num_op)}</span>` : ''}
+                  </span>
+                  <span class="rs-col-desc">
+                    <span class="rs-desc-main">${esc(c.desc_ref || '—')}</span>
+                    ${c.desc_servico ? `<span class="rs-desc-sub"><i class="fas fa-screwdriver-wrench"></i> ${esc(c.desc_servico)}</span>` : ''}
+                  </span>
+                  <span class="rs-col-cor">${c.cor ? `<span class="rs-cor-badge">${esc(c.cor)}</span>` : '<span style="color:#64748b">—</span>'}</span>
+                  <span class="rs-col-qtd">${fmt.int(c.qtd_total)}</span>
+                  <span class="rs-col-valor">${fmtBRL(c.valor_total)}</span>
+                </label>
+              `).join('')}
+              <div class="rs-empty" id="rs-empty" style="display:none">
+                <i class="fas fa-magnifying-glass"></i>
+                <p>Nenhum produto encontrado com este filtro.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer sticky -->
+          <div class="rs-footer">
+            <div class="rs-kpis">
+              <div class="rs-kpi">
+                <span class="rs-kpi-label">Selecionados</span>
+                <span class="rs-kpi-value" id="rs-kpi-sel">${candidatos.length}</span>
+                <span class="rs-kpi-of">de ${candidatos.length}</span>
+              </div>
+              <div class="rs-kpi">
+                <span class="rs-kpi-label">Qtd total</span>
+                <span class="rs-kpi-value" id="rs-kpi-qtd">—</span>
+                <span class="rs-kpi-of">peças</span>
+              </div>
+              <div class="rs-kpi">
+                <span class="rs-kpi-label">Valor total</span>
+                <span class="rs-kpi-value rs-kpi-value-strong" id="rs-kpi-valor">—</span>
+              </div>
+            </div>
+            <div class="rs-actions">
+              <button class="rs-btn rs-btn-ghost" id="rs-cancel">
+                <i class="fas fa-xmark"></i> Cancelar
+              </button>
+              <button class="rs-btn rs-btn-primary" id="rs-confirm">
+                <i class="fas fa-print"></i> Gerar Romaneio
+                <span class="rs-btn-count" id="rs-btn-count">${candidatos.length}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(m);
+
+      const $list = m.querySelector('#rs-list');
+      const $empty = m.querySelector('#rs-empty');
+      const $search = m.querySelector('#rs-search');
+      const $kpiSel = m.querySelector('#rs-kpi-sel');
+      const $kpiQtd = m.querySelector('#rs-kpi-qtd');
+      const $kpiValor = m.querySelector('#rs-kpi-valor');
+      const $btnCount = m.querySelector('#rs-btn-count');
+      const $confirm = m.querySelector('#rs-confirm');
+
+      const recalcKPIs = () => {
+        let qtd = 0, valor = 0, sel = 0;
+        for (const c of candidatos) {
+          if (selecionados.has(c.uid)) { sel++; qtd += c.qtd_total; valor += c.valor_total; }
+        }
+        $kpiSel.textContent = sel;
+        $kpiQtd.textContent = fmt.int(qtd);
+        $kpiValor.textContent = fmtBRL(valor);
+        $btnCount.textContent = sel;
+        $confirm.disabled = sel === 0;
+        $confirm.classList.toggle('is-disabled', sel === 0);
+      };
+
+      const applySearch = () => {
+        const q = ($search.value || '').toLowerCase().trim();
+        let visiveis = 0;
+        $list.querySelectorAll('.rs-row').forEach(row => {
+          const hay = row.dataset.search.toLowerCase();
+          const ok = !q || hay.includes(q);
+          row.style.display = ok ? '' : 'none';
+          if (ok) visiveis++;
+        });
+        $empty.style.display = visiveis === 0 ? '' : 'none';
+      };
+
+      // Sincroniza checkbox visual com Set
+      const syncCheckboxes = () => {
+        $list.querySelectorAll('.rs-checkbox').forEach(cb => {
+          const uid = cb.dataset.uid;
+          const checked = selecionados.has(uid);
+          cb.checked = checked;
+          cb.closest('.rs-row').classList.toggle('is-selected', checked);
+        });
+      };
+      syncCheckboxes();
+      recalcKPIs();
+
+      // Listeners
+      $search.addEventListener('input', applySearch);
+
+      $list.addEventListener('change', (ev) => {
+        const cb = ev.target.closest('.rs-checkbox');
+        if (!cb) return;
+        const uid = cb.dataset.uid;
+        if (cb.checked) selecionados.add(uid);
+        else selecionados.delete(uid);
+        cb.closest('.rs-row').classList.toggle('is-selected', cb.checked);
+        recalcKPIs();
+      });
+
+      // Clique na linha inteira (exceto no próprio checkbox) também alterna
+      $list.addEventListener('click', (ev) => {
+        if (ev.target.closest('.rs-checkbox')) return;
+        const row = ev.target.closest('.rs-row');
+        if (!row) return;
+        ev.preventDefault();
+        const cb = row.querySelector('.rs-checkbox');
+        cb.checked = !cb.checked;
+        const uid = cb.dataset.uid;
+        if (cb.checked) selecionados.add(uid);
+        else selecionados.delete(uid);
+        row.classList.toggle('is-selected', cb.checked);
+        recalcKPIs();
+      });
+
+      m.querySelector('#rs-all').onclick = () => {
+        // Marca apenas os VISÍVEIS (respeita busca)
+        $list.querySelectorAll('.rs-row').forEach(r => {
+          if (r.style.display !== 'none') selecionados.add(r.dataset.uid);
+        });
+        syncCheckboxes();
+        recalcKPIs();
+      };
+      m.querySelector('#rs-none').onclick = () => {
+        $list.querySelectorAll('.rs-row').forEach(r => {
+          if (r.style.display !== 'none') selecionados.delete(r.dataset.uid);
+        });
+        syncCheckboxes();
+        recalcKPIs();
+      };
+      m.querySelector('#rs-invert').onclick = () => {
+        $list.querySelectorAll('.rs-row').forEach(r => {
+          if (r.style.display === 'none') return;
+          const uid = r.dataset.uid;
+          if (selecionados.has(uid)) selecionados.delete(uid);
+          else selecionados.add(uid);
+        });
+        syncCheckboxes();
+        recalcKPIs();
+      };
+
+      // Filtros rápidos por cor/serviço (acumulativos — adiciona à seleção)
+      m.querySelectorAll('[data-by-cor]').forEach(b => {
+        b.onclick = () => {
+          const cor = b.dataset.byCor;
+          $list.querySelectorAll('.rs-row').forEach(r => {
+            if (r.dataset.cor === cor && r.style.display !== 'none') {
+              selecionados.add(r.dataset.uid);
+            }
+          });
+          syncCheckboxes();
+          recalcKPIs();
+          b.classList.add('rs-pill-active');
+          setTimeout(() => b.classList.remove('rs-pill-active'), 600);
+        };
+      });
+      m.querySelectorAll('[data-by-serv]').forEach(b => {
+        b.onclick = () => {
+          const serv = b.dataset.byServ;
+          $list.querySelectorAll('.rs-row').forEach(r => {
+            if (r.dataset.serv === serv && r.style.display !== 'none') {
+              selecionados.add(r.dataset.uid);
+            }
+          });
+          syncCheckboxes();
+          recalcKPIs();
+          b.classList.add('rs-pill-active');
+          setTimeout(() => b.classList.remove('rs-pill-active'), 600);
+        };
+      });
+
+      // ───────── Fechar e confirmar ─────────
+      const close = (result) => {
+        m.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      };
+      const onKey = (ev) => {
+        if (ev.key === 'Escape') close(null);
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && selecionados.size > 0) {
+          ev.preventDefault();
+          doConfirm();
+        }
+      };
+      document.addEventListener('keydown', onKey);
+
+      m.querySelector('#rs-close').onclick = () => close(null);
+      m.querySelector('#rs-cancel').onclick = () => close(null);
+      m.addEventListener('click', (ev) => { if (ev.target === m) close(null); });
+
+      const doConfirm = async () => {
+        if (selecionados.size === 0) return;
+        // Reconstrói remessas com `itens` filtrados
+        const remessasFiltradas = remessas.map((r, rIdx) => {
+          const selCandidatos = candidatos.filter(c => c.rIdx === rIdx && selecionados.has(c.uid));
+          if (selCandidatos.length === 0) return null; // remessa inteira excluída
+          const algumLegado = selCandidatos.some(c => !c._isItem);
+          if (algumLegado) return r; // remessa legado: usa original
+          const itensFiltrados = selCandidatos.map(c => r.itens[c.iIdx]);
+          return { ...r, itens: itensFiltrados };
+        }).filter(Boolean);
+
+        $confirm.disabled = true;
+        $confirm.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Gerando…';
+        try {
+          await this.romaneio(remessasFiltradas, opts);
+          close(remessasFiltradas);
+        } catch (e) {
+          console.error('[romaneio]', e);
+          toast('Erro ao gerar romaneio: ' + (e?.message || e), 'error');
+          $confirm.disabled = false;
+          $confirm.innerHTML = '<i class="fas fa-print"></i> Gerar Romaneio <span class="rs-btn-count" id="rs-btn-count">' + selecionados.size + '</span>';
+        }
+      };
+      $confirm.onclick = doConfirm;
+
+      // Foco inicial no campo de busca para UX rápida
+      setTimeout(() => $search.focus(), 60);
+    });
   },
 
   /* ================================================================
@@ -2620,9 +3018,10 @@ ROUTES.terc_remessas = async (main) => {
     }, 10);
   };
   // Handlers de impressão individual (buscam detalhe completo antes)
+  // Mostra seletor de produtos antes de gerar romaneio (UX premium)
   window.TERC_printRom = async (id) => {
     const r = await api('get', '/terc/remessas/' + id);
-    await TERC_PRINT.romaneio([r.data]);
+    await TERC_PRINT.romaneioComSelecao([r.data]);
   };
   window.TERC_printCompTotal = async (id) => {
     const r = await api('get', '/terc/remessas/' + id);
@@ -2652,7 +3051,9 @@ ROUTES.terc_remessas = async (main) => {
           detalhes.push(d.data);
         } catch { detalhes.push(r); }
       }
-      await TERC_PRINT.romaneio(detalhes);
+      // Mostra seletor de produtos antes (UX premium — permite escolher
+      // exatamente o que vai no romaneio em lote)
+      await TERC_PRINT.romaneioComSelecao(detalhes);
     } finally {
       $btnRomLote.disabled = false;
       $btnRomLote.innerHTML = original;
@@ -3034,6 +3435,11 @@ async function TERC_openRemModal(id, onSave) {
       </div>
       <div class="flex gap-2 flex-wrap">
         <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+        ${edit ? `
+          <button id="m-print-rom-sel" class="btn" style="background:#7c3aed;color:#fff" title="Selecionar produtos e gerar romaneio">
+            <i class="fas fa-print mr-1"></i>Gerar romaneio selecionado
+          </button>
+        ` : ''}
         <button id="m-rascunho" class="btn btn-secondary" title="Salva o estado atual no navegador para continuar depois">
           <i class="fas fa-bookmark mr-1"></i>Salvar rascunho
         </button>
@@ -3811,6 +4217,28 @@ async function TERC_openRemModal(id, onSave) {
 
   // ---- Cancelar ----
   $('#m-cancel').onclick = () => m.remove();
+
+  // ---- 🆕 Gerar romaneio selecionado (apenas em modo edição) ----
+  const $btnPrintSel = $('#m-print-rom-sel');
+  if ($btnPrintSel) {
+    $btnPrintSel.onclick = async () => {
+      $btnPrintSel.disabled = true;
+      const original = $btnPrintSel.innerHTML;
+      $btnPrintSel.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Carregando…';
+      try {
+        // Busca a remessa fresca do servidor (com itens + grade) para garantir
+        // dados atualizados — usuário pode ter editado e ainda não salvou,
+        // mas o foco do "gerar romaneio selecionado" é imprimir o que ESTÁ salvo
+        const rFresh = await api('get', '/terc/remessas/' + id);
+        await TERC_PRINT.romaneioComSelecao([rFresh.data]);
+      } catch (e) {
+        toast('Erro ao carregar remessa: ' + (e?.message || e), 'error');
+      } finally {
+        $btnPrintSel.disabled = false;
+        $btnPrintSel.innerHTML = original;
+      }
+    };
+  }
 
   // ---- Salvar rascunho (localStorage) ----
   const btnRas = $('#m-rascunho');
@@ -5015,7 +5443,8 @@ async function TERC_openRemDetalhe(id) {
   m.appendChild(card); document.body.appendChild(m);
   $('#m-close').onclick = () => m.remove();
   // Ações de impressão — usam o módulo TERC_PRINT (replica planilha)
-  $('#m-print-rom').onclick = () => TERC_PRINT.romaneio([r]);
+  // Romaneio passa pelo seletor de produtos (escolhe quais itens incluir)
+  $('#m-print-rom').onclick = () => TERC_PRINT.romaneioComSelecao([r]);
   $('#m-print-comp').onclick = () => TERC_PRINT.comprovanteTotal(r);
   $('#m-print-parcial').onclick = () => TERC_PRINT.controleParcial(r);
   // Excluir retorno — confirmação simples + recálculo automático no backend

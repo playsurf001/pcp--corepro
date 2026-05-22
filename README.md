@@ -196,6 +196,45 @@ npx wrangler pages secret put PUBLIC_BASE_URL --project-name corepro-confeccao
 ```
 Sem essas vars o sistema opera em modo MOCK (QR fake, status manual via "Aprovar" no master/financeiro).
 
+### ✨ FASE 3 — UX Polish (sidebar + romaneio com seleção, deploy 2026-05-22)
+**Deploy**: cache v=31 em produção (https://corepro-confeccao.pages.dev).
+
+#### 🐛 Bug fix: Sidebar SISTEMA accordion
+- **Problema**: itens do menu **Sistema** (Usuários, Minha Empresa, Assinatura & Plano, Configurações) ficavam visíveis FORA do collapse, vazando da estrutura colapsável.
+- **Causa raiz**: o truque CSS `grid-template-rows: 0fr → 1fr` exige **um único filho wrapper** com `overflow:hidden`. Aplicado direto em `.nav-group-items` com múltiplos `.nav-item` como filhos, o grid criava várias linhas que não colapsavam corretamente.
+- **Fix**: introduzido wrapper `.nav-group-inner` envolvendo todos os items (single child para o grid trick funcionar), em `app.js` (renderLayout) e `styles.css`.
+- **Bonus UX**: pill com contagem de itens no toggle (`<span class="nav-group-count">9</span>`) — usuário enxerga "Sistema 9".
+- **Animação**: 0.28s ease em `grid-template-rows` + `opacity` + `margin` para abertura/fechamento suave; persistência mantida via `localStorage` (`nav-sistema-open`).
+
+#### 🖨 Romaneio com seleção de produtos (modal premium)
+Substitui geração direta de romaneio por **modal de seleção prévia** em todos os 3 pontos de entrada:
+1. **Romaneio em remessa única** (botão "Gerar Romaneio" da lista)
+2. **Romaneio em lote** (múltiplas remessas selecionadas)
+3. **Modal de detalhes** (botão `🖨` dentro do detalhe da remessa)
+4. **NOVO: Editar Remessa** — botão "🖨 Gerar romaneio selecionado" no footer do modal de edição (apenas em `edit mode`); handler busca remessa fresca da API antes de abrir.
+
+**Função nova**: `TERC_PRINT.romaneioComSelecao(remessas, opts)` (~250 linhas) em `app.js`.
+- Achata `remessas[].itens[]` em candidatos preservando índices `rIdx/iIdx` para reconstrução.
+- `Set<uid>` mantém seleção; `recalcKPIs()` atualiza footer em tempo real.
+- Header com busca instantânea + chips (Selecionar todos / Desmarcar / Inverter).
+- Filtros rápidos por **cor** e **serviço** (pills `.rs-pill` com scale animation).
+- Lista grid 6 colunas: checkbox / referência+descrição / serviço / cor / qtd / valor (verde `#34d399`).
+- Footer sticky com 3 KPIs (selecionados, qtd total, valor total) + botões `Cancelar` / `Gerar Romaneio (N)`.
+- Atalhos: **ESC** fecha, **Ctrl+Enter** confirma.
+- Ao confirmar: retorna `remessas.map(r => ({ ...r, itens: itensFiltrados }))` — `romaneio()` recalcula totais e paginação automaticamente via `_flattenRemessasParaLinhas()`.
+
+**Visual** (CSS, ~500 linhas novas em `styles.css`):
+- Backdrop com `backdrop-filter: blur(8px)`.
+- Card gradient escuro `#1e293b → #0f172a`, borda purple `#7c3aed`, animação `slideUp`.
+- Botão primário gradient `#7c3aed → #6366f1` com shadow purple e badge contador.
+- Custom scrollbar, accent-color `#7c3aed` nos checkboxes, hover purple translúcido.
+- Mobile responsive (@media ≤720px): grid colapsa para 3 colunas.
+
+#### Arquivos alterados
+- `public/static/app.js` — `renderLayout` (wrapper + count pill), `TERC_PRINT.romaneioComSelecao()` nova, 3 call sites atualizados, botão "Gerar romaneio selecionado" + handler no modal de edição.
+- `public/static/styles.css` — Refactor `.nav-group-items` (wrapper pattern) + `.nav-group-count` pill + ~500 linhas de modal premium `.romaneio-selector-*` / `.rs-*`.
+- `src/index.tsx` — cache bump `v=30 → v=31` em app.js e styles.css.
+
 ### 🔑 Acesso Master (área administrativa SaaS)
 - **URL**: https://confeccao.corepro.com.br/#master
 - **Credenciais padrão**: `master` / `master` (trocar em produção)
