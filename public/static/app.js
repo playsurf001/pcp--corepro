@@ -8800,7 +8800,7 @@ window.renderTrialBanner = renderTrialBanner;
   if (isMasterRoute()) {
     // Injeta master.js dinamicamente
     const s = document.createElement('script');
-    s.src = '/static/master.js?v=3';
+    s.src = '/static/master.js?v=4';
     s.onerror = () => {
       $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar área Master.</p></div>';
     };

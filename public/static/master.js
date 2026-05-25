@@ -193,6 +193,54 @@
       .plan-form-section .grid-2, .plan-form-section .grid-3 { grid-template-columns: 1fr; }
       .plan-feats-grid { grid-template-columns: 1fr; }
     }
+
+    /* ============================================================
+     * SPRINT B — Gerenciamento de Empresas
+     * ============================================================ */
+    /* Seções de formulário */
+    .master-form-section { font-size: .8rem; font-weight: 700; color: #fff; margin: 22px 0 12px; padding-bottom: 8px; border-bottom: 1px solid #334155; text-transform: uppercase; letter-spacing: .06em; }
+    .master-form-section:first-child { margin-top: 0; }
+
+    /* Caixa de informação */
+    .master-info-box { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; background: rgba(96,165,250,.08); border: 1px solid rgba(96,165,250,.25); border-radius: 8px; color: #bfdbfe; font-size: .82rem; line-height: 1.5; margin-bottom: 14px; }
+    .master-info-box i { color: #60a5fa; margin-top: 2px; flex-shrink: 0; }
+    .master-info-box strong { color: #fff; }
+
+    /* Botão pequeno */
+    .master-btn-sm { padding: 6px 12px !important; font-size: .78rem !important; }
+
+    /* Modal de senha temporária (one-time) */
+    .m-pwd-box { background: rgba(15,23,42,.6); border: 1px solid #334155; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+    .m-pwd-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #334155; }
+    .m-pwd-row:last-child { border-bottom: none; }
+    .m-pwd-label { min-width: 130px; color: #94a3b8; font-size: .8rem; font-weight: 600; }
+    .m-pwd-value { flex: 1; color: #e2e8f0; font-family: 'Menlo', 'Courier New', monospace; font-size: .9rem; word-break: break-all; user-select: all; }
+    .m-pwd-value.m-pwd-secret { color: #fbbf24; font-weight: 700; font-size: 1.05rem; letter-spacing: .03em; background: rgba(251,191,36,.08); padding: 4px 10px; border-radius: 6px; border: 1px dashed rgba(251,191,36,.3); }
+    .m-pwd-copy { background: #334155; border: none; color: #cbd5e1; padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: all .15s; flex-shrink: 0; }
+    .m-pwd-copy:hover { background: #475569; color: #fff; transform: translateY(-1px); }
+    .m-pwd-copy:active { transform: translateY(0); }
+
+    /* Alerta dentro do modal */
+    .m-pwd-warn { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); border-radius: 8px; color: #fde68a; font-size: .82rem; line-height: 1.5; margin-bottom: 14px; }
+    .m-pwd-warn i { color: #fbbf24; margin-top: 2px; flex-shrink: 0; font-size: 1.1rem; }
+    .m-pwd-warn strong { color: #fcd34d; }
+    .m-pwd-warn u { text-decoration-color: #fbbf24; text-underline-offset: 2px; }
+
+    /* Filtros da lista de empresas */
+    .m-emp-filters { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .m-emp-filters .master-input, .m-emp-filters .master-select { width: 100%; }
+    @media (max-width: 900px) {
+      .m-emp-filters { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 540px) {
+      .m-emp-filters { grid-template-columns: 1fr; }
+      .master-kpi { grid-template-columns: repeat(2, 1fr) !important; }
+    }
+
+    /* Ajuste do master-kpi quando temos 5 colunas */
+    @media (max-width: 1100px) {
+      .master-kpi[style*="repeat(5"] { grid-template-columns: repeat(3, 1fr) !important; }
+    }
     `;
     const s = document.createElement('style');
     s.id = 'master-css';
@@ -404,8 +452,22 @@
     const main = $('#m-main');
     main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando empresas…</div>';
     try {
-      const r = await api('get', '/master/empresas');
+      const [r, planosR] = await Promise.all([
+        api('get', '/master/empresas'),
+        api('get', '/master/plans'),
+      ]);
       const empresas = r.data || [];
+      const planos   = planosR.data || [];
+
+      // KPIs rápidos
+      const kpis = {
+        total:     empresas.length,
+        ativas:    empresas.filter((e) => e.status === 'ativa').length,
+        trial:     empresas.filter((e) => e.status === 'trial').length,
+        suspensas: empresas.filter((e) => e.status === 'suspensa').length,
+        bloqueadas: empresas.filter((e) => e.bloqueada_em).length,
+      };
+
       main.innerHTML = `
         <div class="master-header">
           <div>
@@ -415,14 +477,31 @@
           <button class="master-btn master-btn-primary" onclick="masterNavigate('empresas/nova')"><i class="fas fa-plus"></i> Cadastrar empresa</button>
         </div>
 
-        <div style="display:flex;gap:10px;margin-bottom:16px;">
-          <input class="master-input" id="m-search" placeholder="Buscar por nome, CNPJ ou slug…" style="max-width:380px;" />
-          <select class="master-select" id="m-status-filter" style="max-width:200px;">
+        <div class="master-kpi" style="grid-template-columns:repeat(5, minmax(0,1fr));">
+          <div class="master-card"><div class="label">Total</div><div class="value">${kpis.total}</div></div>
+          <div class="master-card"><div class="label" style="color:#34d399;">Ativas</div><div class="value">${kpis.ativas}</div></div>
+          <div class="master-card"><div class="label" style="color:#60a5fa;">Em trial</div><div class="value">${kpis.trial}</div></div>
+          <div class="master-card"><div class="label" style="color:#fbbf24;">Suspensas</div><div class="value">${kpis.suspensas}</div></div>
+          <div class="master-card"><div class="label" style="color:#f87171;">Bloqueadas</div><div class="value">${kpis.bloqueadas}</div></div>
+        </div>
+
+        <div class="m-emp-filters">
+          <input class="master-input" id="m-search" placeholder="🔎 Buscar por nome, CNPJ ou slug…" />
+          <select class="master-select" id="m-status-filter">
             <option value="">Todos os status</option>
             <option value="ativa">Ativas</option>
             <option value="trial">Trial</option>
             <option value="suspensa">Suspensas</option>
             <option value="cancelada">Canceladas</option>
+          </select>
+          <select class="master-select" id="m-plano-filter">
+            <option value="">Todos os planos</option>
+            ${planos.map((p) => `<option value="${p.id_plano}">${p.nome}</option>`).join('')}
+          </select>
+          <select class="master-select" id="m-bloq-filter">
+            <option value="">Bloqueio: todas</option>
+            <option value="bloq">Apenas bloqueadas</option>
+            <option value="ok">Apenas não-bloqueadas</option>
           </select>
         </div>
 
@@ -432,6 +511,7 @@
               <th>Empresa</th>
               <th>Plano</th>
               <th>Status</th>
+              <th>Trial / Vencimento</th>
               <th style="text-align:right;">Usuários</th>
               <th style="text-align:right;">Remessas</th>
               <th>Criada</th>
@@ -444,28 +524,54 @@
         </div>
       `;
       // Filtros client-side
-      const search = $('#m-search'), statusF = $('#m-status-filter'), tbody = $('#m-tbody');
+      const search   = $('#m-search'),
+            statusF  = $('#m-status-filter'),
+            planoF   = $('#m-plano-filter'),
+            bloqF    = $('#m-bloq-filter'),
+            tbody    = $('#m-tbody');
       function applyFilter() {
         const q = (search.value || '').toLowerCase();
         const st = statusF.value;
+        const pl = planoF.value;
+        const bq = bloqF.value;
         const filt = empresas.filter((e) => {
           const matchQ = !q || [e.nome, e.cnpj, e.slug].some((x) => String(x || '').toLowerCase().includes(q));
           const matchS = !st || e.status === st;
-          return matchQ && matchS;
+          const matchP = !pl || String(e.id_plano) === String(pl);
+          const matchB = !bq || (bq === 'bloq' ? !!e.bloqueada_em : !e.bloqueada_em);
+          return matchQ && matchS && matchP && matchB;
         });
         tbody.innerHTML = renderEmpresasRows(filt);
       }
-      search.oninput = applyFilter;
+      search.oninput  = applyFilter;
       statusF.onchange = applyFilter;
+      planoF.onchange  = applyFilter;
+      bloqF.onchange   = applyFilter;
     } catch (e) {
       main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
     }
   }
 
+  // Calcula dias restantes de trial (negativo se já venceu)
+  function diasParaTrial(trial_ate) {
+    if (!trial_ate) return null;
+    const hoje = new Date(); hoje.setHours(0,0,0,0);
+    const t = new Date(trial_ate); t.setHours(0,0,0,0);
+    return Math.round((t.getTime() - hoje.getTime()) / 86400000);
+  }
+
   function renderEmpresasRows(list) {
-    if (!list.length) return `<tr><td colspan="7"><div class="master-empty"><i class="fas fa-folder-open"></i><p>Nenhuma empresa encontrada.</p></div></td></tr>`;
+    if (!list.length) return `<tr><td colspan="8"><div class="master-empty"><i class="fas fa-folder-open"></i><p>Nenhuma empresa encontrada.</p></div></td></tr>`;
     return list.map((e) => {
       const blocked = e.bloqueada_em ? `<span class="master-badge bloqueada" title="${e.motivo_bloqueio || ''}"><i class="fas fa-lock"></i> bloqueada</span>` : '';
+      let trialCell = '<span style="color:#64748b;">—</span>';
+      if (e.trial_ate) {
+        const dias = diasParaTrial(e.trial_ate);
+        if (dias === null) trialCell = '—';
+        else if (dias < 0) trialCell = `<span class="master-badge cancelada" title="Trial venceu em ${fmt.date(e.trial_ate)}"><i class="fas fa-times-circle"></i> venceu há ${Math.abs(dias)}d</span>`;
+        else if (dias <= 3) trialCell = `<span class="master-badge trial" style="background:rgba(251,191,36,.18);color:#fbbf24;" title="${fmt.date(e.trial_ate)}"><i class="fas fa-exclamation-triangle"></i> vence em ${dias}d</span>`;
+        else trialCell = `<span class="master-badge trial" title="${fmt.date(e.trial_ate)}"><i class="fas fa-clock"></i> ${dias}d</span>`;
+      }
       return `
       <tr>
         <td>
@@ -477,6 +583,7 @@
           <div style="font-size:.75rem;color:#94a3b8;">${e.plano_preco ? fmt.money(e.plano_preco) + '/mês' : ''}</div>
         </td>
         <td><span class="master-badge ${e.status}">${e.status}</span></td>
+        <td>${trialCell}</td>
         <td style="text-align:right;font-weight:600;">${fmt.int(e.qtd_usuarios)}</td>
         <td style="text-align:right;font-weight:600;">${fmt.int(e.qtd_remessas)}</td>
         <td style="font-size:.8rem;color:#94a3b8;">${fmt.date(e.dt_criacao)}</td>
@@ -495,26 +602,34 @@
     main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando formulário…</div>';
     try {
       const r = await api('get', '/master/plans');
-      const planos = (r.data || []).filter((p) => p.codigo !== 'trial');
+      const planos = (r.data || []).filter((p) => p.codigo !== 'trial' && p.ativo !== 0);
+      // Plano padrão sugerido: 'starter' se existir
+      const planoStarter = planos.find((p) => p.codigo === 'starter');
+      const defaultPlanoId = planoStarter ? planoStarter.id_plano : (planos[0]?.id_plano || '');
+      const defaultTrial = planoStarter?.trial_dias ?? 30;
+
       main.innerHTML = `
         <div class="master-header">
           <div>
             <h2><i class="fas fa-plus-circle mr-2" style="color:#a78bfa"></i> Cadastrar nova empresa</h2>
-            <div class="subtitle">Preencha os dados; um trial automático será iniciado se selecionado.</div>
+            <div class="subtitle">Empresa + usuário administrador serão criados automaticamente. Uma senha temporária será gerada.</div>
           </div>
           <button class="master-btn master-btn-secondary" onclick="masterNavigate('empresas')"><i class="fas fa-arrow-left"></i> Voltar</button>
         </div>
 
-        <div class="master-card" style="max-width:780px;">
+        <div class="master-card" style="max-width:820px;">
           <form id="m-new-emp" class="master-form">
+
+            <!-- ===== Dados da empresa ===== -->
+            <h4 class="master-form-section"><i class="fas fa-building mr-1" style="color:#60a5fa"></i> Dados da empresa</h4>
             <div class="grid-2">
               <div>
                 <label>Nome da empresa *</label>
-                <input class="master-input" name="nome" required placeholder="Confecção XYZ LTDA" />
+                <input class="master-input" name="nome" required placeholder="Confecção XYZ LTDA" maxlength="100" />
               </div>
               <div>
                 <label>CNPJ</label>
-                <input class="master-input" name="cnpj" placeholder="00.000.000/0000-00" />
+                <input class="master-input" name="cnpj" placeholder="00.000.000/0000-00" maxlength="20" />
               </div>
             </div>
             <div class="grid-2">
@@ -538,7 +653,7 @@
               </div>
               <div>
                 <label>CEP</label>
-                <input class="master-input" name="cep" />
+                <input class="master-input" name="cep" maxlength="10" />
               </div>
             </div>
             <div>
@@ -546,23 +661,50 @@
               <input class="master-input" name="endereco" placeholder="Rua, número, bairro" />
             </div>
 
-            <div style="border-top:1px solid #334155;padding-top:18px;margin-top:6px;">
-              <h4 style="color:#fff;font-weight:700;margin-bottom:12px;"><i class="fas fa-layer-group mr-1" style="color:#a78bfa"></i> Plano e período</h4>
-              <div class="grid-2">
-                <div>
-                  <label>Plano *</label>
-                  <select class="master-select" name="id_plano" required>
-                    ${planos.map((p) => `<option value="${p.id_plano}">${p.nome} — ${fmt.money(p.preco_mensal)}/mês</option>`).join('')}
-                  </select>
-                </div>
-                <div>
-                  <label>Dias de trial (0 = inicia já paga)</label>
-                  <input class="master-input" name="trial_dias" type="number" min="0" max="60" value="14" />
-                </div>
+            <!-- ===== Usuário admin (auto-criação) ===== -->
+            <h4 class="master-form-section"><i class="fas fa-user-shield mr-1" style="color:#34d399"></i> Usuário administrador da empresa</h4>
+            <div class="master-info-box">
+              <i class="fas fa-info-circle"></i>
+              Este usuário será criado automaticamente com perfil <strong>admin (owner)</strong> e uma senha temporária. No primeiro login ele será obrigado a trocá-la.
+            </div>
+            <div class="grid-2">
+              <div>
+                <label>Nome do administrador *</label>
+                <input class="master-input" name="admin_nome" required placeholder="João Silva" maxlength="80" />
+              </div>
+              <div>
+                <label>E-mail do administrador *</label>
+                <input class="master-input" name="admin_email" type="email" required placeholder="joao@empresa.com" />
+              </div>
+            </div>
+            <div class="grid-2">
+              <div>
+                <label>Login (opcional)</label>
+                <input class="master-input" name="admin_login" placeholder="auto-gerado a partir do e-mail" maxlength="20"
+                       pattern="[a-zA-Z0-9._-]+" title="Apenas letras, números, ponto, hífen ou underscore" />
+              </div>
+              <div>
+                <label>Telefone direto</label>
+                <input class="master-input" name="admin_telefone" placeholder="(00) 00000-0000" />
               </div>
             </div>
 
-            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
+            <!-- ===== Plano e ciclo ===== -->
+            <h4 class="master-form-section"><i class="fas fa-layer-group mr-1" style="color:#a78bfa"></i> Plano e período</h4>
+            <div class="grid-2">
+              <div>
+                <label>Plano *</label>
+                <select class="master-select" name="id_plano" required>
+                  ${planos.map((p) => `<option value="${p.id_plano}" ${p.id_plano === defaultPlanoId ? 'selected' : ''}>${p.nome} — ${fmt.money(p.preco_mensal)}/mês</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label>Dias de trial (0 = inicia já paga)</label>
+                <input class="master-input" name="trial_dias" type="number" min="0" max="60" value="${defaultTrial}" />
+              </div>
+            </div>
+
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
               <button type="button" class="master-btn master-btn-secondary" onclick="masterNavigate('empresas')">Cancelar</button>
               <button type="submit" class="master-btn master-btn-primary"><i class="fas fa-check"></i> Cadastrar empresa</button>
             </div>
@@ -574,15 +716,34 @@
         e.preventDefault();
         const f = e.target;
         const data = {};
-        ['nome','cnpj','email_contato','telefone','cidade','uf','cep','endereco'].forEach((k) => { data[k] = f[k].value.trim() || null; });
+        ['nome','cnpj','email_contato','telefone','cidade','uf','cep','endereco',
+         'admin_nome','admin_email','admin_login','admin_telefone'
+        ].forEach((k) => { data[k] = (f[k]?.value || '').trim() || null; });
         data.id_plano = Number(f.id_plano.value);
         data.trial_dias = Number(f.trial_dias.value || 0);
+
+        // Validação client-side
+        if (!data.admin_nome || !data.admin_email) {
+          toast('Informe nome e e-mail do administrador.', 'error');
+          return;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.admin_email)) {
+          toast('E-mail do administrador é inválido.', 'error');
+          return;
+        }
+
         const btn = f.querySelector('button[type=submit]');
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Cadastrando…';
         try {
           const r = await api('post', '/master/empresas', data);
-          toast('Empresa cadastrada com sucesso!', 'success');
-          navigate('empresas/' + r.data.id_empresa);
+          // Modal one-time com a senha temporária (não vai persistir nem ser logada)
+          openTempPasswordModal({
+            empresaNome: data.nome,
+            login: r.data.admin?.login,
+            senha: r.data.admin?.senha_temp,
+            email: data.admin_email,
+            onClose: () => navigate('empresas/' + r.data.id_empresa),
+          });
         } catch (err) {
           toast(err.message, 'error');
           btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> Cadastrar empresa';
@@ -591,6 +752,87 @@
     } catch (e) {
       main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
     }
+  }
+
+  /* ============================================================
+   * MODAL ONE-TIME: senha temporária recém-gerada
+   * Exibe credenciais do admin após criar empresa ou resetar senha.
+   * Inclui copy-to-clipboard para login, senha e bloco completo.
+   * ============================================================ */
+  function openTempPasswordModal({ empresaNome, login, senha, email, titulo, subtitulo, onClose }) {
+    const t  = titulo || 'Empresa criada com sucesso!';
+    const st = subtitulo || `Senha temporária gerada para <strong style="color:#fff;">${empresaNome || 'a empresa'}</strong>.`;
+    const blockText = `Empresa: ${empresaNome || ''}\nLogin: ${login || ''}\nSenha temporária: ${senha || ''}${email ? `\nE-mail: ${email}` : ''}`;
+
+    const m = modal(`
+      <h3 style="display:flex;align-items:center;gap:10px;">
+        <i class="fas fa-key" style="color:#fbbf24;"></i> ${t}
+      </h3>
+      <p style="color:#cbd5e1;font-size:.92rem;line-height:1.5;margin-bottom:14px;">${st}</p>
+
+      <div class="m-pwd-box">
+        <div class="m-pwd-row">
+          <div class="m-pwd-label">Login</div>
+          <div class="m-pwd-value" id="m-pwd-login">${login || '—'}</div>
+          <button type="button" class="m-pwd-copy" data-copy="login" title="Copiar login"><i class="fas fa-copy"></i></button>
+        </div>
+        <div class="m-pwd-row">
+          <div class="m-pwd-label">Senha temporária</div>
+          <div class="m-pwd-value m-pwd-secret" id="m-pwd-senha">${senha || '—'}</div>
+          <button type="button" class="m-pwd-copy" data-copy="senha" title="Copiar senha"><i class="fas fa-copy"></i></button>
+        </div>
+        ${email ? `
+        <div class="m-pwd-row">
+          <div class="m-pwd-label">E-mail</div>
+          <div class="m-pwd-value">${email}</div>
+        </div>` : ''}
+      </div>
+
+      <div class="m-pwd-warn">
+        <i class="fas fa-exclamation-triangle"></i>
+        <div>
+          <strong>Atenção:</strong> esta senha será exibida <u>apenas uma vez</u>. Anote ou copie agora.<br/>
+          No primeiro login o usuário será obrigado a trocá-la.
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="master-btn master-btn-secondary" id="m-pwd-copy-all">
+          <i class="fas fa-clipboard"></i> Copiar tudo
+        </button>
+        <button type="button" class="master-btn master-btn-primary" id="m-pwd-ok">
+          <i class="fas fa-check"></i> Anotei, fechar
+        </button>
+      </div>
+    `);
+
+    const close = () => { m.remove(); if (typeof onClose === 'function') onClose(); };
+
+    const copyToClipboard = async (text, label) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast((label || 'Texto') + ' copiado!', 'success');
+      } catch {
+        // Fallback antigo
+        const ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); toast((label || 'Texto') + ' copiado!', 'success'); }
+        catch { toast('Não foi possível copiar automaticamente.', 'warning'); }
+        ta.remove();
+      }
+    };
+
+    m.querySelectorAll('.m-pwd-copy').forEach((btn) => {
+      btn.onclick = () => {
+        const what = btn.dataset.copy;
+        if (what === 'login') copyToClipboard(login || '', 'Login');
+        else if (what === 'senha') copyToClipboard(senha || '', 'Senha');
+      };
+    });
+    m.querySelector('#m-pwd-copy-all').onclick = () => copyToClipboard(blockText, 'Credenciais');
+    m.querySelector('#m-pwd-ok').onclick = close;
+    // Bloqueia clique fora — usuário PRECISA confirmar (não perder a senha)
+    m.onclick = (ev) => { if (ev.target === m) { /* não fecha */ } };
   }
 
   /* ============================================================
@@ -608,6 +850,7 @@
       const sub = det.data.subscription;
       const stats = det.data.stats || {};
       const payments = det.data.payments || [];
+      const owner = det.data.owner || null;
       const planos = (planosR.data || []);
 
       const blocked = e.bloqueada_em;
@@ -687,6 +930,38 @@
           </div>
         </div>
 
+        <!-- ===== Card: Administrador (owner) ===== -->
+        <div class="master-card" style="margin-bottom:18px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <h3 style="font-size:.95rem;font-weight:700;color:#fff;margin:0;">
+              <i class="fas fa-user-shield mr-1" style="color:#34d399"></i> Administrador (owner)
+            </h3>
+            ${owner ? `
+              <button class="master-btn master-btn-warning master-btn-sm" id="m-reset-admin">
+                <i class="fas fa-key"></i> Resetar senha do admin
+              </button>
+            ` : ''}
+          </div>
+          ${owner ? `
+            <table style="width:100%;font-size:.85rem;">
+              <tbody>
+                <tr><td style="color:#94a3b8;padding:6px 0;width:160px;">Nome</td><td><strong style="color:#fff;">${owner.nome || '—'}</strong></td></tr>
+                <tr><td style="color:#94a3b8;padding:6px 0;">Login</td><td><code>${owner.login || '—'}</code></td></tr>
+                <tr><td style="color:#94a3b8;padding:6px 0;">E-mail</td><td>${owner.email || '—'}</td></tr>
+                <tr><td style="color:#94a3b8;padding:6px 0;">Último login</td><td>${owner.ultimo_login ? fmt.datetime(owner.ultimo_login) : '<span style="color:#64748b;">nunca logou</span>'}</td></tr>
+                <tr><td style="color:#94a3b8;padding:6px 0;">Trocar senha?</td><td>${owner.trocar_senha ? '<span class="master-badge trial"><i class="fas fa-clock"></i> aguardando troca</span>' : '<span class="master-badge ativa"><i class="fas fa-check"></i> ok</span>'}</td></tr>
+                <tr><td style="color:#94a3b8;padding:6px 0;">Criado em</td><td>${fmt.datetime(owner.dt_criacao)}</td></tr>
+              </tbody>
+            </table>
+          ` : `
+            <div class="master-empty" style="padding:24px;">
+              <i class="fas fa-exclamation-triangle" style="color:#fbbf24;"></i>
+              <p>Esta empresa não tem um usuário <strong>admin (owner)</strong> ativo.</p>
+              <p style="font-size:.75rem;color:#94a3b8;">Empresas legadas podem precisar de migração manual.</p>
+            </div>
+          `}
+        </div>
+
         <div class="master-card">
           <h3 style="font-size:.95rem;font-weight:700;color:#fff;margin-bottom:14px;"><i class="fas fa-receipt mr-1" style="color:#34d399"></i> Histórico de pagamentos (${payments.length})</h3>
           ${payments.length === 0
@@ -726,6 +1001,28 @@
         if (!confirm('Reativar a empresa?')) return;
         try { await api('post', `/master/empresas/${id}/reativar`); toast('Empresa reativada.', 'success'); viewEmpresaDetalhe(id); }
         catch (err) { toast(err.message, 'error'); }
+      });
+      // Reset de senha do admin owner
+      btn('m-reset-admin')?.addEventListener('click', async () => {
+        if (!confirm(
+          'Resetar a senha do administrador?\n\n' +
+          '• Uma nova senha temporária será gerada\n' +
+          '• Todas as sessões ativas do admin serão encerradas\n' +
+          '• Ele será obrigado a trocar a senha no próximo login\n\n' +
+          'Continuar?'
+        )) return;
+        try {
+          const r = await api('post', `/master/empresas/${id}/reset-admin-senha`);
+          openTempPasswordModal({
+            empresaNome: e.nome,
+            login: r.data.login,
+            senha: r.data.senha_temp,
+            email: owner?.email || e.email_contato || null,
+            titulo: 'Senha do administrador resetada!',
+            subtitulo: `Nova senha temporária para <strong style="color:#fff;">${e.nome}</strong>. As sessões anteriores foram encerradas.`,
+            onClose: () => viewEmpresaDetalhe(id),
+          });
+        } catch (err) { toast(err.message, 'error'); }
       });
     } catch (e) {
       main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;

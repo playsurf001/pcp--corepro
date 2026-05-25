@@ -526,13 +526,95 @@ app.get('/master/empresas/:id', async (c) => {
          (SELECT COUNT(*) FROM terc_terceirizados WHERE id_empresa = ? AND ativo = 1) AS qtd_terceirizados`
     ).bind(id, id, id, id).first();
 
-    return c.json(ok({ empresa, subscription: sub, payments: payments.results || [], stats }));
+    // Admin owner da empresa (se houver)
+    const owner: any = await c.env.DB.prepare(
+      `SELECT id_usuario, login, nome, email, trocar_senha, ultimo_login, dt_criacao
+         FROM usuarios
+        WHERE id_empresa = ? AND is_owner = 1 AND ativo = 1
+        LIMIT 1`
+    ).bind(id).first();
+
+    return c.json(ok({ empresa, subscription: sub, payments: payments.results || [], stats, owner: owner || null }));
   } catch (e: any) {
     return fail('Erro ao carregar empresa: ' + (e?.message || e), 500);
   }
 });
 
-// Criar empresa
+/* ============================================================
+ * Helpers — admin user auto-creation
+ * ============================================================ */
+// Gera senha temporária amigável (12 chars, sem ambiguidades)
+function gerarSenhaTemporaria(): string {
+  // Sem 0/O/1/l/I para evitar confusão visual ao ditar
+  const alpha = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const sym    = '@#%&!';
+  const pool   = alpha + lower + digits;
+  const pick = (s: string) => s[Math.floor(Math.random() * s.length)];
+  // Garante pelo menos 1 maiúscula, 1 minúscula, 1 dígito e 1 símbolo
+  let s = pick(alpha) + pick(lower) + pick(digits) + pick(sym);
+  for (let i = 0; i < 8; i++) s += pick(pool);
+  // Embaralha
+  return s.split('').sort(() => Math.random() - 0.5).join('');
+}
+
+// Gera login admin a partir do nome ou e-mail (slug curto), garante unicidade GLOBAL
+function loginBaseAdmin(b: any, slugEmpresa: string): string {
+  if (b?.admin_login) {
+    return String(b.admin_login).trim().toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '').slice(0, 20) || ('admin-' + randomHex(2));
+  }
+  if (b?.admin_email && /@/.test(String(b.admin_email))) {
+    return String(b.admin_email).trim().toLowerCase().split('@')[0]
+      .replace(/[^a-z0-9._-]/g, '').slice(0, 16) || ('admin-' + randomHex(2));
+  }
+  // Fallback: admin-<slug curto>
+  return ('admin-' + (slugEmpresa || randomHex(2)).slice(0, 12));
+}
+
+async function garantirLoginUnico(DB: D1Database, base: string): Promise<string> {
+  let login = base;
+  for (let i = 0; i < 6; i++) {
+    const dup: any = await DB.prepare(
+      `SELECT 1 FROM usuarios WHERE lower(login) = ? LIMIT 1`
+    ).bind(login.toLowerCase()).first();
+    if (!dup) return login;
+    const sufixo = randomHex(2);
+    const baseTrunc = login.replace(/-[a-f0-9]{4}$/, '').slice(0, 16);
+    login = `${baseTrunc}-${sufixo}`;
+  }
+  throw new Error('Não foi possível gerar login único após várias tentativas.');
+}
+
+// Cria o usuário admin (owner) da empresa e retorna { id_usuario, login, senha_temp }
+async function criarAdminEmpresa(
+  DB: D1Database,
+  id_empresa: number,
+  b: any,
+  slugEmpresa: string,
+  criado_por: string
+): Promise<{ id_usuario: number; login: string; senha_temp: string }> {
+  const baseLogin = loginBaseAdmin(b, slugEmpresa);
+  const login = await garantirLoginUnico(DB, baseLogin);
+  const nome  = String(b.admin_nome || b.nome || 'Administrador').trim().slice(0, 80);
+  const email = b.admin_email ? String(b.admin_email).trim().toLowerCase() : (b.email_contato || null);
+  const senha_temp = gerarSenhaTemporaria();
+  const salt = randomHex(16);
+  const hash = await hashSenha(salt, senha_temp);
+
+  const r = await DB.prepare(
+    `INSERT INTO usuarios
+       (login, nome, email, senha_hash, senha_salt, perfil, ativo, trocar_senha,
+        criado_por, id_empresa, is_owner)
+     VALUES (?,?,?,?,?,?, 1, 1, ?, ?, 1)`
+  ).bind(login, nome, email, hash, salt, 'admin', criado_por, id_empresa).run();
+
+  const id_usuario = Number((r.meta as any)?.last_row_id || 0);
+  return { id_usuario, login, senha_temp };
+}
+
+// Criar empresa (+ usuário admin owner com senha temporária)
 app.post('/master/empresas', async (c) => {
   try {
     const b = (await c.req.json().catch(() => ({}))) as any;
@@ -547,7 +629,24 @@ app.post('/master/empresas', async (c) => {
     const status = b.status || (trial_dias > 0 ? 'trial' : 'ativa');
     const plano_codigo = b.plano_codigo || (trial_dias > 0 ? 'trial' : 'starter');
 
-    // Cria empresa
+    // ---- Validações de unicidade (companies) ----
+    if (b.cnpj) {
+      const dupCnpj: any = await c.env.DB.prepare(
+        `SELECT id_empresa FROM companies WHERE cnpj = ? LIMIT 1`
+      ).bind(String(b.cnpj).trim()).first();
+      if (dupCnpj) return fail('Já existe uma empresa cadastrada com este CNPJ.', 409);
+    }
+    const dupSlug: any = await c.env.DB.prepare(
+      `SELECT id_empresa FROM companies WHERE slug = ? LIMIT 1`
+    ).bind(slug).first();
+    if (dupSlug) return fail('Slug já em uso. Tente outro nome ou informe um slug.', 409);
+
+    // ---- Validação de e-mail admin (se informado) ----
+    if (b.admin_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.admin_email))) {
+      return fail('E-mail do administrador inválido.', 400);
+    }
+
+    // ---- Cria empresa ----
     const r = await c.env.DB.prepare(
       `INSERT INTO companies
          (nome, cnpj, slug, plano, status, trial_ate, telefone, email_contato,
@@ -570,14 +669,27 @@ app.post('/master/empresas', async (c) => {
     ).run();
 
     const id_empresa = Number((r.meta as any)?.last_row_id || 0);
+    if (!id_empresa) return fail('Falha ao criar empresa.', 500);
 
-    // Cria subscription inicial se id_plano informado
+    const m = c.get('master') as any;
+    const criado_por = m?.login || 'master';
+
+    // ---- Auto-cria usuário admin (owner) ----
+    let admin: { id_usuario: number; login: string; senha_temp: string } | null = null;
+    try {
+      admin = await criarAdminEmpresa(c.env.DB, id_empresa, b, slug, criado_por);
+    } catch (e: any) {
+      // Rollback manual: remove a empresa recém-criada para não deixar órfã
+      await c.env.DB.prepare(`DELETE FROM companies WHERE id_empresa = ?`).bind(id_empresa).run();
+      return fail('Falha ao criar usuário admin: ' + (e?.message || e), 500);
+    }
+
+    // ---- Cria subscription inicial se id_plano informado ----
     if (id_plano) {
       const plano: any = await c.env.DB.prepare(
         `SELECT preco_mensal FROM plans WHERE id_plano = ?`
       ).bind(id_plano).first();
       const sub_status = trial_dias > 0 ? 'trial' : 'ativa';
-      const m = c.get('master') as any;
       await c.env.DB.prepare(
         `INSERT INTO subscriptions
            (id_empresa, id_plano, status, ciclo, preco_aplicado, dt_inicio, trial_ate,
@@ -588,14 +700,65 @@ app.post('/master/empresas', async (c) => {
         Number(plano?.preco_mensal || 0),
         trial_ate,
         trial_ate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
-        m?.login || 'system',
+        criado_por,
         'Criada via /master ao cadastrar empresa.'
       ).run();
     }
 
-    return c.json(ok({ id_empresa, slug }));
+    // Retorna senha temporária UMA ÚNICA VEZ — frontend deve exibir e nunca persistir
+    return c.json(ok({
+      id_empresa,
+      slug,
+      admin: {
+        id_usuario: admin.id_usuario,
+        login: admin.login,
+        senha_temp: admin.senha_temp,
+        trocar_senha: 1,
+      },
+    }));
   } catch (e: any) {
     return fail('Erro ao criar empresa: ' + (e?.message || e), 500);
+  }
+});
+
+/* ============================================================
+ * Reset de senha do admin owner
+ * ============================================================ */
+app.post('/master/empresas/:id/reset-admin-senha', async (c) => {
+  try {
+    const id = toInt(c.req.param('id'));
+    if (!id) return fail('ID inválido.', 400);
+
+    // Busca o owner ativo da empresa
+    const owner: any = await c.env.DB.prepare(
+      `SELECT id_usuario, login, nome FROM usuarios
+         WHERE id_empresa = ? AND is_owner = 1 AND ativo = 1 LIMIT 1`
+    ).bind(id).first();
+    if (!owner) return fail('Empresa não possui usuário admin (owner) ativo.', 404);
+
+    const senha_temp = gerarSenhaTemporaria();
+    const salt = randomHex(16);
+    const hash = await hashSenha(salt, senha_temp);
+
+    await c.env.DB.prepare(
+      `UPDATE usuarios
+          SET senha_hash = ?, senha_salt = ?, trocar_senha = 1, dt_atualizacao = datetime('now')
+        WHERE id_usuario = ?`
+    ).bind(hash, salt, owner.id_usuario).run();
+
+    // Revoga todas as sessões ativas desse usuário (segurança)
+    await c.env.DB.prepare(
+      `DELETE FROM sessoes WHERE id_usuario = ?`
+    ).bind(owner.id_usuario).run();
+
+    return c.json(ok({
+      id_usuario: owner.id_usuario,
+      login: owner.login,
+      senha_temp,
+      trocar_senha: 1,
+    }));
+  } catch (e: any) {
+    return fail('Erro ao resetar senha do admin: ' + (e?.message || e), 500);
   }
 });
 

@@ -287,8 +287,35 @@ Decisões de produto registradas:
 - Ciclo: **somente mensal**
 - Impersonate master → empresa: **NÃO** (decisão de segurança)
 
+**SPRINT B — Gerenciamento de Empresas (concluído, em produção 2026-05-25)**
+
+Cadastro de empresa agora cria automaticamente o **usuário admin (owner)** com **senha temporária** exibida apenas uma vez (não persistida em log).
+
+- **Backend** (`src/routes/master.ts`):
+  - `POST /api/master/empresas` agora aceita campos `admin_nome`, `admin_email`, `admin_login` (opcional), `admin_telefone`
+  - Auto-cria usuário em `usuarios` com `perfil='admin'`, `is_owner=1`, `trocar_senha=1`, `ativo=1`
+  - Senha temporária: 12 chars, mistura maiúscula/minúscula/dígito/símbolo, sem caracteres ambíguos (0/O/1/l/I)
+  - Login do admin: derivado do e-mail (parte antes do `@`), com sufixo hex automático se houver colisão global (`joao.admin` → `joao.admin-9a0d`)
+  - Validações: CNPJ único (409), slug único (409), e-mail admin válido (400)
+  - Rollback manual: se a criação do admin falhar, a empresa recém-inserida é removida
+  - `POST /api/master/empresas/:id/reset-admin-senha`: gera nova senha temp, marca `trocar_senha=1`, **revoga todas as sessões ativas** do owner
+  - `GET /api/master/empresas/:id` agora retorna `owner` com `id_usuario, login, nome, email, trocar_senha, ultimo_login, dt_criacao`
+
+- **Frontend** (`public/static/master.js`):
+  - `viewNovaEmpresa`: formulário expandido com 3 seções (Empresa / Administrador / Plano)
+  - Campos do admin obrigatórios: nome + e-mail; login é opcional (auto-gerado)
+  - `openTempPasswordModal()`: modal one-time não-dismissível por click fora — exibe login + senha em fonte monospace destacada em amarelo, com botões copy-to-clipboard individuais e "Copiar tudo" (gera bloco texto pronto pra ditar)
+  - `viewEmpresaDetalhe`: novo card **Administrador (owner)** com nome/login/e-mail/último login/badge "aguardando troca de senha" + botão **Resetar senha do admin** com modal de confirmação detalhado
+  - `viewEmpresas`: 5 KPIs no topo (Total/Ativas/Trial/Suspensas/Bloqueadas), filtros expandidos (status + plano + bloqueio), nova coluna **Trial/Vencimento** com badges coloridas (verde = ok, amarelo = vence em ≤3d, vermelho = venceu)
+
+- **Segurança**:
+  - Senha em plaintext **nunca persistida** — só existe em memória durante a request HTTP, exibida no response uma única vez
+  - `trocar_senha=1` força o usuário a trocar a senha no primeiro login (UI já trata isso via fluxo existente)
+  - Reset de senha encerra todas as sessões ativas do owner (segurança contra sessão sequestrada)
+
+- **Cache**: app.js v=33 → v=34, styles.css v=33 → v=34, master.js v=3 → v=4
+
 **Próximos sprints:**
-- **SPRINT B**: Gerenciamento de Empresas (CRUD + criação automática do usuário admin + senha temporária + flag `must_change_password`)
 - **SPRINT C**: Assinaturas + lifecycle (trial 30d → ativa → vencida → bloqueada) + cron diário
 - **SPRINT D**: Cobrança PIX via Mercado Pago (Adapter pattern, webhook HMAC, reconciliação)
 - **SPRINT E**: Dashboard SaaS com MRR, ARR, churn, gráficos
