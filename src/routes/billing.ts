@@ -1,15 +1,27 @@
 // =====================================================================
-// SPRINT 3 — Billing / Cobranças PIX
+// SPRINT 3+D — Billing / Cobranças PIX
 // =====================================================================
 // 3 grupos de endpoints:
 //   1) /api/master/billing/*  → super_admin (criar/aprovar cobranças)
 //   2) /api/billing/*         → usuário autenticado (minhas faturas)
-//   3) /api/public/mp/webhook → webhook Mercado Pago (sem auth)
+//   3) /api/public/mp/webhook → webhook Mercado Pago (sem auth, com HMAC)
+//
+// SPRINT D — Aprimoramentos:
+//   - Webhook valida HMAC-SHA256 (header x-signature) com MP_WEBHOOK_SECRET
+//   - Idempotência via tabela payment_webhook_events (UNIQUE external_id)
+//   - aplicarPagamentoAprovado() integra com Sprint C:
+//       * Libera companies.bloqueada_por_pagamento = 0
+//       * Registra sub_log com evento='payment_approved'
+//       * dt_proxima_cobranca = max(hoje, dt_proxima_atual) + 30d (não perde dias)
+//   - Endpoint /master/billing/payments/:id/simulate-approved (só em modo MOCK)
 // =====================================================================
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
 import { ok, fail, toInt, toNum } from '../lib/db';
 import { criarPixMP, consultarPagamentoMP } from '../lib/mercadopago';
+import { MercadoPagoGateway } from '../lib/payments/mercadopago';
+import { isMockMode } from '../lib/payments/factory';
+import { logSub } from '../lib/lifecycle';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any; master: any } }>();
 
@@ -25,39 +37,126 @@ function refMes(d?: Date): string {
 }
 
 /**
- * Aplica efeitos colaterais de um pagamento aprovado:
- *   - payment.status='aprovado'
- *   - subscription.status='ativa', dt_proxima_cobranca = hoje+30d
- *   - empresa.status='ativa' (se estava suspensa/pendente)
+ * SPRINT D — Retorna o access token efetivo para chamar a API do MP.
+ * - Se MP_USE_MOCK=1 → retorna undefined (força modo MOCK em criarPixMP/consultarPagamentoMP)
+ * - Senão → retorna MP_ACCESS_TOKEN (pode ser undefined também = mock fallback)
+ */
+function getMPToken(env: Bindings): string | undefined {
+  if (env.MP_USE_MOCK === '1' || env.MP_USE_MOCK === 'true') return undefined;
+  return env.MP_ACCESS_TOKEN;
+}
+
+/**
+ * Sanitiza email do pagador para evitar 400 do MP.
+ * MP rejeita TLDs reservados (.test, .local, .example, .invalid) e
+ * emails malformados. Fallback usa nosso próprio domínio.
+ */
+function emailPagadorSeguro(emailRaw: string | undefined | null, id_empresa: number): string {
+  const e = (emailRaw || '').trim().toLowerCase();
+  const re = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+  const reservedTLDs = ['.test', '.local', '.example', '.invalid', '.localhost'];
+  const isReserved = reservedTLDs.some((tld) => e.endsWith(tld));
+  if (e && re.test(e) && !isReserved) return e;
+  // Fallback: gera email plausível em domínio nosso (válido para o MP)
+  return `cobranca+empresa${id_empresa}@corepro.com.br`;
+}
+
+/**
+ * SPRINT D — Aplica efeitos colaterais de um pagamento aprovado.
+ *
+ * - payment.status='aprovado' + dt_pagamento
+ * - subscription:
+ *     * status='ativa'
+ *     * dt_proxima_cobranca = max(hoje, dt_proxima_atual) + 30d (PRESERVA DIAS)
+ *     * limpa dt_pagamento_atrasada e ultimo_aviso_em
+ * - companies:
+ *     * status='ativa' (se estava suspensa/pendente)
+ *     * bloqueada_por_pagamento = 0  ← Sprint C
+ *     * dt_suspensao = NULL
+ * - Registra sub_log com evento='payment_approved' e origem='webhook'|'master'|'manual'
+ *
+ * Idempotente: se payment já estava 'aprovado', retorna alteracao=false sem mexer em nada.
  */
 async function aplicarPagamentoAprovado(
   db: D1Database,
-  payment: { id_payment: number; id_sub: number; id_empresa: number; valor: number }
-) {
+  payment: { id_payment: number; id_sub: number; id_empresa: number; valor: number; status?: string },
+  opts?: { origem?: string; ator?: string },
+): Promise<{ alteracao: boolean; status_antes?: string; status_depois?: string }> {
+  // Empresa id=1 (founder) é cortesia e não tem cobrança; mas se vier um payment
+  // associado por algum motivo, ainda aplicamos (não bloqueia).
+  if (payment.status === 'aprovado') {
+    return { alteracao: false };
+  }
+
+  const origem = opts?.origem || 'webhook';
+  const ator = opts?.ator || 'system';
+
+  // 1) Payment → aprovado
   await db.prepare(
     `UPDATE payments
         SET status='aprovado',
             dt_pagamento = COALESCE(dt_pagamento, datetime('now')),
             dt_atualizacao = datetime('now')
-      WHERE id_payment = ?`
+      WHERE id_payment = ?
+        AND status <> 'aprovado'`
   ).bind(payment.id_payment).run();
 
+  // 2) Buscar subscription para snapshot + cálculo dt_proxima_cobranca
+  const sub: any = await db.prepare(
+    `SELECT id_sub, status, dt_proxima_cobranca FROM subscriptions WHERE id_sub = ?`
+  ).bind(payment.id_sub).first();
+
+  const status_antes: string = sub?.status || 'unknown';
+
+  // 3) Subscription → ativa + estende prazo (max preserva dias caso cliente pague antes)
   await db.prepare(
     `UPDATE subscriptions
-        SET status='ativa',
-            dt_proxima_cobranca = date('now','+30 days'),
+        SET status = 'ativa',
+            dt_proxima_cobranca = date(
+              CASE
+                WHEN dt_proxima_cobranca IS NULL OR date(dt_proxima_cobranca) < date('now')
+                  THEN date('now')
+                ELSE dt_proxima_cobranca
+              END,
+              '+30 days'
+            ),
+            dt_pagamento_atrasada = NULL,
+            ultimo_aviso_em = NULL,
             dt_atualizacao = datetime('now')
       WHERE id_sub = ?`
   ).bind(payment.id_sub).run();
 
+  // 4) Empresa → ativa + desbloqueio
   await db.prepare(
     `UPDATE companies
-        SET status='ativa',
+        SET status = 'ativa',
+            bloqueada_por_pagamento = 0,
             dt_suspensao = NULL,
             dt_atualizacao = datetime('now')
-      WHERE id_empresa = ?
-        AND status IN ('suspensa','trial','pendente')`
+      WHERE id_empresa = ?`
   ).bind(payment.id_empresa).run();
+
+  // 5) Log auditável (Sprint C)
+  try {
+    await logSub(db, {
+      id_sub: payment.id_sub,
+      id_empresa: payment.id_empresa,
+      evento: 'payment_approved',
+      status_antes,
+      status_depois: 'ativa',
+      origem,
+      detalhes: {
+        id_payment: payment.id_payment,
+        valor: payment.valor,
+        ator,
+      },
+    });
+  } catch (e) {
+    // Log auxiliar — não bloqueia o pagamento se logSub falhar
+    console.error('logSub falhou ao aprovar payment', e);
+  }
+
+  return { alteracao: true, status_antes, status_depois: 'ativa' };
 }
 
 /* ============================================================
@@ -122,11 +221,11 @@ app.post('/master/billing/empresas/:id/cobrar', async (c) => {
     const id_payment = Number((pr.meta as any)?.last_row_id || 0);
 
     const baseUrl = getBaseUrl(c);
-    const mp = await criarPixMP(c.env.MP_ACCESS_TOKEN, {
+    const mp = await criarPixMP(getMPToken(c.env), {
       amount: valor,
       description: `CorePro — Assinatura ${empresa?.nome || ''} ref ${ref}`,
       external_reference: String(id_payment),
-      payer_email: empresa?.email_contato || `empresa${id_empresa}@corepro.local`,
+      payer_email: emailPagadorSeguro(empresa?.email_contato, id_empresa),
       payer_name: empresa?.nome,
       payer_doc: empresa?.cnpj,
       webhook_url: `${baseUrl}/api/public/mp/webhook`,
@@ -199,13 +298,17 @@ app.post('/master/billing/payments/:id/aprovar', async (c) => {
   try {
     const id = toInt(c.req.param('id'));
     if (!id) return fail('ID inválido.', 400);
+    const m = c.get('master') as any;
     const p: any = await c.env.DB.prepare(
       `SELECT id_payment, id_sub, id_empresa, valor, status FROM payments WHERE id_payment = ?`
     ).bind(id).first();
     if (!p) return fail('Pagamento não encontrado.', 404);
     if (p.status === 'aprovado') return c.json(ok({ id_payment: id, alteracao: false }));
-    await aplicarPagamentoAprovado(c.env.DB, p);
-    return c.json(ok({ id_payment: id, alteracao: true }));
+    const result = await aplicarPagamentoAprovado(c.env.DB, p, {
+      origem: 'master',
+      ator: m?.login || 'master',
+    });
+    return c.json(ok({ id_payment: id, ...result }));
   } catch (e: any) {
     return fail('Erro ao aprovar: ' + (e?.message || e), 500);
   }
@@ -233,10 +336,11 @@ app.post('/master/billing/payments/:id/sync', async (c) => {
     ).bind(id).first();
     if (!p) return fail('Pagamento não encontrado.', 404);
     if (!p.mp_payment_id) return fail('Payment sem mp_payment_id.', 400);
-    const r = await consultarPagamentoMP(c.env.MP_ACCESS_TOKEN, p.mp_payment_id);
+    const r = await consultarPagamentoMP(getMPToken(c.env), p.mp_payment_id);
     if (!r.ok) return fail('Falha consulta MP: ' + r.error, 502);
+    const m = c.get('master') as any;
     if (r.status === 'aprovado' && p.status !== 'aprovado') {
-      await aplicarPagamentoAprovado(c.env.DB, p);
+      await aplicarPagamentoAprovado(c.env.DB, p, { origem: 'master', ator: m?.login || 'master' });
     } else {
       await c.env.DB.prepare(
         `UPDATE payments SET status=?, mp_status=?, dt_atualizacao=datetime('now') WHERE id_payment=?`
@@ -331,6 +435,66 @@ app.get('/billing/proxima-fatura', async (c) => {
   }
 });
 
+/**
+ * SPRINT D — Polling de status (chamado pela UI a cada N segundos enquanto
+ * o modal PIX está aberto). Retorna o status atual do pagamento + se foi aprovado
+ * para fechar o modal e atualizar a UI.
+ */
+app.get('/billing/payment/:id/status', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const p: any = await c.env.DB.prepare(
+      `SELECT id_payment, status, valor, dt_pagamento, dt_expiracao, mp_status
+         FROM payments
+        WHERE id_payment = ? AND id_empresa = ?`
+    ).bind(id, id_empresa).first();
+    if (!p) return fail('Pagamento não encontrado.', 404);
+
+    // Se ainda pendente e tem mp_payment_id, faz uma consulta light no MP
+    // (não bloqueia: se MP estiver indisponível, retorna status do DB)
+    let synced = false;
+    if (p.status === 'pendente') {
+      const full: any = await c.env.DB.prepare(
+        `SELECT mp_payment_id, id_sub, id_empresa, valor, status FROM payments WHERE id_payment = ?`
+      ).bind(id).first();
+      if (full?.mp_payment_id) {
+        try {
+          const r = await consultarPagamentoMP(getMPToken(c.env), full.mp_payment_id);
+          if (r.ok && r.status === 'aprovado' && p.status !== 'aprovado') {
+            await aplicarPagamentoAprovado(c.env.DB, full, { origem: 'system', ator: 'self_polling' });
+            p.status = 'aprovado';
+            p.dt_pagamento = new Date().toISOString();
+            synced = true;
+          } else if (r.ok && r.status !== p.status) {
+            await c.env.DB.prepare(
+              `UPDATE payments SET status=?, mp_status=?, dt_atualizacao=datetime('now') WHERE id_payment=?`
+            ).bind(r.status, r.status, id).run();
+            p.status = r.status;
+            synced = true;
+          }
+        } catch {
+          // ignora falha no MP (mantém status do DB)
+        }
+      }
+    }
+
+    return c.json(ok({
+      id_payment: p.id_payment,
+      status: p.status,
+      valor: p.valor,
+      dt_pagamento: p.dt_pagamento,
+      dt_expiracao: p.dt_expiracao,
+      mp_status: p.mp_status,
+      synced,
+      aprovado: p.status === 'aprovado',
+    }));
+  } catch (e: any) {
+    return fail('Erro: ' + (e?.message || e), 500);
+  }
+});
+
 app.post('/billing/gerar-cobranca', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const user = c.get('user') as any;
@@ -368,11 +532,11 @@ app.post('/billing/gerar-cobranca', async (c) => {
     const id_payment = Number((pr.meta as any)?.last_row_id || 0);
 
     const baseUrl = getBaseUrl(c);
-    const mp = await criarPixMP(c.env.MP_ACCESS_TOKEN, {
+    const mp = await criarPixMP(getMPToken(c.env), {
       amount: valor,
       description: `CorePro — Assinatura ${empresa?.nome || ''} ref ${ref}`,
       external_reference: String(id_payment),
-      payer_email: empresa?.email_contato || `empresa${id_empresa}@corepro.local`,
+      payer_email: emailPagadorSeguro(empresa?.email_contato, id_empresa),
       payer_name: empresa?.nome,
       payer_doc: empresa?.cnpj,
       webhook_url: `${baseUrl}/api/public/mp/webhook`,
@@ -385,6 +549,30 @@ app.post('/billing/gerar-cobranca', async (c) => {
         WHERE id_payment=?`
     ).bind(mp.mp_payment_id, mp.status, mp.qr_code, mp.qr_base64, mp.ticket_url, mp.expires_at, id_payment).run();
 
+    // Se MP retornou erro (sem QR code), traduz a mensagem para o usuário final
+    if (!mp.ok || (!mp.qr_code && !mp.mock)) {
+      let userMsg = 'Falha ao gerar PIX no Mercado Pago.';
+      const errStr = (mp.error || '').toLowerCase();
+      if (errStr.includes('without key enabled') || errStr.includes('qr render')) {
+        userMsg = 'Conta Mercado Pago do recebedor ainda não tem chave PIX habilitada. ' +
+                  'Acesse mercadopago.com.br → Sua conta → PIX e cadastre uma chave.';
+      } else if (errStr.includes('identification') || errStr.includes('document')) {
+        userMsg = 'Documento (CPF/CNPJ) inválido. Atualize o cadastro da empresa.';
+      } else if (errStr.includes('email')) {
+        userMsg = 'E-mail do pagador inválido. Atualize o cadastro da empresa.';
+      } else if (mp.error) {
+        userMsg = 'Mercado Pago recusou a cobrança: ' + mp.error.substring(0, 200);
+      }
+      return c.json({
+        ok: false,
+        error: userMsg,
+        data: {
+          id_payment, mock: mp.mock, valor, status: 'erro',
+          mp_error: mp.error || null,
+        },
+      }, 502);
+    }
+
     return c.json(ok({
       id_payment, mock: mp.mock, valor, status: mp.status,
       qr_code: mp.qr_code, qr_base64: mp.qr_base64, ticket_url: mp.ticket_url,
@@ -396,36 +584,250 @@ app.post('/billing/gerar-cobranca', async (c) => {
 });
 
 /* ============================================================
- * WEBHOOK MERCADO PAGO (público)
+ * SPRINT D — WEBHOOK MERCADO PAGO (público + HMAC + idempotência)
+ *
+ * Fluxo:
+ *   1) Captura headers (x-signature, x-request-id) e query data.id
+ *   2) Lê body bruto + parseia JSON
+ *   3) Tenta INSERT em payment_webhook_events com UNIQUE external_id
+ *      - Se UNIQUE falhar: replay → retorna 200 (idempotência)
+ *      - Senão: continua processando
+ *   4) Valida HMAC (se MP_WEBHOOK_SECRET configurado E não estamos em mock)
+ *      - Se inválida: registra signature_valid=0, status='error', retorna 401
+ *   5) Resolve payment local pelo mp_payment_id (== data.id)
+ *   6) Consulta MP para pegar status atualizado
+ *   7) Aplica transição (aprovar / atualizar status) se necessário
+ *   8) Atualiza payment_webhook_events com resultado e duração
+ *
+ * Retorna SEMPRE 200 para casos de "OK ignorado" para o MP não re-enfileirar.
+ * Retorna 401 apenas em assinatura inválida (MP entende e ajusta).
  * ============================================================ */
 app.post('/public/mp/webhook', async (c) => {
-  try {
-    const body: any = await c.req.json().catch(() => ({}));
-    const mpId = String(
-      body?.data?.id || body?.id || c.req.query('id') || c.req.query('data.id') || ''
-    );
-    if (!mpId) return c.json({ ok: true, ignored: 'no id' });
+  const t0 = Date.now();
+  let id_event: number | null = null;
+  // Captura inputs cedo para conseguir logar mesmo em erro
+  const xSig = c.req.header('x-signature') || '';
+  const xReqId = c.req.header('x-request-id') || '';
+  const xRequestUuid = c.req.header('x-request-id') || c.req.header('x-idempotency-key') || '';
+  const ipOrigem =
+    c.req.header('cf-connecting-ip') ||
+    c.req.header('x-real-ip') ||
+    c.req.header('x-forwarded-for') ||
+    '';
+  // Capturar headers para auditoria (sem Authorization)
+  const headersObj: Record<string, string> = {};
+  for (const [k, v] of (c.req.raw.headers as Headers).entries()) {
+    const kl = k.toLowerCase();
+    if (kl === 'authorization' || kl === 'cookie') continue;
+    headersObj[k] = v;
+  }
 
+  // 1) Lê body
+  let body: any = {};
+  let bodyText = '';
+  try {
+    bodyText = await c.req.text();
+    if (bodyText) body = JSON.parse(bodyText);
+  } catch {
+    body = {};
+  }
+
+  const mpId = String(
+    body?.data?.id || body?.id || c.req.query('id') || c.req.query('data.id') || ''
+  );
+  const eventType = String(body?.type || body?.topic || '');
+  const action = String(body?.action || '');
+  // external_id: prioriza x-request-id (MP usa pra deduplica) + fallback timestamp+mpId
+  const external_id = xRequestUuid || (mpId ? `${mpId}-${Date.now()}` : null);
+
+  // 2) Idempotência: tenta inserir event antes de processar
+  try {
+    const r = await c.env.DB.prepare(
+      `INSERT OR IGNORE INTO payment_webhook_events
+         (gateway, external_id, resource_id, event_type, action,
+          status, signature_valid, payload, headers, ip_origem)
+       VALUES ('mercadopago', ?, ?, ?, ?, 'received', 0, ?, ?, ?)`
+    ).bind(
+      external_id,
+      mpId || null,
+      eventType || null,
+      action || null,
+      bodyText ? bodyText.slice(0, 4000) : null,
+      JSON.stringify(headersObj).slice(0, 2000),
+      ipOrigem || null,
+    ).run();
+    const changes = Number((r.meta as any)?.changes || 0);
+    if (changes === 0 && external_id) {
+      // INSERT OR IGNORE não inseriu → já existe (replay)
+      return c.json({ ok: true, replay: true, external_id }, 200);
+    }
+    id_event = Number((r.meta as any)?.last_row_id || 0) || null;
+  } catch (e) {
+    console.error('webhook insert event falhou', e);
+    // Continua processando mesmo se log falhar
+  }
+
+  // Helper para atualizar o evento ao final
+  const finishEvent = async (
+    status: 'processed' | 'ignored' | 'error',
+    signature_valid: number,
+    resultado: any,
+    erro?: string,
+    id_payment?: number,
+  ) => {
+    if (!id_event) return;
+    try {
+      await c.env.DB.prepare(
+        `UPDATE payment_webhook_events
+            SET status=?, signature_valid=?, resultado=?, erro=?,
+                id_payment=?, dt_processado=datetime('now'), duracao_ms=?
+          WHERE id_event=?`
+      ).bind(
+        status,
+        signature_valid,
+        resultado ? JSON.stringify(resultado).slice(0, 4000) : null,
+        erro || null,
+        id_payment || null,
+        Date.now() - t0,
+        id_event,
+      ).run();
+    } catch {}
+  };
+
+  if (!mpId) {
+    await finishEvent('ignored', 0, null, 'no resource id');
+    return c.json({ ok: true, ignored: 'no id' });
+  }
+
+  // 3) Valida HMAC (se temos secret configurado)
+  // Em modo mock OU sem secret configurado, pula validação (dev)
+  let signature_valid = 0;
+  const mockMode = isMockMode(c.env);
+  const secret = c.env.MP_WEBHOOK_SECRET;
+  if (secret && !mockMode) {
+    try {
+      const valid = await MercadoPagoGateway.verifyWebhookSignature(xSig, xReqId, mpId, secret);
+      signature_valid = valid ? 1 : 0;
+      if (!valid) {
+        await finishEvent('error', 0, { mpId }, 'invalid signature');
+        return c.json({ ok: false, error: 'invalid signature' }, 401);
+      }
+    } catch (e: any) {
+      await finishEvent('error', 0, { mpId }, 'signature check threw: ' + (e?.message || e));
+      return c.json({ ok: false, error: 'signature error' }, 401);
+    }
+  } else {
+    // Sem secret OU modo mock — aceita mas marca como não validado
+    signature_valid = mockMode ? 1 : 0;
+  }
+
+  // 4) Resolve payment local + consulta MP para status atualizado
+  try {
     const pay: any = await c.env.DB.prepare(
       `SELECT id_payment, id_sub, id_empresa, status, valor, mp_payment_id
          FROM payments WHERE mp_payment_id = ?`
     ).bind(mpId).first();
 
-    const r = await consultarPagamentoMP(c.env.MP_ACCESS_TOKEN, mpId);
-
-    if (pay && r.ok) {
-      if (r.status === 'aprovado' && pay.status !== 'aprovado') {
-        await aplicarPagamentoAprovado(c.env.DB, pay);
-      } else if (pay.status !== r.status) {
-        await c.env.DB.prepare(
-          `UPDATE payments SET status=?, mp_status=?, dt_atualizacao=datetime('now') WHERE id_payment=?`
-        ).bind(r.status, r.status, pay.id_payment).run();
-      }
+    if (!pay) {
+      await finishEvent('ignored', signature_valid, { mpId }, 'payment not found');
+      return c.json({ ok: true, ignored: 'payment not found', mp_id: mpId });
     }
-    return c.json({ ok: true, mp_id: mpId, status: r.status });
+
+    // Consulta MP (em mock retorna sempre pendente)
+    const r = await consultarPagamentoMP(getMPToken(c.env), mpId);
+    if (!r.ok) {
+      await finishEvent('error', signature_valid, { mpId, r }, r.error || 'mp query failed', pay.id_payment);
+      return c.json({ ok: false, error: r.error || 'mp query failed', mp_id: mpId });
+    }
+
+    let aplicou: any = { alteracao: false };
+    if (r.status === 'aprovado' && pay.status !== 'aprovado') {
+      aplicou = await aplicarPagamentoAprovado(c.env.DB, pay, { origem: 'webhook', ator: 'mp_webhook' });
+    } else if (pay.status !== r.status) {
+      // Status mudou para algo diferente de 'aprovado' (rejeitado/cancelado/expirado)
+      await c.env.DB.prepare(
+        `UPDATE payments SET status=?, mp_status=?, dt_atualizacao=datetime('now') WHERE id_payment=?`
+      ).bind(r.status, r.status, pay.id_payment).run();
+    }
+
+    await finishEvent(
+      'processed',
+      signature_valid,
+      { mpId, status: r.status, aplicou },
+      undefined,
+      pay.id_payment,
+    );
+    return c.json({ ok: true, mp_id: mpId, status: r.status, ...(aplicou.alteracao ? { aplicou } : {}) });
   } catch (e: any) {
-    console.error('mp_webhook', e);
+    console.error('mp_webhook erro', e);
+    await finishEvent('error', signature_valid, { mpId }, e?.message || String(e));
     return c.json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+/* ============================================================
+ * SPRINT D — Helper master: listar webhooks recebidos
+ * ============================================================ */
+app.get('/master/billing/webhooks', async (c) => {
+  try {
+    const limit = Math.min(Math.max(toInt(c.req.query('limit')) || 50, 1), 200);
+    const r: any = await c.env.DB.prepare(
+      `SELECT id_event, gateway, external_id, resource_id, event_type, action,
+              status, signature_valid, id_payment, ip_origem,
+              dt_recebido, dt_processado, duracao_ms, erro
+         FROM payment_webhook_events
+        ORDER BY dt_recebido DESC
+        LIMIT ?`
+    ).bind(limit).all();
+    return c.json(ok(r.results || []));
+  } catch (e: any) {
+    return fail('Erro: ' + (e?.message || e), 500);
+  }
+});
+
+app.get('/master/billing/webhooks/:id', async (c) => {
+  try {
+    const id = toInt(c.req.param('id'));
+    if (!id) return fail('ID inválido.', 400);
+    const e: any = await c.env.DB.prepare(
+      `SELECT * FROM payment_webhook_events WHERE id_event = ?`
+    ).bind(id).first();
+    if (!e) return fail('Evento não encontrado.', 404);
+    // Parse payload/headers JSON para o response (mais útil para debug)
+    try { e.payload_parsed = e.payload ? JSON.parse(e.payload) : null; } catch {}
+    try { e.headers_parsed = e.headers ? JSON.parse(e.headers) : null; } catch {}
+    try { e.resultado_parsed = e.resultado ? JSON.parse(e.resultado) : null; } catch {}
+    return c.json(ok(e));
+  } catch (e: any) {
+    return fail('Erro: ' + (e?.message || e), 500);
+  }
+});
+
+/* ============================================================
+ * SPRINT D — MASTER: simular pagamento aprovado (somente em modo MOCK)
+ * Permite testar todo o fluxo (sub→ativa, empresa→desbloqueada, sub_log)
+ * sem precisar realmente pagar via PIX no MP.
+ * ============================================================ */
+app.post('/master/billing/payments/:id/simulate-approved', async (c) => {
+  try {
+    if (!isMockMode(c.env)) {
+      return fail('Só disponível em modo MOCK (MP_USE_MOCK=1). Em produção use sync ou aprove manualmente.', 403);
+    }
+    const id = toInt(c.req.param('id'));
+    if (!id) return fail('ID inválido.', 400);
+    const m = c.get('master') as any;
+    const p: any = await c.env.DB.prepare(
+      `SELECT id_payment, id_sub, id_empresa, valor, status FROM payments WHERE id_payment = ?`
+    ).bind(id).first();
+    if (!p) return fail('Pagamento não encontrado.', 404);
+    if (p.status === 'aprovado') return c.json(ok({ id_payment: id, alteracao: false }));
+    const result = await aplicarPagamentoAprovado(c.env.DB, p, {
+      origem: 'master',
+      ator: m?.login || 'master',
+    });
+    return c.json(ok({ id_payment: id, ...result, simulated: true }));
+  } catch (e: any) {
+    return fail('Erro: ' + (e?.message || e), 500);
   }
 });
 

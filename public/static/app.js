@@ -8258,20 +8258,73 @@ function mostrarModalPix(pay) {
 
       ${expira ? `<div style="font-size:11px;color:#64748b;text-align:center;margin-bottom:14px"><i class="fas fa-clock mr-1"></i>Expira em ${expira}</div>` : ''}
 
-      <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;font-size:12px;color:#065f46;text-align:center">
-        <i class="fas fa-circle-info mr-1"></i>
-        A confirmação é automática. Após o pagamento sua conta será reativada em segundos.
+      <!-- SPRINT D: indicador de status com polling automático -->
+      <div id="pix-status" style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;font-size:12px;color:#065f46;text-align:center">
+        <i class="fas fa-satellite-dish mr-1" id="pix-status-icon"></i>
+        <span id="pix-status-text">Aguardando pagamento… A confirmação é automática.</span>
       </div>
 
       <div style="margin-top:14px;display:flex;gap:8px">
         <button id="pix-refresh" style="flex:1;padding:12px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-weight:600;cursor:pointer">
-          <i class="fas fa-rotate mr-1"></i>Já paguei (verificar)
+          <i class="fas fa-rotate mr-1"></i>Já paguei (verificar agora)
         </button>
       </div>
     </div>`;
   document.body.appendChild(modal);
 
-  const close = () => modal.remove();
+  // SPRINT D — polling de status a cada 5s
+  let pollTimer = null;
+  let pollCount = 0;
+  const MAX_POLLS = 720; // 720 * 5s = 1h
+  const statusEl = modal.querySelector('#pix-status');
+  const statusTextEl = modal.querySelector('#pix-status-text');
+  const statusIconEl = modal.querySelector('#pix-status-icon');
+
+  const stopPolling = () => {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  };
+  const showAprovado = () => {
+    statusEl.style.background = 'rgba(16,185,129,0.2)';
+    statusEl.style.borderColor = 'rgba(16,185,129,0.5)';
+    statusEl.style.color = '#065f46';
+    statusIconEl.className = 'fas fa-check-circle mr-1';
+    statusIconEl.style.color = '#10b981';
+    statusTextEl.innerHTML = '<strong>Pagamento confirmado!</strong> Sua conta foi reativada.';
+    stopPolling();
+    toast('Pagamento confirmado! Sua conta está ativa.', 'success');
+    setTimeout(() => { modal.remove(); navigate('minha_assinatura'); }, 1800);
+  };
+  const showRejeitado = (label) => {
+    statusEl.style.background = 'rgba(239,68,68,0.1)';
+    statusEl.style.borderColor = 'rgba(239,68,68,0.3)';
+    statusEl.style.color = '#991b1b';
+    statusIconEl.className = 'fas fa-circle-exclamation mr-1';
+    statusIconEl.style.color = '#ef4444';
+    statusTextEl.innerHTML = `<strong>${label}</strong> — gere uma nova cobrança.`;
+    stopPolling();
+  };
+
+  const poll = async () => {
+    if (!document.body.contains(modal)) { stopPolling(); return; }
+    pollCount++;
+    if (pollCount > MAX_POLLS) { stopPolling(); return; }
+    try {
+      const r = await api('get', `/billing/payment/${pay.id_payment}/status`, null, { silent: true });
+      const d = r?.data || {};
+      if (d.aprovado || d.status === 'aprovado') return showAprovado();
+      if (d.status === 'rejeitado') return showRejeitado('Pagamento rejeitado');
+      if (d.status === 'cancelado') return showRejeitado('Cobrança cancelada');
+      if (d.status === 'expirado') return showRejeitado('Cobrança expirada');
+      // Continua polling
+    } catch {
+      // ignora erros de rede transientes
+    }
+    pollTimer = setTimeout(poll, 5000);
+  };
+  // Inicia polling em 5s (primeiro check) — não bloqueia render
+  pollTimer = setTimeout(poll, 5000);
+
+  const close = () => { stopPolling(); modal.remove(); };
   modal.querySelector('#pix-close').onclick = close;
   modal.onclick = (ev) => { if (ev.target === modal) close(); };
 
@@ -8291,9 +8344,28 @@ function mostrarModalPix(pay) {
   const refreshBtn = modal.querySelector('#pix-refresh');
   if (refreshBtn) refreshBtn.onclick = async () => {
     refreshBtn.disabled = true;
+    const original = refreshBtn.innerHTML;
     refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Verificando…';
-    // Recarrega a tela após 1s para dar tempo de o webhook chegar (em produção)
-    setTimeout(() => { close(); navigate('minha_assinatura'); }, 1200);
+    try {
+      const r = await api('get', `/billing/payment/${pay.id_payment}/status`, null, { silent: true });
+      const d = r?.data || {};
+      if (d.aprovado || d.status === 'aprovado') return showAprovado();
+      if (d.status === 'rejeitado') return showRejeitado('Pagamento rejeitado');
+      if (d.status === 'cancelado') return showRejeitado('Cobrança cancelada');
+      if (d.status === 'expirado') return showRejeitado('Cobrança expirada');
+      // Continua pendente
+      statusEl.style.background = 'rgba(245,158,11,0.1)';
+      statusTextEl.textContent = 'Ainda não recebido. Tente novamente em alguns segundos…';
+      setTimeout(() => {
+        statusEl.style.background = 'rgba(16,185,129,0.08)';
+        statusTextEl.textContent = 'Aguardando pagamento… A confirmação é automática.';
+      }, 2500);
+    } catch {
+      toast('Não foi possível verificar agora.', 'error');
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.innerHTML = original;
+    }
   };
 }
 window.mostrarModalPix = mostrarModalPix;

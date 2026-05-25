@@ -7,6 +7,15 @@ export type Bindings = {
   //   wrangler pages secret put MP_ACCESS_TOKEN --project-name corepro-confeccao
   // Se ausente, o sistema opera em modo MOCK (gera QR fake para desenvolvimento).
   MP_ACCESS_TOKEN?: string;
+  // SPRINT D — Webhook secret do Mercado Pago (validação HMAC SHA-256).
+  // wrangler pages secret put MP_WEBHOOK_SECRET --project-name corepro-confeccao
+  MP_WEBHOOK_SECRET?: string;
+  // SPRINT D — Forçar modo mock localmente sem precisar remover MP_ACCESS_TOKEN.
+  //   "1" ou "true" → usa MockGateway (não chama API real do MP)
+  MP_USE_MOCK?: string;
+  // SPRINT D — Public Key e Client Secret (não usados runtime, mas armazenados)
+  MP_PUBLIC_KEY?: string;
+  MP_CLIENT_SECRET?: string;
   // Base URL pública (para montar notification_url do MP). Ex: https://confeccao.corepro.com.br
   PUBLIC_BASE_URL?: string;
 };

@@ -21,7 +21,7 @@ const FOUNDER_ID = 1; // empresa fundadora — imune ao lifecycle automático
 /* =============================================================
  * Helper: registra transição em sub_logs
  * ============================================================= */
-async function logSub(
+export async function logSub(
   DB: D1Database,
   args: {
     id_sub: number;

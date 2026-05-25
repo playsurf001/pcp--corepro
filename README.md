@@ -610,6 +610,83 @@ A tela **Sistema → Importador** aceita arquivos `.xlsx`, `.xls` e `.csv`. O pa
 
 Um botão **"Baixar modelo CSV"** na tela gera um template com as colunas corretas.
 
+## 💰 SaaS Multi-tenant & Billing (Sprints A → D)
+
+O CorePro evoluiu para uma plataforma SaaS multi-tenant com cobrança recorrente PIX via Mercado Pago. Cada empresa cliente é isolada via `id_empresa`. A empresa **id_empresa=1 (PLAYSURF / FOUNDER_ID)** é imune às mutações de billing — usada como tenant-mãe da plataforma.
+
+### Sprint A — Multi-tenant + Master Panel
+- Master Console em `/#master` (login separado: `super_admins`)
+- CRUD de empresas, planos, subscriptions
+- Auditoria global (`audit_logs`) com filtros
+- KV namespace para feature flags por tenant
+
+### Sprint B — Lifecycle Automation (`runLifecycleFull`)
+- Job de ciclo de vida que roda em todas as requests (com `job_runs` para evitar overlap)
+- Transições: `trial → expira_em` → suspende automaticamente
+- `dt_pagamento_atrasada` controla aviso e bloqueio (`bloqueada_por_pagamento`)
+- Auditoria via tabela `sub_logs` (exportada como `logSub`)
+
+### Sprint C — Cobrança automática + UI cliente
+- Endpoint `/api/billing/gerar-cobranca` (uso pelo tenant via SPA)
+- Modal PIX no app com QR + copia-e-cola + botão "Já paguei"
+- View **Minha Assinatura** no SPA do tenant
+- Cron diário gera fatura `dt_proxima_cobranca` (preserva dias pagos)
+
+### Sprint D — PIX REAL Mercado Pago (✅ CONCLUÍDO)
+**Adapter Pattern de gateway de pagamento:**
+- `src/lib/payments/types.ts` — interface `PixGateway`
+- `src/lib/payments/mock.ts` — `MockGateway` (dev/sandbox)
+- `src/lib/payments/mercadopago.ts` — `MercadoPagoGateway` (REAL)
+- `src/lib/payments/factory.ts` — `getGateway(env)` decide via `MP_USE_MOCK`
+
+**Validação CPF/CNPJ (Algoritmo DV brasileiro):**
+- `validarCPF(digits)` e `validarCNPJ(digits)` em `src/lib/mercadopago.ts`
+- Rejeita sequências repetidas e checksum DV inválido
+- Se documento da empresa for inválido, o sistema **NÃO envia** `identification` ao MP (MP aceita criar PIX sem)
+
+**Webhook MP (`POST /api/public/mp/webhook`):**
+- Validação HMAC-SHA256 (manifest: `id:${dataId};request-id:${xRequestId};ts:${ts};`)
+- Idempotência via `payment_webhook_events` com UNIQUE `external_id`
+- Retorna **401** quando assinatura inválida (em PROD)
+- Retorna **200 + replay:true** em duplicatas (race-condition-safe via `INSERT OR IGNORE`)
+- Registra todos os headers (sem auth/cookie) + payload + duração
+
+**Polling UI:**
+- Endpoint `GET /api/billing/payment/:id/status`
+- Modal PIX no SPA faz polling a cada 5s (máx 720 polls = 1h)
+- Ao aprovar: toast verde + redireciona para Minha Assinatura
+
+**Endpoints master (Sprint D):**
+| Método | Rota | Função |
+|---|---|---|
+| POST | `/api/master/billing/payments/:id/simulate-approved` | Simula aprovação (apenas em mock; 403 em PROD) |
+| GET | `/api/master/billing/webhooks` | Lista eventos webhook |
+| GET | `/api/master/billing/webhooks/:id` | Detalhe do evento (payload + headers parseados) |
+
+**Reconciliação:**
+- `aplicarPagamentoAprovado()` integra Sprint C: limpa `bloqueada_por_pagamento`, `dt_pagamento_atrasada`, `ultimo_aviso_em`, registra `sub_log`, e calcula `dt_proxima_cobranca = max(hoje, dt_proxima_atual) + 30d` (preserva dias já pagos pelo cliente).
+
+**Email do pagador (anti-rejeição MP):**
+- `emailPagadorSeguro()` rejeita TLDs reservadas (`.test`, `.local`, `.example`, `.invalid`, `.localhost`) — fallback para `cobranca-${id}@corepro.com.br`.
+
+**Mensagens de erro amigáveis:**
+- "Conta MP sem chave PIX cadastrada" → instrui usuário a configurar PIX no painel MP
+- "Documento inválido" → instrui atualizar cadastro
+- HTTP 502 quando MP recusa, com `mp_error` original disponível para master debug
+
+**Migração:** `migrations/0028_payment_webhooks.sql` cria `payment_webhook_events`, índice `idx_payments_mp_id`, coluna `payments.gateway DEFAULT 'mercadopago'`.
+
+**Secrets configurados em Cloudflare Pages (PROD):**
+- `MP_ACCESS_TOKEN` (APP_USR-...)
+- `MP_WEBHOOK_SECRET` (para HMAC)
+- `MP_PUBLIC_KEY`
+- `MP_CLIENT_SECRET`
+- `MP_CLIENT_ID`
+
+**Modo local (`.dev.vars`):** `MP_USE_MOCK=1` força gateway mock mesmo com token real configurado.
+
+> ⚠️ **Pré-requisito de conta MP:** O usuário Mercado Pago **recebedor** precisa ter uma **chave PIX cadastrada** (CPF, CNPJ, email ou telefone) no painel MP. Sem isso, MP retorna erro 13253 — "Collector user without key enabled for QR render". O CorePro detecta esse erro e mostra mensagem clara ao usuário.
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

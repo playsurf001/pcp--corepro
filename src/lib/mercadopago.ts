@@ -48,6 +48,81 @@ export interface MPPixResponse {
 
 const MP_API = 'https://api.mercadopago.com';
 
+// =====================================================================
+// Validação de CPF/CNPJ (algoritmo de Dígito Verificador brasileiro)
+// =====================================================================
+// O Mercado Pago valida o checksum do documento. Enviar um CPF/CNPJ
+// inválido faz o POST /v1/payments retornar HTTP 400. Para evitar isso,
+// só enviamos `identification` quando o DV bate.
+// =====================================================================
+
+/**
+ * Valida CPF (11 dígitos numéricos) usando o algoritmo de DV.
+ * Rejeita CPFs com todos os dígitos iguais (00000000000, 11111111111, etc).
+ */
+export function validarCPF(cpf: string): boolean {
+  if (!cpf || cpf.length !== 11) return false;
+  if (!/^\d{11}$/.test(cpf)) return false;
+  // Rejeita sequências de dígitos repetidos
+  if (/^(\d)\1{10}$/.test(cpf)) return false;
+
+  // Primeiro DV
+  let soma = 0;
+  for (let i = 0; i < 9; i++) {
+    soma += parseInt(cpf.charAt(i), 10) * (10 - i);
+  }
+  let resto = (soma * 10) % 11;
+  if (resto === 10) resto = 0;
+  if (resto !== parseInt(cpf.charAt(9), 10)) return false;
+
+  // Segundo DV
+  soma = 0;
+  for (let i = 0; i < 10; i++) {
+    soma += parseInt(cpf.charAt(i), 10) * (11 - i);
+  }
+  resto = (soma * 10) % 11;
+  if (resto === 10) resto = 0;
+  if (resto !== parseInt(cpf.charAt(10), 10)) return false;
+
+  return true;
+}
+
+/**
+ * Valida CNPJ (14 dígitos numéricos) usando o algoritmo de DV.
+ * Rejeita CNPJs com todos os dígitos iguais.
+ */
+export function validarCNPJ(cnpj: string): boolean {
+  if (!cnpj || cnpj.length !== 14) return false;
+  if (!/^\d{14}$/.test(cnpj)) return false;
+  // Rejeita sequências de dígitos repetidos
+  if (/^(\d)\1{13}$/.test(cnpj)) return false;
+
+  // Pesos para o primeiro DV
+  const pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  // Pesos para o segundo DV
+  const pesos2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+
+  // Primeiro DV
+  let soma = 0;
+  for (let i = 0; i < 12; i++) {
+    soma += parseInt(cnpj.charAt(i), 10) * pesos1[i];
+  }
+  let resto = soma % 11;
+  const dv1 = resto < 2 ? 0 : 11 - resto;
+  if (dv1 !== parseInt(cnpj.charAt(12), 10)) return false;
+
+  // Segundo DV
+  soma = 0;
+  for (let i = 0; i < 13; i++) {
+    soma += parseInt(cnpj.charAt(i), 10) * pesos2[i];
+  }
+  resto = soma % 11;
+  const dv2 = resto < 2 ? 0 : 11 - resto;
+  if (dv2 !== parseInt(cnpj.charAt(13), 10)) return false;
+
+  return true;
+}
+
 /**
  * Mapeia status MP → status local payments.status
  */
@@ -112,10 +187,17 @@ export async function criarPixMP(
     }
     if (req.payer_doc) {
       const digits = req.payer_doc.replace(/\D/g, '');
-      body.payer.identification = {
-        type: digits.length === 11 ? 'CPF' : 'CNPJ',
-        number: digits,
-      };
+      // Valida CPF/CNPJ com algoritmo de checksum DV.
+      // Se não passar, NÃO envia identification (MP aceita criar PIX sem).
+      const isValid =
+        (digits.length === 11 && validarCPF(digits)) ||
+        (digits.length === 14 && validarCNPJ(digits));
+      if (isValid) {
+        body.payer.identification = {
+          type: digits.length === 11 ? 'CPF' : 'CNPJ',
+          number: digits,
+        };
+      }
     }
     if (req.webhook_url) {
       body.notification_url = req.webhook_url;
