@@ -235,6 +235,75 @@ Substitui geração direta de romaneio por **modal de seleção prévia** em tod
 - `public/static/styles.css` — Refactor `.nav-group-items` (wrapper pattern) + `.nav-group-count` pill + ~500 linhas de modal premium `.romaneio-selector-*` / `.rs-*`.
 - `src/index.tsx` — cache bump `v=30 → v=31` em app.js e styles.css.
 
+### 🧱 FASE 4 — SaaS Multiempresa (em construção)
+
+**SPRINT A — Planos editáveis (concluído, em produção 2026-05-22)**
+
+Migration `0026_plans_editaveis.sql`:
+- Adiciona em `plans`: `cor`, `destaque`, `ativo`, `trial_dias` (default 30)
+- Features novas (12 no total): `feat_dashboard`, `feat_romaneio`, `feat_export_pdf`, `feat_backup`, `feat_personalizacao`, `feat_suporte_prioritario`, `feat_financeiro` (+ as 5 já existentes)
+- Backfill: cores nos planos canônicos (starter azul, profissional roxo+destaque, premium violet, enterprise âmbar)
+- Premium/Enterprise ganham automaticamente backup + personalização + suporte prioritário
+- Índices em `ativo` (parcial) e `destaque` (parcial)
+
+Backend (`src/routes/master.ts`):
+| Rota | Método | Função |
+|------|--------|--------|
+| `/api/master/plans` | GET | Lista (`?incluir_inativos=1`) |
+| `/api/master/plans/:id` | GET | Detalhe + contagem de uso (empresas/subs) |
+| `/api/master/plans` | POST | Criar plano novo |
+| `/api/master/plans/:id` | PUT | Atualizar (todos os campos) |
+| `/api/master/plans/:id/duplicar` | POST | Cria cópia `codigo_copia[_N]` (oculta por padrão) |
+| `/api/master/plans/:id/toggle` | POST | Ativar/desativar (bloqueia se há subs ativas) |
+| `/api/master/plans/:id` | DELETE | Hard delete (bloqueia se há empresas/subs ligadas) |
+
+Validação centralizada `normalizePlanPayload()` com regras:
+- `codigo`: kebab-case, único no banco (409 se duplicar)
+- `preco_mensal`: ≥ 0 obrigatório
+- limites: `-1 = ilimitado`, inteiros ≥ -1
+- features: normalização bool01 (1/'1'/true → 1, resto → 0)
+- `cor`: hex `#RRGGBB` com fallback `#7c3aed`
+- `trial_dias`: 0-365
+
+Frontend (`public/static/master.js` v=3):
+- **`viewPlanos()`**: cards grid responsivo (min 320px), gradient dark, border-top com cor do plano, badge "Destaque" (estrela amber), card "Inativo" (grayscale + opacity), preço grande, lista de limites em coluna, features como chips roxos com ícones FA, footer com trial/visível, ações inline (editar/duplicar/toggle/excluir)
+- **`viewPlanoForm(id|null)`**: formulário completo grid 2-col:
+  - **Identificação**: nome, código, descrição, preço, trial, cor (color picker nativo)
+  - **Limites**: 4 campos (`-1 = ∞`)
+  - **Features**: 12 toggles em grid com ícones, estilo card iOS (`:has(input:checked)`)
+  - **Status & Visibilidade**: 3 toggles (ativo, visivel, destaque) + ordem
+- Rotas próprias: `#master/planos/novo` e `#master/planos/:id`
+- Confirms em ações destrutivas; toasts em sucesso/erro
+
+CSS (`styles.css` v=33):
+- `.plans-grid` (auto-fill 320px), `.plan-card` (gradient + hover lift)
+- `.plan-card.destaque` (golden glow), `.plan-card.inativo` (grayscale)
+- `.plan-feat-chip` (purple pills), `.plan-feat-toggle` (iOS-style com `:has(input:checked)`)
+- Responsivo: ≤900px → single col; ≤540px → empilha tudo
+
+Decisões de produto registradas:
+- Gateway PIX: **Mercado Pago**
+- Trial padrão: **30 dias**
+- Ciclo: **somente mensal**
+- Impersonate master → empresa: **NÃO** (decisão de segurança)
+
+**Próximos sprints:**
+- **SPRINT B**: Gerenciamento de Empresas (CRUD + criação automática do usuário admin + senha temporária + flag `must_change_password`)
+- **SPRINT C**: Assinaturas + lifecycle (trial 30d → ativa → vencida → bloqueada) + cron diário
+- **SPRINT D**: Cobrança PIX via Mercado Pago (Adapter pattern, webhook HMAC, reconciliação)
+- **SPRINT E**: Dashboard SaaS com MRR, ARR, churn, gráficos
+- **SPRINT F**: ACL granular por feature do plano + auditoria + skeleton loading
+
+### ✨ FASE 3 polish — Botão "Salvar rascunho" removido (deploy 2026-05-22)
+Botão `m-rascunho` removido completamente do modal de remessa:
+- ~80 linhas de código legado eliminadas (`_coletarEstado`, `_aplicarEstado`, `RASCUNHO_KEY`, oferecer restauração, handler, cleanup pós-submit)
+- Cleanup defensivo: `localStorage.removeItem('corepro:remessa:rascunho')` ao abrir modal (limpa navegadores antigos)
+- Footer reorganizado: `[Cancelar] [Gerar romaneio selecionado] [Salvar remessa]`
+- Novo wrapper `.rem-modal-actions` + classes `.rem-action-btn` / `.rem-btn-rom` / `.rem-btn-save`
+- Cores: purple gradient para romaneio, green gradient para CTA salvar
+- Responsivo: desktop horizontal, ≤640px coluna full-width 44px touch
+- Cache: v=31 → v=32
+
 ### 🔑 Acesso Master (área administrativa SaaS)
 - **URL**: https://confeccao.corepro.com.br/#master
 - **Credenciais padrão**: `master` / `master` (trocar em produção)
