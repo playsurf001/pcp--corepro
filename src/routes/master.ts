@@ -145,20 +145,302 @@ app.get('/master/dashboard', async (c) => {
 });
 
 /* ============================================================
- * PLANOS — Listagem (CRUD simples — SPRINT 1)
+ * PLANOS — CRUD completo (SPRINT A — Planos editáveis)
+ * GET /master/plans               → lista (filtro ?incluir_inativos=1)
+ * GET /master/plans/:id           → detalhe
+ * POST /master/plans              → criar
+ * PUT /master/plans/:id           → atualizar
+ * POST /master/plans/:id/duplicar → duplicar
+ * POST /master/plans/:id/toggle   → ativar/desativar
+ * DELETE /master/plans/:id        → remover (somente se sem assinaturas)
  * ============================================================ */
+const PLAN_COLUMNS = `
+  id_plano, codigo, nome, descricao, preco_mensal,
+  max_usuarios, max_remessas_mes, max_terceirizados, max_storage_mb,
+  feat_relatorios_avancados, feat_api, feat_export_excel, feat_audit_log,
+  feat_multi_filial, feat_dashboard, feat_romaneio, feat_export_pdf,
+  feat_backup, feat_personalizacao, feat_suporte_prioritario, feat_financeiro,
+  cor, destaque, ativo, trial_dias,
+  visivel, ordem,
+  dt_criacao, dt_atualizacao
+`;
+
+// Lista todos os planos
 app.get('/master/plans', async (c) => {
   try {
+    const incluirInativos = c.req.query('incluir_inativos') === '1';
+    const where = incluirInativos ? '' : 'WHERE ativo = 1';
     const r = await c.env.DB.prepare(
-      `SELECT id_plano, codigo, nome, descricao, preco_mensal,
-              max_usuarios, max_remessas_mes, max_terceirizados, max_storage_mb,
-              feat_relatorios_avancados, feat_api, feat_export_excel, feat_audit_log, feat_multi_filial,
-              visivel, ordem
-         FROM plans ORDER BY ordem, preco_mensal`
+      `SELECT ${PLAN_COLUMNS} FROM plans ${where} ORDER BY ordem, preco_mensal`
     ).all();
     return c.json(ok(r.results || []));
   } catch (e: any) {
     return fail('Erro ao listar planos: ' + (e?.message || e), 500);
+  }
+});
+
+// Detalhe de um plano + contagem de empresas usando-o
+app.get('/master/plans/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const plan = await c.env.DB.prepare(
+      `SELECT ${PLAN_COLUMNS} FROM plans WHERE id_plano = ?`
+    ).bind(id).first<any>();
+    if (!plan) return fail('Plano não encontrado.', 404);
+    // Conta empresas/assinaturas usando o plano
+    const cnt = await c.env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM companies WHERE id_plano = ?) AS empresas,
+         (SELECT COUNT(*) FROM subscriptions WHERE id_plano = ? AND status IN ('ativa','trial','pendente')) AS assinaturas_ativas`
+    ).bind(id, id).first<any>();
+    return c.json(ok({ ...plan, _uso: cnt || { empresas: 0, assinaturas_ativas: 0 } }));
+  } catch (e: any) {
+    return fail('Erro ao buscar plano: ' + (e?.message || e), 500);
+  }
+});
+
+// Validação e normalização do payload
+function normalizePlanPayload(body: any) {
+  const errors: string[] = [];
+  const codigo = String(body.codigo || '').toLowerCase().trim().replace(/[^a-z0-9_-]/g, '');
+  const nome = String(body.nome || '').trim();
+  const preco = Number(body.preco_mensal);
+
+  if (!codigo) errors.push('Código é obrigatório (letras/números/_/-).');
+  if (!nome) errors.push('Nome é obrigatório.');
+  if (!Number.isFinite(preco) || preco < 0) errors.push('Preço mensal inválido.');
+
+  const intOrUnlimited = (v: any, label: string): number => {
+    if (v === '' || v === null || v === undefined || v === -1 || v === '-1') return -1;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < -1) { errors.push(`${label} inválido.`); return 0; }
+    return Math.floor(n);
+  };
+  const bool01 = (v: any): number => (v === 1 || v === '1' || v === true || v === 'true') ? 1 : 0;
+
+  return {
+    errors,
+    payload: {
+      codigo,
+      nome,
+      descricao: String(body.descricao || '').trim() || null,
+      preco_mensal: Math.max(0, preco || 0),
+      max_usuarios: intOrUnlimited(body.max_usuarios, 'Limite de usuários'),
+      max_remessas_mes: intOrUnlimited(body.max_remessas_mes, 'Limite de remessas/mês'),
+      max_terceirizados: intOrUnlimited(body.max_terceirizados, 'Limite de terceirizados'),
+      max_storage_mb: intOrUnlimited(body.max_storage_mb, 'Limite de armazenamento'),
+      feat_relatorios_avancados: bool01(body.feat_relatorios_avancados),
+      feat_api: bool01(body.feat_api),
+      feat_export_excel: bool01(body.feat_export_excel),
+      feat_audit_log: bool01(body.feat_audit_log),
+      feat_multi_filial: bool01(body.feat_multi_filial),
+      feat_dashboard: bool01(body.feat_dashboard),
+      feat_romaneio: bool01(body.feat_romaneio),
+      feat_export_pdf: bool01(body.feat_export_pdf),
+      feat_backup: bool01(body.feat_backup),
+      feat_personalizacao: bool01(body.feat_personalizacao),
+      feat_suporte_prioritario: bool01(body.feat_suporte_prioritario),
+      feat_financeiro: bool01(body.feat_financeiro),
+      cor: (String(body.cor || '').trim().match(/^#[0-9a-fA-F]{6}$/)) ? body.cor : '#7c3aed',
+      destaque: bool01(body.destaque),
+      ativo: body.ativo === undefined ? 1 : bool01(body.ativo),
+      trial_dias: Math.max(0, Math.min(365, parseInt(body.trial_dias) || 30)),
+      visivel: body.visivel === undefined ? 1 : bool01(body.visivel),
+      ordem: Math.max(0, parseInt(body.ordem) || 0),
+    }
+  };
+}
+
+// Cria plano
+app.post('/master/plans', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const { errors, payload } = normalizePlanPayload(body);
+    if (errors.length) return fail(errors.join(' '), 400);
+
+    // Código único
+    const existe = await c.env.DB.prepare(
+      `SELECT id_plano FROM plans WHERE codigo = ?`
+    ).bind(payload.codigo).first();
+    if (existe) return fail(`Já existe um plano com o código "${payload.codigo}".`, 409);
+
+    const r = await c.env.DB.prepare(
+      `INSERT INTO plans (
+         codigo, nome, descricao, preco_mensal,
+         max_usuarios, max_remessas_mes, max_terceirizados, max_storage_mb,
+         feat_relatorios_avancados, feat_api, feat_export_excel, feat_audit_log,
+         feat_multi_filial, feat_dashboard, feat_romaneio, feat_export_pdf,
+         feat_backup, feat_personalizacao, feat_suporte_prioritario, feat_financeiro,
+         cor, destaque, ativo, trial_dias, visivel, ordem
+       ) VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?)`
+    ).bind(
+      payload.codigo, payload.nome, payload.descricao, payload.preco_mensal,
+      payload.max_usuarios, payload.max_remessas_mes, payload.max_terceirizados, payload.max_storage_mb,
+      payload.feat_relatorios_avancados, payload.feat_api, payload.feat_export_excel, payload.feat_audit_log,
+      payload.feat_multi_filial, payload.feat_dashboard, payload.feat_romaneio, payload.feat_export_pdf,
+      payload.feat_backup, payload.feat_personalizacao, payload.feat_suporte_prioritario, payload.feat_financeiro,
+      payload.cor, payload.destaque, payload.ativo, payload.trial_dias, payload.visivel, payload.ordem
+    ).run();
+
+    const id = (r as any).meta?.last_row_id;
+    return c.json(ok({ id_plano: id, ...payload }), 201);
+  } catch (e: any) {
+    return fail('Erro ao criar plano: ' + (e?.message || e), 500);
+  }
+});
+
+// Atualiza plano
+app.put('/master/plans/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const atual = await c.env.DB.prepare(
+      `SELECT id_plano, codigo FROM plans WHERE id_plano = ?`
+    ).bind(id).first<any>();
+    if (!atual) return fail('Plano não encontrado.', 404);
+
+    const body = await c.req.json().catch(() => ({}));
+    const { errors, payload } = normalizePlanPayload(body);
+    if (errors.length) return fail(errors.join(' '), 400);
+
+    // Código único (exceto o próprio)
+    if (payload.codigo !== atual.codigo) {
+      const dup = await c.env.DB.prepare(
+        `SELECT id_plano FROM plans WHERE codigo = ? AND id_plano != ?`
+      ).bind(payload.codigo, id).first();
+      if (dup) return fail(`Já existe outro plano com o código "${payload.codigo}".`, 409);
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE plans SET
+         codigo=?, nome=?, descricao=?, preco_mensal=?,
+         max_usuarios=?, max_remessas_mes=?, max_terceirizados=?, max_storage_mb=?,
+         feat_relatorios_avancados=?, feat_api=?, feat_export_excel=?, feat_audit_log=?,
+         feat_multi_filial=?, feat_dashboard=?, feat_romaneio=?, feat_export_pdf=?,
+         feat_backup=?, feat_personalizacao=?, feat_suporte_prioritario=?, feat_financeiro=?,
+         cor=?, destaque=?, ativo=?, trial_dias=?, visivel=?, ordem=?,
+         dt_atualizacao=datetime('now')
+       WHERE id_plano = ?`
+    ).bind(
+      payload.codigo, payload.nome, payload.descricao, payload.preco_mensal,
+      payload.max_usuarios, payload.max_remessas_mes, payload.max_terceirizados, payload.max_storage_mb,
+      payload.feat_relatorios_avancados, payload.feat_api, payload.feat_export_excel, payload.feat_audit_log,
+      payload.feat_multi_filial, payload.feat_dashboard, payload.feat_romaneio, payload.feat_export_pdf,
+      payload.feat_backup, payload.feat_personalizacao, payload.feat_suporte_prioritario, payload.feat_financeiro,
+      payload.cor, payload.destaque, payload.ativo, payload.trial_dias, payload.visivel, payload.ordem,
+      id
+    ).run();
+
+    return c.json(ok({ id_plano: id, ...payload }));
+  } catch (e: any) {
+    return fail('Erro ao atualizar plano: ' + (e?.message || e), 500);
+  }
+});
+
+// Duplica plano (gera código novo "<codigo>_copia" ou "<codigo>_copia_2", etc.)
+app.post('/master/plans/:id/duplicar', async (c) => {
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const orig = await c.env.DB.prepare(
+      `SELECT ${PLAN_COLUMNS} FROM plans WHERE id_plano = ?`
+    ).bind(id).first<any>();
+    if (!orig) return fail('Plano original não encontrado.', 404);
+
+    // Gera código único
+    let novoCodigo = orig.codigo + '_copia';
+    let suffix = 2;
+    while (true) {
+      const exists = await c.env.DB.prepare(
+        `SELECT id_plano FROM plans WHERE codigo = ?`
+      ).bind(novoCodigo).first();
+      if (!exists) break;
+      novoCodigo = orig.codigo + '_copia_' + suffix;
+      suffix++;
+      if (suffix > 50) return fail('Não foi possível gerar código único.', 500);
+    }
+
+    const r = await c.env.DB.prepare(
+      `INSERT INTO plans (
+         codigo, nome, descricao, preco_mensal,
+         max_usuarios, max_remessas_mes, max_terceirizados, max_storage_mb,
+         feat_relatorios_avancados, feat_api, feat_export_excel, feat_audit_log,
+         feat_multi_filial, feat_dashboard, feat_romaneio, feat_export_pdf,
+         feat_backup, feat_personalizacao, feat_suporte_prioritario, feat_financeiro,
+         cor, destaque, ativo, trial_dias, visivel, ordem
+       ) VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?)`
+    ).bind(
+      novoCodigo, orig.nome + ' (cópia)', orig.descricao, orig.preco_mensal,
+      orig.max_usuarios, orig.max_remessas_mes, orig.max_terceirizados, orig.max_storage_mb,
+      orig.feat_relatorios_avancados, orig.feat_api, orig.feat_export_excel, orig.feat_audit_log,
+      orig.feat_multi_filial, orig.feat_dashboard, orig.feat_romaneio, orig.feat_export_pdf,
+      orig.feat_backup, orig.feat_personalizacao, orig.feat_suporte_prioritario, orig.feat_financeiro,
+      orig.cor, 0 /* destaque sempre 0 na cópia */, 1, orig.trial_dias, 0 /* visivel=0 até master revisar */, orig.ordem + 1
+    ).run();
+
+    const newId = (r as any).meta?.last_row_id;
+    return c.json(ok({ id_plano: newId, codigo: novoCodigo, nome: orig.nome + ' (cópia)' }), 201);
+  } catch (e: any) {
+    return fail('Erro ao duplicar plano: ' + (e?.message || e), 500);
+  }
+});
+
+// Toggle ativo/inativo (soft)
+app.post('/master/plans/:id/toggle', async (c) => {
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const p = await c.env.DB.prepare(
+      `SELECT id_plano, ativo, codigo FROM plans WHERE id_plano = ?`
+    ).bind(id).first<any>();
+    if (!p) return fail('Plano não encontrado.', 404);
+    const novo = p.ativo ? 0 : 1;
+
+    // Ao DESATIVAR, valida que não há assinaturas ativas usando este plano
+    if (novo === 0) {
+      const sub = await c.env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM subscriptions WHERE id_plano = ? AND status IN ('ativa','trial','pendente')`
+      ).bind(id).first<any>();
+      if (sub && sub.n > 0) {
+        return fail(`Não é possível desativar: ${sub.n} assinatura(s) ativa(s) usam este plano. Migre-as antes.`, 409);
+      }
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE plans SET ativo = ?, dt_atualizacao = datetime('now') WHERE id_plano = ?`
+    ).bind(novo, id).run();
+
+    return c.json(ok({ id_plano: id, ativo: novo }));
+  } catch (e: any) {
+    return fail('Erro ao alternar plano: ' + (e?.message || e), 500);
+  }
+});
+
+// Exclui plano (hard delete) — só se não houver empresas/subs ligadas
+app.delete('/master/plans/:id', async (c) => {
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  try {
+    const p = await c.env.DB.prepare(
+      `SELECT id_plano, codigo FROM plans WHERE id_plano = ?`
+    ).bind(id).first<any>();
+    if (!p) return fail('Plano não encontrado.', 404);
+
+    // Bloqueia exclusão se houver dependências
+    const uso = await c.env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM companies WHERE id_plano = ?) AS emp,
+         (SELECT COUNT(*) FROM subscriptions WHERE id_plano = ?) AS sub`
+    ).bind(id, id).first<any>();
+    if (uso && (uso.emp > 0 || uso.sub > 0)) {
+      return fail(`Não é possível excluir: ${uso.emp} empresa(s) e ${uso.sub} assinatura(s) referenciam este plano. Desative-o em vez disso.`, 409);
+    }
+
+    await c.env.DB.prepare(`DELETE FROM plans WHERE id_plano = ?`).bind(id).run();
+    return c.json(ok({ id_plano: id, deleted: true }));
+  } catch (e: any) {
+    return fail('Erro ao excluir plano: ' + (e?.message || e), 500);
   }
 });
 

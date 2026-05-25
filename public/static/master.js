@@ -131,6 +131,68 @@
     .master-loading { display: flex; align-items: center; justify-content: center; padding: 60px; color: #94a3b8; gap: 10px; font-size: .9rem; }
     .master-empty { text-align: center; padding: 60px 20px; color: #64748b; }
     .master-empty i { font-size: 3rem; color: #334155; margin-bottom: 16px; }
+
+    /* ===== PLANOS — Cards grid ===== */
+    .plans-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+    .plan-card { background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-top: 4px solid #7c3aed; border-radius: 14px; padding: 22px 20px 18px; display: flex; flex-direction: column; gap: 12px; transition: transform .15s ease, box-shadow .2s ease, border-color .2s ease; position: relative; }
+    .plan-card:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(0,0,0,.35); border-color: #475569; }
+    .plan-card.inativo { opacity: .55; filter: grayscale(.35); }
+    .plan-card.destaque { box-shadow: 0 0 0 1px rgba(251,191,36,.35), 0 6px 24px rgba(251,191,36,.08); }
+    .plan-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .plan-card-title h3 { margin: 0; font-size: 1.3rem; font-weight: 800; }
+    .plan-codigo { display: inline-block; margin-top: 4px; font-size: .68rem; color: #94a3b8; background: rgba(148,163,184,.1); padding: 2px 7px; border-radius: 4px; font-family: 'Courier New', monospace; }
+    .plan-badge-destaque { display: inline-flex; align-items: center; gap: 4px; background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #1e293b; font-size: .65rem; font-weight: 800; padding: 3px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+    .plan-status-inativo { background: rgba(148,163,184,.15); color: #94a3b8; font-size: .7rem; padding: 3px 8px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+    .plan-price { display: flex; align-items: baseline; gap: 4px; padding: 6px 0; }
+    .plan-price .currency { font-size: .8rem; color: #94a3b8; font-weight: 600; }
+    .plan-price .value { font-size: 2rem; font-weight: 800; color: #fff; line-height: 1; }
+    .plan-price .period { font-size: .85rem; color: #94a3b8; }
+    .plan-desc { color: #cbd5e1; font-size: .82rem; line-height: 1.5; margin: 0; }
+    .plan-limites { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; padding: 10px 12px; background: rgba(15,23,42,.5); border-radius: 8px; }
+    .plan-limite { display: flex; justify-content: space-between; align-items: center; font-size: .8rem; }
+    .plan-limite .lbl { color: #94a3b8; }
+    .plan-limite .val { color: #fff; font-weight: 700; }
+    .plan-features { display: flex; flex-wrap: wrap; gap: 5px; min-height: 30px; }
+    .plan-feat-chip { display: inline-flex; align-items: center; gap: 4px; background: rgba(124,58,237,.15); color: #c4b5fd; font-size: .7rem; padding: 3px 8px; border-radius: 12px; border: 1px solid rgba(124,58,237,.3); }
+    .plan-feat-chip i { font-size: .65rem; }
+    .plan-meta { display: flex; justify-content: space-between; align-items: center; font-size: .75rem; color: #94a3b8; padding-top: 10px; border-top: 1px solid rgba(51,65,85,.5); }
+    .plan-actions { display: flex; gap: 6px; padding-top: 12px; border-top: 1px solid rgba(51,65,85,.5); }
+    .plan-actions .master-btn { flex: 0 0 auto; padding: 6px 10px; font-size: .8rem; }
+    .plan-actions .master-btn:first-child { flex: 1; }
+
+    /* ===== PLANO — Formulário ===== */
+    .plan-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .plan-form-section { padding: 22px; }
+    .plan-form-full { grid-column: 1 / -1; }
+    .plan-form-title { margin: 0 0 16px; color: #fff; font-size: 1rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .plan-form-title i { color: #a78bfa; }
+    .plan-form-section label { display: block; font-size: .78rem; font-weight: 600; color: #94a3b8; margin-bottom: 5px; }
+    .plan-form-section .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .plan-form-section .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .plan-color-input { padding: 4px 8px; height: 42px; cursor: pointer; }
+    .plan-feats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+    .plan-feat-toggle { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: rgba(15,23,42,.5); border: 1px solid #334155; border-radius: 10px; cursor: pointer; transition: all .15s; }
+    .plan-feat-toggle:hover { border-color: #7c3aed; background: rgba(124,58,237,.08); }
+    .plan-feat-toggle input { accent-color: #7c3aed; width: 18px; height: 18px; cursor: pointer; flex-shrink: 0; }
+    .plan-feat-toggle input:checked + .plan-feat-content { color: #fff; }
+    .plan-feat-toggle:has(input:checked) { border-color: #7c3aed; background: rgba(124,58,237,.12); }
+    .plan-feat-content { display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: .85rem; flex: 1; }
+    .plan-feat-content i { color: #a78bfa; width: 16px; text-align: center; }
+    .plan-toggle-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: rgba(15,23,42,.5); border: 1px solid #334155; border-radius: 10px; cursor: pointer; }
+    .plan-toggle-row input { accent-color: #7c3aed; width: 20px; height: 20px; cursor: pointer; flex-shrink: 0; }
+    .plan-toggle-row strong { display: block; color: #fff; font-size: .9rem; }
+    .plan-toggle-row span { display: block; font-size: .75rem; color: #94a3b8; margin-top: 2px; }
+    .plan-toggle-row:has(input:checked) { border-color: #7c3aed; }
+    .plan-form-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 10px; padding-top: 6px; }
+    @media (max-width: 900px) {
+      .plan-form-grid { grid-template-columns: 1fr; }
+      .plan-form-section .grid-2, .plan-form-section .grid-3 { grid-template-columns: 1fr 1fr; }
+      .plans-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 540px) {
+      .plan-form-section .grid-2, .plan-form-section .grid-3 { grid-template-columns: 1fr; }
+      .plan-feats-grid { grid-template-columns: 1fr; }
+    }
     `;
     const s = document.createElement('style');
     s.id = 'master-css';
@@ -778,60 +840,324 @@
   }
 
   /* ============================================================
-   * TELA: PLANOS (somente leitura nesta sprint)
+   * TELA: PLANOS — CRUD completo (SPRINT A)
+   * Lista em cards + modal de criação/edição + duplicar + toggle + excluir
    * ============================================================ */
+  // Lista de features disponíveis (mapa feature → label/ícone para UI)
+  const PLAN_FEATURES = [
+    { key: 'feat_dashboard',           label: 'Dashboard',              icon: 'fa-chart-line' },
+    { key: 'feat_romaneio',            label: 'Romaneio',               icon: 'fa-print' },
+    { key: 'feat_relatorios_avancados',label: 'Relatórios avançados',   icon: 'fa-chart-pie' },
+    { key: 'feat_export_excel',        label: 'Exportar Excel',         icon: 'fa-file-excel' },
+    { key: 'feat_export_pdf',          label: 'Exportar PDF',           icon: 'fa-file-pdf' },
+    { key: 'feat_financeiro',          label: 'Financeiro',             icon: 'fa-dollar-sign' },
+    { key: 'feat_audit_log',           label: 'Auditoria',              icon: 'fa-shield-alt' },
+    { key: 'feat_api',                 label: 'API REST',               icon: 'fa-code' },
+    { key: 'feat_backup',              label: 'Backup',                 icon: 'fa-cloud-upload-alt' },
+    { key: 'feat_multi_filial',        label: 'Multi-filial',           icon: 'fa-building' },
+    { key: 'feat_personalizacao',      label: 'Personalização',         icon: 'fa-palette' },
+    { key: 'feat_suporte_prioritario', label: 'Suporte prioritário',    icon: 'fa-headset' },
+  ];
+
+  function unlimited(v) { return v < 0 ? '∞' : fmt.int(v); }
+
   async function viewPlanos() {
     const main = $('#m-main');
     main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando planos…</div>';
     try {
-      const r = await api('get', '/master/plans');
+      const r = await api('get', '/master/plans?incluir_inativos=1');
       const planos = r.data || [];
+      const ativos   = planos.filter((p) => p.ativo);
+      const inativos = planos.filter((p) => !p.ativo);
+
       main.innerHTML = `
         <div class="master-header">
           <div>
-            <h2>Planos do SaaS (${planos.length})</h2>
-            <div class="subtitle">Catálogo de planos, preços e limites. Edição completa em sprints futuras.</div>
+            <h2><i class="fas fa-layer-group mr-2" style="color:#a78bfa"></i> Gerenciamento de Planos (${planos.length})</h2>
+            <div class="subtitle">${ativos.length} ativo(s) · ${inativos.length} inativo(s) · ${planos.filter((p) => p.destaque).length} em destaque</div>
           </div>
+          <button class="master-btn master-btn-primary" onclick="masterNavigate('planos/novo')"><i class="fas fa-plus"></i> Novo plano</button>
         </div>
-        <div class="master-card" style="padding:0;overflow:hidden;">
-          <table class="master-table">
-            <thead><tr>
-              <th>Plano</th>
-              <th style="text-align:right;">Preço/mês</th>
-              <th style="text-align:right;">Usuários</th>
-              <th style="text-align:right;">Remessas/mês</th>
-              <th style="text-align:right;">Terceirizados</th>
-              <th>Features</th>
-              <th>Visível</th>
-            </tr></thead>
-            <tbody>
-              ${planos.map((p) => `
-                <tr>
-                  <td>
-                    <div style="font-weight:700;color:#fff;">${p.nome}</div>
-                    <div style="font-size:.75rem;color:#94a3b8;"><code>${p.codigo}</code></div>
-                    <div style="font-size:.75rem;color:#94a3b8;margin-top:4px;">${p.descricao || ''}</div>
-                  </td>
-                  <td style="text-align:right;font-weight:700;color:#34d399;">${fmt.money(p.preco_mensal)}</td>
-                  <td style="text-align:right;">${p.max_usuarios < 0 ? '∞' : p.max_usuarios}</td>
-                  <td style="text-align:right;">${p.max_remessas_mes < 0 ? '∞' : fmt.int(p.max_remessas_mes)}</td>
-                  <td style="text-align:right;">${p.max_terceirizados < 0 ? '∞' : p.max_terceirizados}</td>
-                  <td style="font-size:.75rem;">
-                    ${p.feat_relatorios_avancados ? '<span class="master-badge ativa" style="margin-right:3px;">RA</span>' : ''}
-                    ${p.feat_api ? '<span class="master-badge ativa" style="margin-right:3px;">API</span>' : ''}
-                    ${p.feat_audit_log ? '<span class="master-badge ativa" style="margin-right:3px;">AUD</span>' : ''}
-                    ${p.feat_multi_filial ? '<span class="master-badge ativa" style="margin-right:3px;">MF</span>' : ''}
-                  </td>
-                  <td>${p.visivel ? '<i class="fas fa-eye" style="color:#34d399"></i>' : '<i class="fas fa-eye-slash" style="color:#64748b"></i>'}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
+
+        <div class="plans-grid">
+          ${planos.map(renderPlanCard).join('') || '<div class="master-empty"><i class="fas fa-layer-group"></i><p>Nenhum plano cadastrado.</p></div>'}
         </div>
       `;
+
+      // Bind ações dos cards
+      $$('.plan-card-action').forEach((btn) => {
+        btn.onclick = (ev) => {
+          ev.stopPropagation();
+          const id = +btn.dataset.id;
+          const action = btn.dataset.action;
+          if (action === 'edit')      return navigate('planos/' + id);
+          if (action === 'duplicate') return duplicarPlano(id);
+          if (action === 'toggle')    return toggleAtivoPlano(id);
+          if (action === 'delete')    return excluirPlano(id);
+        };
+      });
     } catch (e) {
       main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
     }
+  }
+
+  function renderPlanCard(p) {
+    const featsAtivas = PLAN_FEATURES.filter((f) => p[f.key]);
+    const limites = [
+      { lbl: 'Usuários',      v: unlimited(p.max_usuarios) },
+      { lbl: 'Remessas/mês',  v: unlimited(p.max_remessas_mes) },
+      { lbl: 'Terceirizados', v: unlimited(p.max_terceirizados) },
+      { lbl: 'Storage',       v: p.max_storage_mb < 0 ? '∞' : (p.max_storage_mb + ' MB') },
+    ];
+    const isInativo = !p.ativo;
+    return `
+      <div class="plan-card ${isInativo ? 'inativo' : ''} ${p.destaque ? 'destaque' : ''}" style="border-top-color:${p.cor || '#7c3aed'};">
+        <div class="plan-card-header">
+          <div class="plan-card-title">
+            ${p.destaque ? '<span class="plan-badge-destaque"><i class="fas fa-star"></i> Destaque</span>' : ''}
+            <h3 style="color:${p.cor || '#fff'};">${p.nome}</h3>
+            <code class="plan-codigo">${p.codigo}</code>
+          </div>
+          ${isInativo ? '<span class="plan-status-inativo">Inativo</span>' : ''}
+        </div>
+
+        <div class="plan-price">
+          <span class="currency">R$</span>
+          <span class="value">${Number(p.preco_mensal || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span class="period">/mês</span>
+        </div>
+
+        ${p.descricao ? `<p class="plan-desc">${p.descricao}</p>` : ''}
+
+        <div class="plan-limites">
+          ${limites.map((l) => `
+            <div class="plan-limite"><span class="lbl">${l.lbl}</span><span class="val">${l.v}</span></div>
+          `).join('')}
+        </div>
+
+        <div class="plan-features">
+          ${featsAtivas.length === 0
+            ? '<span style="color:#64748b;font-size:.75rem;">Nenhuma feature liberada.</span>'
+            : featsAtivas.map((f) => `<span class="plan-feat-chip" title="${f.label}"><i class="fas ${f.icon}"></i> ${f.label}</span>`).join('')
+          }
+        </div>
+
+        <div class="plan-meta">
+          <span><i class="fas fa-clock"></i> Trial ${p.trial_dias || 0}d</span>
+          <span>${p.visivel ? '<i class="fas fa-eye" style="color:#34d399"></i> Visível' : '<i class="fas fa-eye-slash"></i> Oculto'}</span>
+        </div>
+
+        <div class="plan-actions">
+          <button class="master-btn master-btn-secondary plan-card-action" data-id="${p.id_plano}" data-action="edit" title="Editar"><i class="fas fa-edit"></i> Editar</button>
+          <button class="master-btn master-btn-secondary plan-card-action" data-id="${p.id_plano}" data-action="duplicate" title="Duplicar"><i class="fas fa-copy"></i></button>
+          <button class="master-btn master-btn-secondary plan-card-action" data-id="${p.id_plano}" data-action="toggle" title="${isInativo ? 'Ativar' : 'Desativar'}"><i class="fas fa-${isInativo ? 'play' : 'pause'}"></i></button>
+          <button class="master-btn master-btn-secondary plan-card-action" data-id="${p.id_plano}" data-action="delete" title="Excluir" style="color:#f87171;"><i class="fas fa-trash"></i></button>
+        </div>
+      </div>
+    `;
+  }
+
+  async function duplicarPlano(id) {
+    if (!confirm('Duplicar este plano? A cópia ficará oculta até que você ajuste e ative.')) return;
+    try {
+      const r = await api('post', `/master/plans/${id}/duplicar`);
+      toast(`Plano duplicado: ${r.data.nome}`, 'success');
+      viewPlanos();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function toggleAtivoPlano(id) {
+    try {
+      const r = await api('post', `/master/plans/${id}/toggle`);
+      toast(r.data.ativo ? 'Plano ativado.' : 'Plano desativado.', 'success');
+      viewPlanos();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function excluirPlano(id) {
+    if (!confirm('Excluir este plano DEFINITIVAMENTE? Esta ação só funciona se nenhuma empresa/assinatura o utilizar. Em vez disso, prefira desativar.')) return;
+    try {
+      await api('delete', `/master/plans/${id}`);
+      toast('Plano excluído.', 'success');
+      viewPlanos();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  /* ============================================================
+   * TELA: NOVO/EDITAR PLANO (formulário completo)
+   * ============================================================ */
+  async function viewPlanoForm(id) {
+    const main = $('#m-main');
+    const isEdit = !!id;
+    main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando formulário…</div>';
+
+    let plano = {
+      codigo: '', nome: '', descricao: '', preco_mensal: 0,
+      max_usuarios: 5, max_remessas_mes: 500, max_terceirizados: 50, max_storage_mb: 1000,
+      cor: '#7c3aed', destaque: 0, ativo: 1, visivel: 1, trial_dias: 30, ordem: 0,
+      feat_dashboard: 1, feat_romaneio: 1, feat_relatorios_avancados: 0, feat_export_excel: 1,
+      feat_export_pdf: 1, feat_financeiro: 1, feat_audit_log: 0, feat_api: 0,
+      feat_backup: 0, feat_multi_filial: 0, feat_personalizacao: 0, feat_suporte_prioritario: 0,
+    };
+    let uso = { empresas: 0, assinaturas_ativas: 0 };
+
+    if (isEdit) {
+      try {
+        const r = await api('get', `/master/plans/${id}`);
+        plano = r.data;
+        uso = plano._uso || uso;
+      } catch (e) {
+        main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
+        return;
+      }
+    }
+
+    main.innerHTML = `
+      <div class="master-header">
+        <div>
+          <h2><i class="fas fa-${isEdit ? 'edit' : 'plus-circle'} mr-2" style="color:${plano.cor || '#a78bfa'}"></i> ${isEdit ? 'Editar plano' : 'Novo plano'}</h2>
+          <div class="subtitle">${isEdit ? `<code>${plano.codigo}</code> · ${uso.empresas} empresa(s) · ${uso.assinaturas_ativas} assinatura(s) ativa(s)` : 'Defina os limites, preço e features liberadas.'}</div>
+        </div>
+        <button class="master-btn master-btn-secondary" onclick="masterNavigate('planos')"><i class="fas fa-arrow-left"></i> Voltar</button>
+      </div>
+
+      <form id="m-plan-form" class="plan-form-grid">
+        <!-- Coluna 1: dados básicos -->
+        <div class="master-card plan-form-section">
+          <h4 class="plan-form-title"><i class="fas fa-tag"></i> Identificação</h4>
+          <div class="grid-2">
+            <div>
+              <label>Nome do plano *</label>
+              <input class="master-input" name="nome" required value="${plano.nome}" placeholder="Profissional" />
+            </div>
+            <div>
+              <label>Código (identificador) *</label>
+              <input class="master-input" name="codigo" required value="${plano.codigo}" pattern="[a-z0-9_\\-]+" placeholder="profissional" ${isEdit && (uso.empresas > 0 || uso.assinaturas_ativas > 0) ? 'title="Cuidado: empresas usam este plano"' : ''} />
+            </div>
+          </div>
+          <div>
+            <label>Descrição</label>
+            <textarea class="master-input" name="descricao" rows="2" placeholder="Para confecções em crescimento…">${plano.descricao || ''}</textarea>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label>Preço mensal (R$) *</label>
+              <input class="master-input" name="preco_mensal" type="number" min="0" step="0.01" required value="${plano.preco_mensal}" />
+            </div>
+            <div>
+              <label>Trial (dias)</label>
+              <input class="master-input" name="trial_dias" type="number" min="0" max="365" value="${plano.trial_dias}" />
+            </div>
+            <div>
+              <label>Cor do plano</label>
+              <input class="master-input plan-color-input" name="cor" type="color" value="${plano.cor || '#7c3aed'}" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Coluna 2: limites -->
+        <div class="master-card plan-form-section">
+          <h4 class="plan-form-title"><i class="fas fa-sliders-h"></i> Limites (use -1 = ilimitado)</h4>
+          <div class="grid-2">
+            <div>
+              <label>Usuários</label>
+              <input class="master-input" name="max_usuarios" type="number" min="-1" value="${plano.max_usuarios}" />
+            </div>
+            <div>
+              <label>Remessas / mês</label>
+              <input class="master-input" name="max_remessas_mes" type="number" min="-1" value="${plano.max_remessas_mes}" />
+            </div>
+            <div>
+              <label>Terceirizados</label>
+              <input class="master-input" name="max_terceirizados" type="number" min="-1" value="${plano.max_terceirizados}" />
+            </div>
+            <div>
+              <label>Armazenamento (MB)</label>
+              <input class="master-input" name="max_storage_mb" type="number" min="-1" value="${plano.max_storage_mb}" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Coluna larga: features -->
+        <div class="master-card plan-form-section plan-form-full">
+          <h4 class="plan-form-title"><i class="fas fa-check-double"></i> Funcionalidades liberadas</h4>
+          <div class="plan-feats-grid">
+            ${PLAN_FEATURES.map((f) => `
+              <label class="plan-feat-toggle">
+                <input type="checkbox" name="${f.key}" ${plano[f.key] ? 'checked' : ''} />
+                <span class="plan-feat-content">
+                  <i class="fas ${f.icon}"></i>
+                  <span class="plan-feat-label">${f.label}</span>
+                </span>
+              </label>
+            `).join('')}
+          </div>
+        </div>
+
+        <!-- Visibilidade / status -->
+        <div class="master-card plan-form-section plan-form-full">
+          <h4 class="plan-form-title"><i class="fas fa-eye"></i> Status & Visibilidade</h4>
+          <div class="grid-3">
+            <label class="plan-toggle-row">
+              <input type="checkbox" name="ativo" ${plano.ativo ? 'checked' : ''} />
+              <div><strong>Ativo</strong><span>Plano disponível para uso</span></div>
+            </label>
+            <label class="plan-toggle-row">
+              <input type="checkbox" name="visivel" ${plano.visivel ? 'checked' : ''} />
+              <div><strong>Visível no catálogo</strong><span>Aparece para clientes/checkout</span></div>
+            </label>
+            <label class="plan-toggle-row">
+              <input type="checkbox" name="destaque" ${plano.destaque ? 'checked' : ''} />
+              <div><strong>Destaque</strong><span>Marca como "mais popular"</span></div>
+            </label>
+          </div>
+          <div style="margin-top:14px;max-width:200px;">
+            <label>Ordem (menor primeiro)</label>
+            <input class="master-input" name="ordem" type="number" min="0" value="${plano.ordem}" />
+          </div>
+        </div>
+
+        <div class="plan-form-actions">
+          <button type="button" class="master-btn master-btn-secondary" onclick="masterNavigate('planos')"><i class="fas fa-times"></i> Cancelar</button>
+          <button type="submit" class="master-btn master-btn-primary"><i class="fas fa-${isEdit ? 'save' : 'check'}"></i> ${isEdit ? 'Salvar alterações' : 'Criar plano'}</button>
+        </div>
+      </form>
+    `;
+
+    $('#m-plan-form').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = ev.target;
+      const data = {};
+      // Campos texto/número
+      ['codigo','nome','descricao','preco_mensal','trial_dias','cor',
+       'max_usuarios','max_remessas_mes','max_terceirizados','max_storage_mb','ordem']
+        .forEach((k) => { data[k] = (f.elements[k]?.value ?? '').trim(); });
+      // Checkboxes (features + flags)
+      ['ativo','visivel','destaque',
+       'feat_dashboard','feat_romaneio','feat_relatorios_avancados','feat_export_excel',
+       'feat_export_pdf','feat_financeiro','feat_audit_log','feat_api',
+       'feat_backup','feat_multi_filial','feat_personalizacao','feat_suporte_prioritario']
+        .forEach((k) => { data[k] = f.elements[k]?.checked ? 1 : 0; });
+
+      const btn = f.querySelector('button[type=submit]');
+      const original = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Salvando…';
+      try {
+        if (isEdit) {
+          await api('put', `/master/plans/${id}`, data);
+          toast('Plano atualizado com sucesso!', 'success');
+        } else {
+          await api('post', '/master/plans', data);
+          toast('Plano criado com sucesso!', 'success');
+        }
+        navigate('planos');
+      } catch (e) {
+        toast(e.message, 'error');
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    };
   }
 
   /* ============================================================
@@ -1127,7 +1453,12 @@
       if (parts[1]) return viewEmpresaDetalhe(parts[1]);
       return viewEmpresas();
     }
-    if (top === 'planos') { highlightNav('planos'); return viewPlanos(); }
+    if (top === 'planos') {
+      highlightNav('planos');
+      if (parts[1] === 'novo') return viewPlanoForm(null);
+      if (parts[1]) return viewPlanoForm(+parts[1]);
+      return viewPlanos();
+    }
     if (top === 'financeiro') { highlightNav('financeiro'); return viewFinanceiro(); }
     // fallback
     location.hash = '#master/dashboard';
