@@ -15,6 +15,7 @@ import master from './routes/master';
 import relatoriosDetalhados from './routes/relatorios_detalhados';
 import signup from './routes/signup';
 import terceirizacao from './routes/terceirizacao';
+import { runLifecycleFull, startJobRun, finishJobRun } from './lib/lifecycle';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any; master: any } }>();
 
@@ -110,7 +111,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=34" rel="stylesheet" />
+  <link href="/static/styles.css?v=35" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -144,10 +145,52 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=34"></script>
+  <script src="/static/app.js?v=35"></script>
   <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;
 }
 
-export default app;
+/* =============================================================
+ * SPRINT C — Cloudflare Cron Trigger
+ * Roda o lifecycle de assinaturas 1x/dia (03:00 UTC = 00:00 BRT).
+ * Configurado em wrangler.jsonc → triggers.crons = ["0 3 * * *"]
+ * ============================================================= */
+async function scheduled(
+  event: ScheduledEvent,
+  env: Bindings,
+  ctx: ExecutionContext
+): Promise<void> {
+  const t0 = Date.now();
+  // Registra início do job composto
+  const id_run = await startJobRun(env.DB, 'lifecycle_full', 'cron', 'cron');
+  try {
+    const result = await runLifecycleFull(env.DB);
+    await finishJobRun(env.DB, id_run, {
+      status: 'ok',
+      processados: result.total_processados,
+      resultado: {
+        cron: event.cron,
+        scheduledTime: new Date(event.scheduledTime).toISOString(),
+        ...result.resultados,
+      },
+      duracao_ms: result.duracao_ms,
+    });
+    console.log(
+      `[cron] lifecycle_full ok | processados=${result.total_processados} | duracao=${result.duracao_ms}ms`
+    );
+  } catch (e: any) {
+    await finishJobRun(env.DB, id_run, {
+      status: 'erro',
+      processados: 0,
+      erro: String(e?.message || e),
+      duracao_ms: Date.now() - t0,
+    });
+    console.error('[cron] lifecycle_full erro:', e);
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  scheduled,
+};

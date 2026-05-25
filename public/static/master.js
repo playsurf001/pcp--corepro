@@ -241,6 +241,48 @@
     @media (max-width: 1100px) {
       .master-kpi[style*="repeat(5"] { grid-template-columns: repeat(3, 1fr) !important; }
     }
+
+    /* ============================================================
+     * SPRINT C — Jobs (lifecycle de assinaturas)
+     * ============================================================ */
+    .jobs-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .job-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 14px; transition: border-color .15s; }
+    .job-card:hover { border-color: #475569; }
+    .job-card-head { display: flex; align-items: flex-start; gap: 12px; }
+    .job-card-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; flex-shrink: 0; }
+    .job-card-title { flex: 1; min-width: 0; }
+    .job-card-title h3 { font-size: .98rem; font-weight: 700; color: #fff; margin: 0 0 4px 0; }
+    .job-card-title p { font-size: .78rem; color: #94a3b8; margin: 0; line-height: 1.4; }
+    .job-card-count { font-size: 2.2rem; font-weight: 800; font-family: 'Inter', sans-serif; min-width: 50px; text-align: right; line-height: 1; }
+    .job-card-body { background: rgba(15,23,42,.5); border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; min-height: 70px; }
+    .job-empty { color: #94a3b8; font-size: .82rem; text-align: center; padding: 10px; }
+    .job-empty i { font-size: 1.4rem; margin-right: 6px; }
+    .job-items { list-style: none; padding: 0; margin: 0; }
+    .job-items li { font-size: .8rem; color: #cbd5e1; padding: 4px 0; border-bottom: 1px dashed rgba(51,65,85,.6); }
+    .job-items li:last-child { border-bottom: none; }
+    .job-items li strong { color: #fff; }
+    .job-more { color: #64748b !important; font-style: italic; font-size: .75rem !important; }
+    .job-card-foot { display: flex; justify-content: flex-end; }
+    @media (max-width: 900px) { .jobs-grid { grid-template-columns: 1fr; } }
+
+    /* Dashboard: card de saúde do lifecycle */
+    .lifecycle-health { transition: border-color .15s, transform .15s; }
+    .lifecycle-health:hover { border-color: #7c3aed; transform: translateY(-1px); }
+    .lc-mini { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid #334155; border-radius: 8px; background: rgba(15,23,42,.5); font-size: .78rem; color: #cbd5e1; }
+    .lc-mini strong { font-size: 1rem; color: #fff; font-weight: 800; }
+    .lc-mini span { color: #94a3b8; font-size: .72rem; }
+    @media (max-width: 720px) { .lc-mini span { display: none; } }
+
+    /* Sub-logs timeline */
+    .sublogs-timeline { position: relative; padding-left: 4px; }
+    .sublog-item { display: flex; gap: 12px; padding: 10px 0; position: relative; }
+    .sublog-item:not(:last-child)::before { content: ''; position: absolute; left: 5px; top: 22px; bottom: -10px; width: 2px; background: #334155; }
+    .sublog-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; box-shadow: 0 0 0 3px #1e293b; z-index: 1; }
+    .sublog-body { flex: 1; min-width: 0; }
+    .sublog-head { font-size: .85rem; }
+    .sublog-meta { font-size: .72rem; color: #64748b; margin-top: 2px; font-family: 'Menlo', monospace; }
+    .sublog-det { margin-top: 6px; font-size: .72rem; color: #94a3b8; }
+    .sublog-det code { background: rgba(124,58,237,.1); border: 1px solid rgba(124,58,237,.25); padding: 1px 6px; border-radius: 4px; margin-right: 4px; color: #cbd5e1; }
     `;
     const s = document.createElement('style');
     s.id = 'master-css';
@@ -337,6 +379,7 @@
           <a data-r="empresas"><i class="fas fa-building w-5"></i> Empresas</a>
           <a data-r="financeiro"><i class="fas fa-credit-card w-5"></i> Financeiro</a>
           <a data-r="planos"><i class="fas fa-layer-group w-5"></i> Planos</a>
+          <a data-r="jobs"><i class="fas fa-robot w-5"></i> Jobs</a>
         </nav>
         <div class="master-user">
           <div class="uname"><i class="fas fa-user-shield mr-1"></i> ${STATE.master?.nome || 'Admin'}</div>
@@ -371,8 +414,18 @@
     const main = $('#m-main');
     main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando dashboard…</div>';
     try {
-      const r = await api('get', '/master/dashboard');
+      const [r, life] = await Promise.all([
+        api('get', '/master/dashboard'),
+        api('get', '/master/jobs/preview-all').catch(() => ({ data: {} })),
+      ]);
       const d = r.data;
+      const lc = life.data || {};
+      const lcExpire = lc.expire_trials?.qtd || 0;
+      const lcMark   = lc.mark_overdue?.qtd  || 0;
+      const lcBlock  = lc.block_overdue?.qtd || 0;
+      const lcWarn   = lc.warn_upcoming?.qtd || 0;
+      const lcTotal  = lcExpire + lcMark + lcBlock + lcWarn;
+
       main.innerHTML = `
         <div class="master-header">
           <div>
@@ -397,6 +450,41 @@
             <div class="label"><i class="fas fa-coins mr-1"></i> Receita do mês</div>
             <div class="value">${fmt.money(d.totals.receita_mes)}</div>
             <div class="delta">Payments aprovados em ${new Date().toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</div>
+          </div>
+        </div>
+
+        <!-- ===== Saúde do lifecycle ===== -->
+        <div class="master-card lifecycle-health" style="margin-bottom:24px;cursor:pointer;" onclick="masterNavigate('jobs')">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+            <div>
+              <h3 style="font-size:.95rem;font-weight:700;color:#fff;margin:0 0 4px 0;">
+                <i class="fas fa-robot mr-1" style="color:#a78bfa"></i> Saúde do Lifecycle
+              </h3>
+              <div style="font-size:.78rem;color:#94a3b8;">${lcTotal === 0 ? 'Tudo em ordem — nenhuma ação pendente.' : `${lcTotal} empresa(s) precisarão ser processadas no próximo ciclo.`}</div>
+            </div>
+            <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;">
+              <div class="lc-mini" style="border-color:${lcWarn ? '#60a5fa' : '#334155'};">
+                <i class="fas fa-bullhorn" style="color:#60a5fa"></i>
+                <strong>${lcWarn}</strong>
+                <span>avisos</span>
+              </div>
+              <div class="lc-mini" style="border-color:${lcExpire ? '#fbbf24' : '#334155'};">
+                <i class="fas fa-hourglass-end" style="color:#fbbf24"></i>
+                <strong>${lcExpire}</strong>
+                <span>trials</span>
+              </div>
+              <div class="lc-mini" style="border-color:${lcMark ? '#f97316' : '#334155'};">
+                <i class="fas fa-clock" style="color:#f97316"></i>
+                <strong>${lcMark}</strong>
+                <span>atraso</span>
+              </div>
+              <div class="lc-mini" style="border-color:${lcBlock ? '#f87171' : '#334155'};">
+                <i class="fas fa-lock" style="color:#f87171"></i>
+                <strong>${lcBlock}</strong>
+                <span>bloqueio</span>
+              </div>
+              <i class="fas fa-chevron-right" style="color:#64748b;font-size:1rem;"></i>
+            </div>
           </div>
         </div>
 
@@ -930,6 +1018,19 @@
           </div>
         </div>
 
+        <!-- ===== Card: Histórico de transições (sub_logs) ===== -->
+        <div class="master-card" style="margin-bottom:18px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+            <h3 style="font-size:.95rem;font-weight:700;color:#fff;margin:0;">
+              <i class="fas fa-history mr-1" style="color:#a78bfa"></i> Histórico da assinatura
+            </h3>
+            <button class="master-btn master-btn-secondary master-btn-sm" id="m-load-sublogs">
+              <i class="fas fa-sync mr-1"></i> Carregar
+            </button>
+          </div>
+          <div id="m-sublogs-content" style="font-size:.85rem;color:#94a3b8;">Clique em "Carregar" para ver as transições.</div>
+        </div>
+
         <!-- ===== Card: Administrador (owner) ===== -->
         <div class="master-card" style="margin-bottom:18px;">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
@@ -1002,6 +1103,55 @@
         try { await api('post', `/master/empresas/${id}/reativar`); toast('Empresa reativada.', 'success'); viewEmpresaDetalhe(id); }
         catch (err) { toast(err.message, 'error'); }
       });
+      // Carregar histórico de sub_logs (lazy: só quando clicar)
+      btn('m-load-sublogs')?.addEventListener('click', async () => {
+        const target = $('#m-sublogs-content');
+        target.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Carregando…';
+        try {
+          const r = await api('get', `/master/empresas/${id}/sub-logs`);
+          const items = r.data?.items || [];
+          if (items.length === 0) {
+            target.innerHTML = '<div class="master-empty" style="padding:24px;"><i class="fas fa-folder-open"></i><p>Sem transições registradas ainda.</p></div>';
+            return;
+          }
+          const eventColor = {
+            criada: '#34d399',
+            trial_expirado: '#fbbf24',
+            pagamento_atrasado: '#f97316',
+            bloqueada: '#f87171',
+            reativada: '#10b981',
+            troca_plano: '#60a5fa',
+            aviso_enviado: '#a78bfa',
+            cancelada: '#94a3b8',
+          };
+          target.innerHTML = `
+            <div class="sublogs-timeline">
+              ${items.map((l) => {
+                const color = eventColor[l.evento] || '#94a3b8';
+                const det = l.detalhes && typeof l.detalhes === 'object'
+                  ? Object.entries(l.detalhes).map(([k,v]) => `<code>${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}</code>`).join(' · ')
+                  : '';
+                return `
+                  <div class="sublog-item">
+                    <div class="sublog-dot" style="background:${color};"></div>
+                    <div class="sublog-body">
+                      <div class="sublog-head">
+                        <strong style="color:#fff;">${l.evento}</strong>
+                        ${l.status_antes || l.status_depois ? `<span style="color:#64748b;font-size:.78rem;margin-left:8px;">${l.status_antes || '?'} → <strong>${l.status_depois || '?'}</strong></span>` : ''}
+                        <span class="master-badge ${l.origem === 'cron' ? 'trial' : l.origem === 'master' ? 'ativa' : 'pendente'}" style="margin-left:8px;font-size:.65rem;">${l.origem}</span>
+                      </div>
+                      <div class="sublog-meta">${fmt.datetime(l.dt_criacao)}</div>
+                      ${det ? `<div class="sublog-det">${det}</div>` : ''}
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>`;
+        } catch (err) {
+          target.innerHTML = `<div style="color:#f87171;">${err.message}</div>`;
+        }
+      });
+
       // Reset de senha do admin owner
       btn('m-reset-admin')?.addEventListener('click', async () => {
         if (!confirm(
@@ -1734,6 +1884,282 @@
   }
 
   /* ============================================================
+   * TELA: JOBS (lifecycle de assinaturas)
+   * ============================================================ */
+  // Metadados dos jobs (cor, ícone, label, descrição, endpoint)
+  const JOBS_META = {
+    warn_upcoming: {
+      label: 'Avisar próximos do vencimento',
+      icon:  'fa-bullhorn',
+      color: '#60a5fa',
+      desc:  'Empresas com trial ou cobrança a vencer em ≤ 3 dias. Marca aviso no banco.',
+      endpoint: '/master/jobs/warn-upcoming',
+      previewEndpoint: '/master/jobs/preview-warn-upcoming',
+      previewKey: 'warn_upcoming',
+    },
+    expire_trials: {
+      label: 'Expirar trials vencidos',
+      icon:  'fa-hourglass-end',
+      color: '#fbbf24',
+      desc:  'Empresas com trial_ate < hoje. Suspende empresa e marca assinatura como expirada.',
+      endpoint: '/master/jobs/expire-trials',
+      previewEndpoint: '/master/jobs/preview-expire-trials',
+      previewKey: 'expire_trials',
+    },
+    mark_overdue: {
+      label: 'Marcar cobranças vencidas',
+      icon:  'fa-clock',
+      color: '#f97316',
+      desc:  'Assinaturas ativas com dt_proxima_cobranca < hoje. Status vira pendente + marca dt_pagamento_atrasada.',
+      endpoint: '/master/jobs/mark-overdue',
+      previewEndpoint: '/master/jobs/preview-mark-overdue',
+      previewKey: 'mark_overdue',
+    },
+    block_overdue: {
+      label: 'Bloquear inadimplentes',
+      icon:  'fa-lock',
+      color: '#f87171',
+      desc:  'Assinaturas pendentes há mais de dias_grace dias (default 5). Bloqueia empresa e marca bloqueada_por_pagamento.',
+      endpoint: '/master/jobs/block-overdue',
+      previewEndpoint: '/master/jobs/preview-block-overdue',
+      previewKey: 'block_overdue',
+    },
+  };
+
+  async function viewJobs() {
+    const main = $('#m-main');
+    main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando jobs…</div>';
+    try {
+      const r = await api('get', '/master/jobs/preview-all');
+      const data = r.data || {};
+      const total = Object.values(data).reduce((acc, x) => acc + (x.qtd || 0), 0);
+
+      main.innerHTML = `
+        <div class="master-header">
+          <div>
+            <h2><i class="fas fa-robot mr-2" style="color:#a78bfa"></i> Jobs de Lifecycle</h2>
+            <div class="subtitle">Execução manual e monitoramento dos jobs automáticos (cron diário às 03:00 UTC = 00:00 BRT)</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="master-btn master-btn-secondary" id="m-refresh"><i class="fas fa-sync"></i> Atualizar</button>
+            <button class="master-btn master-btn-secondary" onclick="masterNavigate('jobs/runs')"><i class="fas fa-history"></i> Histórico</button>
+            <button class="master-btn master-btn-primary" id="m-run-all" ${total === 0 ? 'disabled' : ''}>
+              <i class="fas fa-play"></i> Executar tudo (${total})
+            </button>
+          </div>
+        </div>
+
+        <div class="master-info-box" style="margin-bottom:16px;">
+          <i class="fas fa-info-circle"></i>
+          <div>
+            <strong>Cron diário automático:</strong> roda às <code>0 3 * * *</code> (03:00 UTC). Execução manual permite simular um ciclo a qualquer momento, sem esperar pelo cron.<br/>
+            A empresa fundadora (id=1) é <strong>imune</strong> a qualquer mutação automática.
+          </div>
+        </div>
+
+        <div class="jobs-grid">
+          ${Object.entries(JOBS_META).map(([key, meta]) => {
+            const qtd = data[meta.previewKey]?.qtd || 0;
+            const items = data[meta.previewKey]?.items || [];
+            return `
+              <div class="job-card" data-job="${key}">
+                <div class="job-card-head">
+                  <div class="job-card-icon" style="background: ${meta.color}22; color: ${meta.color};">
+                    <i class="fas ${meta.icon}"></i>
+                  </div>
+                  <div class="job-card-title">
+                    <h3>${meta.label}</h3>
+                    <p>${meta.desc}</p>
+                  </div>
+                  <div class="job-card-count" style="color: ${qtd > 0 ? meta.color : '#64748b'};">
+                    ${qtd}
+                  </div>
+                </div>
+                <div class="job-card-body">
+                  ${qtd === 0
+                    ? '<div class="job-empty"><i class="fas fa-check-circle" style="color:#10b981"></i> Nenhuma empresa será afetada agora</div>'
+                    : `<ul class="job-items">${items.slice(0,5).map((it) => renderJobItem(key, it)).join('')}${items.length > 5 ? `<li class="job-more">+${items.length - 5} outras…</li>` : ''}</ul>`
+                  }
+                </div>
+                <div class="job-card-foot">
+                  <button class="master-btn master-btn-secondary master-btn-sm job-run-btn" data-job="${key}" ${qtd === 0 ? 'disabled' : ''}>
+                    <i class="fas fa-play mr-1"></i> Executar agora
+                  </button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+
+      // Listeners
+      $('#m-refresh').onclick = viewJobs;
+      $('#m-run-all').onclick = () => runJobUI('lifecycle_full', '/master/jobs/lifecycle-full', total);
+      $$('.job-run-btn').forEach((btn) => {
+        btn.onclick = () => {
+          const k = btn.dataset.job;
+          const meta = JOBS_META[k];
+          const qtd = data[meta.previewKey]?.qtd || 0;
+          runJobUI(k, meta.endpoint, qtd);
+        };
+      });
+    } catch (e) {
+      main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
+    }
+  }
+
+  // Renderiza 1 item da lista de preview de um job
+  function renderJobItem(jobKey, it) {
+    if (jobKey === 'expire_trials') {
+      return `<li><strong>${it.nome || '—'}</strong> · trial venceu há ${it.dias_vencido}d</li>`;
+    }
+    if (jobKey === 'mark_overdue') {
+      return `<li><strong>${it.nome || '—'}</strong> · cobrança ${fmt.date(it.dt_proxima_cobranca)} · atraso ${it.dias_atraso}d</li>`;
+    }
+    if (jobKey === 'block_overdue') {
+      return `<li><strong>${it.nome || '—'}</strong> · pendente há ${it.dias_atraso}d (grace ${it.dias_grace}d)</li>`;
+    }
+    if (jobKey === 'warn_upcoming') {
+      const tipo = it.status === 'trial' ? 'trial' : 'cobrança';
+      return `<li><strong>${it.nome || '—'}</strong> · ${tipo} vence em ${it.dias_para_vencer}d</li>`;
+    }
+    return `<li>${it.nome || JSON.stringify(it)}</li>`;
+  }
+
+  // Confirma + executa job, mostra resultado
+  async function runJobUI(jobKey, endpoint, qtd) {
+    const isFull = jobKey === 'lifecycle_full';
+    const label  = isFull ? 'Executar TODOS os jobs' : (JOBS_META[jobKey]?.label || jobKey);
+    if (!confirm(`${label}?\n\n${qtd} item(s) serão processados agora.\nEsta ação é registrada em job_runs e sub_logs.\n\nContinuar?`)) return;
+
+    const main = $('#m-main');
+    const overlay = document.createElement('div');
+    overlay.className = 'master-loading';
+    overlay.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Executando ${label}…`;
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,.85);z-index:9999;display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:#fff;';
+    document.body.appendChild(overlay);
+
+    try {
+      const r = await api('post', endpoint);
+      overlay.remove();
+      const d = r.data || {};
+      const proc = d.total_processados ?? d.processados ?? 0;
+      const dur  = d.duracao_ms || 0;
+      toast(`Job concluído: ${proc} item(s) em ${dur}ms.`, 'success');
+      // Recarrega a tela
+      setTimeout(viewJobs, 500);
+    } catch (err) {
+      overlay.remove();
+      toast(err.message, 'error');
+    }
+  }
+
+  /* ============================================================
+   * TELA: JOBS RUNS (histórico de execuções)
+   * ============================================================ */
+  async function viewJobRuns() {
+    const main = $('#m-main');
+    main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando histórico…</div>';
+    try {
+      const r = await api('get', '/master/jobs/runs?limit=100');
+      const runs = r.data?.items || [];
+      main.innerHTML = `
+        <div class="master-header">
+          <div>
+            <h2><i class="fas fa-history mr-2" style="color:#a78bfa"></i> Histórico de execuções</h2>
+            <div class="subtitle">Últimas ${runs.length} execuções de jobs (cron ou manual)</div>
+          </div>
+          <button class="master-btn master-btn-secondary" onclick="masterNavigate('jobs')"><i class="fas fa-arrow-left"></i> Voltar</button>
+        </div>
+
+        <div class="master-card" style="padding:0;overflow:hidden;">
+          <table class="master-table">
+            <thead><tr>
+              <th>#</th>
+              <th>Job</th>
+              <th>Origem</th>
+              <th>Acionado por</th>
+              <th>Iniciado em</th>
+              <th style="text-align:right;">Duração</th>
+              <th style="text-align:right;">Processados</th>
+              <th>Status</th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              ${runs.length === 0
+                ? `<tr><td colspan="9"><div class="master-empty"><i class="fas fa-folder-open"></i><p>Nenhuma execução registrada ainda.</p></div></td></tr>`
+                : runs.map((r) => {
+                    const stCls = r.status === 'ok' ? 'ativa' : r.status === 'erro' ? 'cancelada' : 'trial';
+                    return `
+                    <tr>
+                      <td><code>#${r.id_run}</code></td>
+                      <td><strong style="color:#fff;">${r.job_name}</strong></td>
+                      <td><span class="master-badge ${r.origem === 'cron' ? 'trial' : 'ativa'}"><i class="fas fa-${r.origem === 'cron' ? 'clock' : 'user'}"></i> ${r.origem}</span></td>
+                      <td style="font-size:.8rem;color:#94a3b8;">${r.acionado_por || '—'}</td>
+                      <td style="font-size:.8rem;">${fmt.datetime(r.iniciado_em)}</td>
+                      <td style="text-align:right;font-family:'Menlo',monospace;font-size:.85rem;">${r.duracao_ms || '—'}ms</td>
+                      <td style="text-align:right;font-weight:700;">${r.processados}</td>
+                      <td><span class="master-badge ${stCls}">${r.status}</span></td>
+                      <td><button class="master-btn master-btn-secondary master-btn-icon" onclick="masterNavigate('jobs/runs/${r.id_run}')" title="Detalhes"><i class="fas fa-eye"></i></button></td>
+                    </tr>`;
+                  }).join('')
+              }
+            </tbody>
+          </table>
+        </div>
+      `;
+    } catch (e) {
+      main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
+    }
+  }
+
+  /* ============================================================
+   * TELA: JOB RUN DETAIL — detalhes de uma execução
+   * ============================================================ */
+  async function viewJobRunDetail(id) {
+    const main = $('#m-main');
+    main.innerHTML = '<div class="master-loading"><i class="fas fa-spinner fa-spin"></i> Carregando…</div>';
+    try {
+      const r = await api('get', '/master/jobs/runs/' + id);
+      const d = r.data || {};
+      const stCls = d.status === 'ok' ? 'ativa' : d.status === 'erro' ? 'cancelada' : 'trial';
+
+      main.innerHTML = `
+        <div class="master-header">
+          <div>
+            <h2><i class="fas fa-clipboard-check mr-2" style="color:#a78bfa"></i> Execução #${d.id_run}</h2>
+            <div class="subtitle">${d.job_name} · ${fmt.datetime(d.iniciado_em)}</div>
+          </div>
+          <button class="master-btn master-btn-secondary" onclick="masterNavigate('jobs/runs')"><i class="fas fa-arrow-left"></i> Voltar</button>
+        </div>
+
+        <div class="master-kpi" style="grid-template-columns:repeat(4,1fr);">
+          <div class="master-card"><div class="label">Status</div><div class="value"><span class="master-badge ${stCls}">${d.status}</span></div></div>
+          <div class="master-card"><div class="label">Origem</div><div class="value"><span class="master-badge ${d.origem === 'cron' ? 'trial' : 'ativa'}">${d.origem}</span></div></div>
+          <div class="master-card"><div class="label">Processados</div><div class="value">${d.processados}</div></div>
+          <div class="master-card"><div class="label">Duração</div><div class="value" style="font-size:1rem;">${d.duracao_ms || '—'}ms</div></div>
+        </div>
+
+        ${d.erro ? `
+          <div class="master-card" style="border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.06);margin-bottom:18px;">
+            <h3 style="color:#fca5a5;margin-bottom:8px;"><i class="fas fa-exclamation-triangle"></i> Erro</h3>
+            <pre style="color:#fecaca;font-size:.85rem;white-space:pre-wrap;margin:0;">${d.erro}</pre>
+          </div>
+        ` : ''}
+
+        <div class="master-card">
+          <h3 style="margin-bottom:10px;color:#fff;"><i class="fas fa-code mr-1" style="color:#a78bfa"></i> Resultado completo (JSON)</h3>
+          <pre style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:14px;color:#cbd5e1;font-size:.78rem;overflow:auto;max-height:560px;">${
+            d.resultado ? JSON.stringify(d.resultado, null, 2) : '(sem resultado)'
+          }</pre>
+        </div>
+      `;
+    } catch (e) {
+      main.innerHTML = `<div class="master-empty"><i class="fas fa-exclamation-triangle" style="color:#f87171"></i><p>${e.message}</p></div>`;
+    }
+  }
+
+  /* ============================================================
    * ROUTER
    * ============================================================ */
   function dispatch() {
@@ -1757,6 +2183,12 @@
       return viewPlanos();
     }
     if (top === 'financeiro') { highlightNav('financeiro'); return viewFinanceiro(); }
+    if (top === 'jobs') {
+      highlightNav('jobs');
+      if (parts[1] === 'runs' && parts[2]) return viewJobRunDetail(+parts[2]);
+      if (parts[1] === 'runs') return viewJobRuns();
+      return viewJobs();
+    }
     // fallback
     location.hash = '#master/dashboard';
   }

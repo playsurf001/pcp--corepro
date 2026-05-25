@@ -16,6 +16,19 @@ import {
   revogarSessaoMaster,
 } from '../lib/master_auth';
 import { randomHex } from '../lib/auth';
+import {
+  runExpireTrials,
+  runMarkOverdue,
+  runBlockOverdue,
+  runWarnUpcoming,
+  runLifecycleFull,
+  previewExpireTrials,
+  previewMarkOverdue,
+  previewBlockOverdue,
+  previewWarnUpcoming,
+  startJobRun,
+  finishJobRun,
+} from '../lib/lifecycle';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { master: any } }>();
 
@@ -918,87 +931,91 @@ app.get('/master/empresas/:id/usuarios', async (c) => {
 });
 
 /* ============================================================
- * SPRINT 2 — JOBS (cron / on-demand)
+ * SPRINT C — Lifecycle Jobs (cron / on-demand)
+ * Todos rodam isolados ou via lifecycle_full (composto).
+ * Empresa id_empresa=1 (fundadora) é IMUNE.
  * ============================================================ */
 
-/**
- * POST /master/jobs/expire-trials
- * Expira trials vencidos:
- *   - companies com status='trial' AND date(trial_ate) < date('now') → status='suspensa'
- *   - subscriptions correspondentes → status='suspensa'
- *
- * Pode ser chamado:
- *   - manualmente pelo super_admin no painel
- *   - via Cloudflare Cron Trigger (futuro)
- *
- * Empresa id=1 (fundadora) é IMUNE.
- */
-app.post('/master/jobs/expire-trials', async (c) => {
+// Helper de runner para reuso: executa fn, registra em job_runs, retorna JSON.
+async function runJob(c: any, job_name: string, fn: (DB: D1Database) => Promise<any>) {
+  const m = c.get('master') as any;
+  const id_run = await startJobRun(c.env.DB, job_name, 'manual', m?.login || 'master');
+  const t0 = Date.now();
   try {
-    // Lista candidatos (excluindo id=1)
-    const cand: any = await c.env.DB.prepare(
-      `SELECT id_empresa, nome, plano, trial_ate
-         FROM companies
-        WHERE id_empresa <> 1
-          AND status = 'trial'
-          AND trial_ate IS NOT NULL
-          AND date(trial_ate) < date('now')`
-    ).all();
-    const ids = (cand.results || []).map((r: any) => r.id_empresa);
-
-    if (ids.length === 0) {
-      return c.json(ok({ processadas: 0, empresas: [] }));
-    }
-
-    // Suspende empresas
-    for (const id of ids) {
-      await c.env.DB.prepare(
-        `UPDATE companies
-            SET status = 'suspensa',
-                dt_suspensao = datetime('now'),
-                dt_atualizacao = datetime('now')
-          WHERE id_empresa = ?`
-      ).bind(id).run();
-      await c.env.DB.prepare(
-        `UPDATE subscriptions
-            SET status = 'suspensa',
-                dt_atualizacao = datetime('now')
-          WHERE id_empresa = ? AND status IN ('ativa','trial','pendente')`
-      ).bind(id).run();
-    }
-
-    return c.json(ok({ processadas: ids.length, empresas: cand.results }));
+    const result = await fn(c.env.DB);
+    const proc = result.total_processados ?? result.processados ?? 0;
+    await finishJobRun(c.env.DB, id_run, {
+      status: 'ok',
+      processados: proc,
+      resultado: result,
+      duracao_ms: Date.now() - t0,
+    });
+    return c.json(ok({ ...result, id_run }));
   } catch (e: any) {
-    return fail('Erro ao expirar trials: ' + (e?.message || e), 500);
+    await finishJobRun(c.env.DB, id_run, {
+      status: 'erro',
+      processados: 0,
+      erro: String(e?.message || e),
+      duracao_ms: Date.now() - t0,
+    });
+    return fail(`Erro no job ${job_name}: ${e?.message || e}`, 500);
   }
-});
+}
 
-/**
- * GET /master/jobs/preview-expire-trials — pré-visualiza quais empresas
- * seriam suspensas sem executar nada (útil para o painel)
- */
+// ===== Execução manual de cada job individual =====
+app.post('/master/jobs/expire-trials',  (c) => runJob(c, 'expire_trials',  runExpireTrials));
+app.post('/master/jobs/mark-overdue',   (c) => runJob(c, 'mark_overdue',   runMarkOverdue));
+app.post('/master/jobs/block-overdue',  (c) => runJob(c, 'block_overdue',  runBlockOverdue));
+app.post('/master/jobs/warn-upcoming',  (c) => runJob(c, 'warn_upcoming',  runWarnUpcoming));
+
+// ===== Execução manual do pipeline completo =====
+app.post('/master/jobs/lifecycle-full', (c) => runJob(c, 'lifecycle_full', runLifecycleFull));
+
+// ===== Previews (sem mutar nada) =====
 app.get('/master/jobs/preview-expire-trials', async (c) => {
   try {
-    const cand: any = await c.env.DB.prepare(
-      `SELECT id_empresa, nome, slug, plano, trial_ate,
-              CAST(julianday('now') - julianday(trial_ate) AS INTEGER) AS dias_vencido
-         FROM companies
-        WHERE id_empresa <> 1
-          AND status = 'trial'
-          AND trial_ate IS NOT NULL
-          AND date(trial_ate) < date('now')
-        ORDER BY trial_ate`
-    ).all();
-    return c.json(ok({ qtd: (cand.results || []).length, empresas: cand.results || [] }));
-  } catch (e: any) {
-    return fail('Erro preview: ' + (e?.message || e), 500);
-  }
+    const items = await previewExpireTrials(c.env.DB);
+    return c.json(ok({ qtd: items.length, items }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
+});
+app.get('/master/jobs/preview-mark-overdue', async (c) => {
+  try {
+    const items = await previewMarkOverdue(c.env.DB);
+    return c.json(ok({ qtd: items.length, items }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
+});
+app.get('/master/jobs/preview-block-overdue', async (c) => {
+  try {
+    const items = await previewBlockOverdue(c.env.DB);
+    return c.json(ok({ qtd: items.length, items }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
+});
+app.get('/master/jobs/preview-warn-upcoming', async (c) => {
+  try {
+    const items = await previewWarnUpcoming(c.env.DB);
+    return c.json(ok({ qtd: items.length, items }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
 });
 
-/**
- * GET /master/jobs/proximas-cobrancas
- * Lista subscriptions com dt_proxima_cobranca nos próximos 7 dias
- */
+// ===== Preview agregado: 1 chamada → 4 listas =====
+app.get('/master/jobs/preview-all', async (c) => {
+  try {
+    const [exp, mark, block, warn] = await Promise.all([
+      previewExpireTrials(c.env.DB),
+      previewMarkOverdue(c.env.DB),
+      previewBlockOverdue(c.env.DB),
+      previewWarnUpcoming(c.env.DB),
+    ]);
+    return c.json(ok({
+      expire_trials:  { qtd: exp.length,   items: exp },
+      mark_overdue:   { qtd: mark.length,  items: mark },
+      block_overdue:  { qtd: block.length, items: block },
+      warn_upcoming:  { qtd: warn.length,  items: warn },
+    }));
+  } catch (e: any) { return fail('Erro preview-all: ' + (e?.message || e), 500); }
+});
+
+// ===== Próximas cobranças (próximos 7 dias) =====
 app.get('/master/jobs/proximas-cobrancas', async (c) => {
   try {
     const r: any = await c.env.DB.prepare(
@@ -1017,6 +1034,60 @@ app.get('/master/jobs/proximas-cobrancas', async (c) => {
   } catch (e: any) {
     return fail('Erro: ' + (e?.message || e), 500);
   }
+});
+
+// ===== Histórico de execuções de jobs =====
+app.get('/master/jobs/runs', async (c) => {
+  try {
+    const limit = Math.min(toInt(c.req.query('limit')) || 50, 200);
+    const r: any = await c.env.DB.prepare(
+      `SELECT id_run, job_name, origem, iniciado_em, finalizado_em, duracao_ms,
+              status, processados, erro, acionado_por
+         FROM job_runs
+        ORDER BY iniciado_em DESC
+        LIMIT ?`
+    ).bind(limit).all();
+    return c.json(ok({ items: r.results || [] }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
+});
+
+// ===== Detalhe de uma run (com resultado completo) =====
+app.get('/master/jobs/runs/:id', async (c) => {
+  try {
+    const id = toInt(c.req.param('id'));
+    if (!id) return fail('ID inválido.', 400);
+    const row: any = await c.env.DB.prepare(
+      `SELECT * FROM job_runs WHERE id_run = ?`
+    ).bind(id).first();
+    if (!row) return fail('Run não encontrado.', 404);
+    // Parse JSON do campo resultado
+    if (row.resultado) {
+      try { row.resultado = JSON.parse(row.resultado); } catch { /* mantém string */ }
+    }
+    return c.json(ok(row));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
+});
+
+// ===== Histórico de transições de uma subscription =====
+app.get('/master/empresas/:id/sub-logs', async (c) => {
+  try {
+    const id = toInt(c.req.param('id'));
+    if (!id) return fail('ID inválido.', 400);
+    const r: any = await c.env.DB.prepare(
+      `SELECT id_log, id_sub, evento, status_antes, status_depois, origem, detalhes, dt_criacao
+         FROM sub_logs
+        WHERE id_empresa = ?
+        ORDER BY dt_criacao DESC
+        LIMIT 100`
+    ).bind(id).all();
+    const items = (r.results || []).map((row: any) => {
+      if (row.detalhes) {
+        try { row.detalhes = JSON.parse(row.detalhes); } catch { /* mantém string */ }
+      }
+      return row;
+    });
+    return c.json(ok({ items }));
+  } catch (e: any) { return fail('Erro: ' + (e?.message || e), 500); }
 });
 
 export default app;

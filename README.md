@@ -315,11 +315,65 @@ Cadastro de empresa agora cria automaticamente o **usuário admin (owner)** com 
 
 - **Cache**: app.js v=33 → v=34, styles.css v=33 → v=34, master.js v=3 → v=4
 
+**SPRINT C — Lifecycle de Assinaturas + Jobs Master (concluído, em produção 2026-05-25)**
+
+Implementado o ciclo de vida automático das assinaturas com transições de estado, log auditável e cron diário.
+
+- **Schema** (`migrations/0027_subscription_lifecycle.sql`, aplicada LOCAL+REMOTE):
+  - `subscriptions.dias_grace INTEGER NOT NULL DEFAULT 5` — janela entre atraso e bloqueio
+  - `subscriptions.dt_pagamento_atrasada TEXT` — data em que a sub virou pendente
+  - `subscriptions.ultimo_aviso_em TEXT` — última vez que o sistema avisou o cliente (para idempotência do warn_upcoming)
+  - `companies.bloqueada_por_pagamento INTEGER NOT NULL DEFAULT 0` — flag binária para tenant guard
+  - **Tabela `sub_logs`**: histórico imutável de transições (`evento`, `status_antes`, `status_depois`, `origem`, `detalhes` JSON, `dt_criacao`)
+  - **Tabela `job_runs`**: registro de execuções (`job_name`, `origem`, `duracao_ms`, `status`, `processados`, `resultado` JSON, `erro`, `acionado_por`)
+  - Backfill: `dt_proxima_cobranca` populada com `dt_inicio + 30 dias` para subs antigas que não tinham
+
+- **Jobs puros** (`src/lib/lifecycle.ts` — funções D1 reutilizáveis):
+  - `runExpireTrials` — `trial` com `dt_fim_trial < hoje` → `pendente` + seta `dt_pagamento_atrasada`
+  - `runMarkOverdue` — `ativa` com `dt_proxima_cobranca < hoje` → `pendente` + seta `dt_pagamento_atrasada`
+  - `runBlockOverdue` — `pendente` há mais de `dias_grace` dias → `suspensa` + `companies.bloqueada_por_pagamento=1`
+  - `runWarnUpcoming` — `ativa`/`trial` vencendo nos próximos 3 dias → marca `ultimo_aviso_em=hoje` (idempotente)
+  - `runLifecycleFull` — orquestrador: roda os 4 acima em ordem, agrega resultados, registra UM `job_run` consolidado
+  - **Constante `FOUNDER_ID = 1`** — empresa cortesia IMUNE a todas as mutações automáticas (`WHERE id_empresa != FOUNDER_ID` em todos os UPDATEs)
+  - Idempotência rigorosa: todos os UPDATEs têm guards (`status = '…' AND … < date('now')`), 2ª execução retorna 0 processados
+
+- **Endpoints Master** (`src/routes/master.ts`):
+  - `POST /api/master/jobs/expire-trials` / `mark-overdue` / `block-overdue` / `warn-upcoming` — execução individual de cada job
+  - `POST /api/master/jobs/lifecycle-full` — executa os 4 em sequência (mesmo que o cron faz)
+  - `GET /api/master/jobs/preview-expire-trials` / `preview-mark-overdue` / `preview-block-overdue` / `preview-warn-upcoming` — listam o que **seria** afetado sem mutar nada
+  - `GET /api/master/jobs/preview-all` — agregado dos 4 previews (1 chamada, 4 KPIs)
+  - `GET /api/master/jobs/runs?limit=N` — histórico paginado de execuções
+  - `GET /api/master/jobs/runs/:id` — detalhe de uma execução (com `resultado` JSON parseado)
+  - `GET /api/master/empresas/:id/sub-logs?limit=N` — timeline de transições de uma empresa específica
+  - Helper `runJob(c, job_name, fn)` envolve cada execução com `startJobRun` + `finishJobRun` para gravar duração, status (ok/erro), quem acionou (`master.login`)
+
+- **Cron Trigger** (`src/index.tsx`):
+  - Handler `scheduled(event, env, ctx)` exportado junto com `fetch` no `default export`
+  - Chama `runLifecycleFull(env.DB, 'cron')` com `acionado_por='cron'` e registra `job_run` consolidado
+  - **Agendamento**: `0 3 * * *` (03:00 UTC = 00:00 BRT) — diário
+  - ⚠️ **Cloudflare Pages NÃO aceita `triggers.crons` no `wrangler.jsonc`** — o handler está pronto, mas o cron precisa ser configurado **uma vez** via Dashboard: Pages > corepro-confeccao > Settings > Functions > Cron Triggers > Add > `0 3 * * *`
+  - Enquanto o cron não está configurado: o botão "Executar agora" na UI Master > Jobs > Lifecycle full faz exatamente a mesma coisa
+
+- **Frontend Master** (`public/static/master.js`):
+  - **Nav**: novo item "🤖 Jobs" no menu lateral
+  - **`viewDashboard`** ganhou card **"Saúde do ciclo de vida"** (clique → /jobs) com 4 mini-KPIs lado a lado: avisos pendentes / trials a expirar / cobranças em atraso / a bloquear hoje
+  - **`viewJobs`**: 4 cards por job (cor temática, ícone, contagem do preview, prévia de até 5 itens, botão "Executar agora" com overlay de confirmação) + botão destaque "Executar lifecycle completo" + botão "Ver histórico"
+  - **`viewJobRuns`**: tabela com data/job/origem/duração/processados/status/acionado_por (clica → detalhe)
+  - **`viewJobRunDetail`**: 5 KPIs (duração, processados, status, origem, acionado_por) + JSON viewer com `resultado` formatado
+  - **`viewEmpresaDetalhe`** ganhou card **"Histórico da assinatura"** (timeline lazy-loaded sub_logs com dots coloridos por evento)
+  - Rotas: `#master/jobs`, `#master/jobs/runs`, `#master/jobs/runs/:id`
+
+- **Smoke tests PROD validados** (2026-05-25, antes do cron rodar):
+  - `POST /api/master/jobs/lifecycle-full` → 4 jobs em 35ms, 0 processados (PROD limpo), `id_run=1` registrado
+  - `GET /api/master/jobs/runs/1` → JSON parseado corretamente
+  - 2ª execução → 0 processados (idempotência confirmada)
+
+- **Cache**: app.js v=34 → v=35, styles.css v=34 → v=35, master.js v=4 → v=5
+
 **Próximos sprints:**
-- **SPRINT C**: Assinaturas + lifecycle (trial 30d → ativa → vencida → bloqueada) + cron diário
 - **SPRINT D**: Cobrança PIX via Mercado Pago (Adapter pattern, webhook HMAC, reconciliação)
 - **SPRINT E**: Dashboard SaaS com MRR, ARR, churn, gráficos
-- **SPRINT F**: ACL granular por feature do plano + auditoria + skeleton loading
+- **SPRINT F**: ACL granular por feature do plano + auditoria + skeleton loading + dark mode + e-mails reais nos avisos do warn_upcoming
 
 ### ✨ FASE 3 polish — Botão "Salvar rascunho" removido (deploy 2026-05-22)
 Botão `m-rascunho` removido completamente do modal de remessa:

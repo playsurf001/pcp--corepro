@@ -13,4 +13,14 @@
       "database_id": "cb4cd8ca-3f6e-43bd-ad3d-b90488916399"
     }
   ]
+  // SPRINT C — Cron Triggers
+  // Cloudflare Pages NÃO suporta a chave "triggers" no wrangler.jsonc.
+  // O handler `scheduled` (em src/index.tsx) está pronto e ativo.
+  // Para ativar o cron 1x/dia (03:00 UTC = 00:00 BRT):
+  //   1. Após deploy, acesse o Dashboard Cloudflare > Pages > corepro-confeccao
+  //   2. Settings > Functions > Cron Triggers > Add
+  //   3. Cron: "0 3 * * *"   |   Acionará o handler `scheduled` automaticamente.
+  // Enquanto isso, os endpoints HTTP POST /api/master/jobs/lifecycle-full,
+  // /expire-trials, /mark-overdue, /block-overdue e /warn-upcoming podem ser
+  // acionados manualmente via UI Master > Jobs (mesmo efeito do cron).
 }
