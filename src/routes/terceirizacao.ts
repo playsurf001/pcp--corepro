@@ -1637,6 +1637,38 @@ app.get('/terc/remessas/:id', async (c) => {
     return { ...it, grade: g };
   });
 
+  // 🛡️ HOTFIX 0036: Para CADA item com id_produto NULL mas cod_ref preenchido,
+  // resolve dinamicamente o id_produto via lookup em terc_produtos (cod_ref + id_empresa).
+  // Garante que o <select> de produtos no modal mostre o produto correto mesmo se
+  // a migration 0036 ainda não tiver rodado nesta empresa. Também adiciona flag
+  // _resolved_id_produto:true para debug/auditoria no frontend.
+  const itensSemProduto = itensParsed.filter((it: any) => !it.id_produto && it.cod_ref);
+  if (itensSemProduto.length > 0) {
+    const codRefs = [...new Set(itensSemProduto.map((it: any) => it.cod_ref))];
+    const placeholders = codRefs.map(() => '?').join(',');
+    const lookup = (await c.env.DB.prepare(`
+      SELECT cod_ref, id_produto FROM terc_produtos
+       WHERE id_empresa=? AND cod_ref IN (${placeholders}) AND ativo=1
+       ORDER BY id_produto DESC
+    `).bind(id_empresa, ...codRefs).all()).results as any[];
+    // 1 entrada por cod_ref (o id_produto ativo mais recente)
+    const mapCodToId = new Map<string, number>();
+    for (const row of lookup) {
+      if (!mapCodToId.has(row.cod_ref)) mapCodToId.set(row.cod_ref, Number(row.id_produto));
+    }
+    let resolvedCount = 0;
+    itensParsed = itensParsed.map((it: any) => {
+      if (!it.id_produto && it.cod_ref && mapCodToId.has(it.cod_ref)) {
+        resolvedCount++;
+        return { ...it, id_produto: mapCodToId.get(it.cod_ref), _resolved_id_produto: true };
+      }
+      return it;
+    });
+    if (resolvedCount > 0) {
+      logTenant(c, 'remessa.get.resolved_id_produto', { id_remessa: id, resolved: resolvedCount });
+    }
+  }
+
   // 🛡️ FALLBACK DEFENSIVO (HOTFIX 0035): se a remessa não tem itens no banco
   // mas o header tem qtd_total>0, sintetiza 1 item virtual a partir do header.
   // Isso garante que o modal de edição NUNCA abra zerado mesmo se a migration

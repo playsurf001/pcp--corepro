@@ -1340,9 +1340,104 @@ Auditoria contou registros por empresa nas 4 tabelas do relacionamento:
 - `GET /api/terc/retornos` sem auth → **401 friendly** ✅
 - Home `/` → **HTTP 200**
 
+---
+
+## 🔥 HOTFIX Empresa Principal — id_produto órfão + backfill de produtos (2026-05-26)
+
+### 🐛 Sintoma reportado
+Bug específico da **Empresa Principal (E1)** — empresas secundárias (E2…E6) não apresentavam o problema:
+- ❌ No grid de Remessas, qtd/valor/produto/cor/serviço aparecem corretos
+- ❌ Mas ao clicar **Editar**: produto não carregava, grade zerada, valores sumiam, totais R$ 0,00, romaneio gerava incompleto
+- ❌ O bug afetava **125 das 193 remessas** da E1 (~65%)
+
+### 🔍 Diagnóstico (auditoria comparativa E1 vs E2)
+Após a migration 0035 ter reconstruído itens órfãos, descobriu-se que **`terc_remessa_itens` da E1 tinham `id_produto = NULL`**, enquanto E2 tinha `id_produto = 4453` (real). Causa:
+
+| Campo | **E2** (funciona) | **E1** (bugada) |
+|---|---|---|
+| `id_produto` | **4453** (real) ✅ | **NULL** ❌ |
+| Origem | UI normal | Importador legado Kamylla v1.0 |
+| Grade | Tamanho real ("P") | UNICO (sintético) |
+
+A migration 0035 preservava `cod_ref` (string) mas não conseguia deduzir `id_produto` porque **125 cod_refs** referenciados em remessas legadas **NUNCA foram cadastrados em `terc_produtos`** da E1 (vinham só do header sem produto-pai). O frontend depende de `id_produto` para popular o `<select>` "Produto" — sem ele, o modal abria com produto não-selecionado, e em cascata o resto dos campos (grade, preço, serviço) ficava vazio.
+
+### ⚠️ Bug multi-tenant adicional encontrado
+O índice `ux_terc_produtos_ref_col` na `terc_produtos` é `UNIQUE (cod_ref, COALESCE(id_colecao, 0))` — **SEM `id_empresa`**. Isso significa que duas empresas diferentes não podem cadastrar produtos com mesmo `cod_ref` na mesma coleção. **Não foi corrigido nesta migration** (precisaria rebuild de UNIQUE como 0033 fez) — incluído no roadmap.
+
+### ✅ Correções aplicadas
+
+#### 1. Migration 0036 — backfill de produtos órfãos + id_produto
+- `migrations/0036_backfill_produtos_orfaos_remessas.sql` (novo, idempotente, tenant-scoped)
+- **Passo 1:** auto-cadastra em `terc_produtos` cada `cod_ref` distinto presente em `terc_remessas` mas ausente em `terc_produtos` da mesma empresa. Preserva `desc_ref`, `id_servico`, `tempo_peca`, `grade` do header. Marca `criado_por='migration_0036'` + `observacao='[Reparação automática 0036]'`.
+- **Passo 2:** UPDATE em `terc_remessa_itens.id_produto = (SELECT id_produto FROM terc_produtos WHERE cod_ref=... AND id_empresa=... LIMIT 1)` para todos os itens com `id_produto=NULL` mas `cod_ref` preenchido.
+- **Passo 3:** índices `(id_empresa, cod_ref)` em produtos e itens para performance do lookup.
+- Resultado PROD: **34 produtos órfãos auto-cadastrados na E1** (1 na E2) + **125 itens da E1** com `id_produto` populado → **0 itens NULL** restantes.
+
+#### 2. Backend — resolução on-the-fly em GET /terc/remessas/:id
+- Após carregar os itens, se algum tiver `id_produto=NULL` mas `cod_ref` preenchido, faz lookup em massa por `(id_empresa, cod_ref IN (...))` em `terc_produtos` e popula `id_produto` no payload com flag `_resolved_id_produto: true`.
+- Garante que **futuras importações legadas** que esqueçam `id_produto` ainda funcionem.
+- Log estruturado: `[tenant] remessa.get.resolved_id_produto { id_remessa, resolved }`.
+
+#### 3. Frontend — proteção em profundidade + debug enriquecido
+- `optProdutos(sel, idColecao, codRefFallback)`: ganhou novo parâmetro. Se `sel` (id_produto) não está no cache local de produtos, adiciona uma `<option>` fantasma com texto `"{cod_ref} — (carregando cadastro…)"` para o select **NUNCA aparecer em branco**. Loga warning sugerindo `reloadProdutos()`.
+- Ao abrir modal de edição, se backend devolveu `_resolved_id_produto` ou `_synthesized` em algum item, dispara `TERC.reloadProdutos()` automaticamente para refrescar o cache.
+- Defesa dupla no `r.itens.map`: se backend retornou item sem `id_produto`, frontend tenta resolver via `findProdutoByRef(cod_ref)` antes do `newItem()`.
+- Console.log enriquecido com `empresaAtual`, `companyId`, `remessaId`, `itens[].id_produto`, `_synthesized`, `_resolved_id_produto`.
+
+#### 4. Cache busting `v=42` → `v=43`
+
+### 🧪 Testes funcionais LOCAL (5/5 OK)
+1. ✅ Migration 0036 LOCAL: 6 cmds, 5 produtos órfãos criados, todos itens com `id_produto`
+2. ✅ Backend resolve dinamicamente: forçamos `UPDATE terc_remessa_itens SET id_produto=NULL WHERE id_item=3` → GET retornou `id_produto: 1, _resolved_id_produto: true` ✅
+3. ✅ Grade populada `[{tamanho:M, qtd:15}]` corretamente
+4. ✅ Valores não-zerados: `qtd_total: 15, preco_unit: 0.3, valor_total: 4.5`
+5. ✅ Logs `[tenant] remessa.get` + `remessa.get.resolved_id_produto` no console PM2
+
+### 🔢 Migration 0036 aplicada
+- LOCAL: `npx wrangler d1 migrations apply pcp-confeccao-prod --local` → 6 cmds OK
+- REMOTE: `npx wrangler d1 migrations apply pcp-confeccao-prod --remote` → 6 cmds em **2.97 ms**
+
+### 📊 Resultado PROD pós-migration
+| Métrica | Antes 0036 | Depois 0036 |
+|---|---|---|
+| E1 itens com `id_produto` | 68 (35%) | **193 (100%)** ✅ |
+| E1 itens `id_produto=NULL` | 125 | **0** ✅ |
+| E1 produtos órfãos auto-cadastrados | — | **34** novos |
+| E1 total produtos ativos | 56 | **90** |
+| E2 isolamento preservado | OK | OK ✅ |
+
+### 📁 Arquivos alterados
+| Arquivo | Tipo | Mudança |
+|---|---|---|
+| `migrations/0036_backfill_produtos_orfaos_remessas.sql` | novo | Backfill de produtos + id_produto órfãos |
+| `src/routes/terceirizacao.ts` | editado | Resolução on-the-fly em GET /terc/remessas/:id |
+| `public/static/app.js` | editado | `optProdutos` com fallback fantasma + reloadProdutos auto + debug enriquecido |
+| `src/index.tsx` | editado | Cache bump `v=43` |
+
+### 🛡️ Garantias multi-tenant preservadas
+- Migration 0036 faz `INSERT ... WHERE NOT EXISTS (... AND p.id_empresa = src.id_empresa)` → cada empresa só cria os seus
+- UPDATE de `id_produto` é correlacionado por `(cod_ref, id_empresa)` em ambos os lados → nunca cruza tenants
+- Backend usa `requireEmpresa(c)` antes de qualquer query
+- Resolução on-the-fly usa `id_empresa` do contexto da sessão na cláusula WHERE
+- Frontend não envia/altera `id_empresa` (sempre derivado do token server-side)
+
+### 🚀 Deploy
+- Build: `npm run build` → dist/_worker.js **281.87 kB**
+- Deploy: `npx wrangler pages deploy dist --project-name corepro-confeccao --branch main`
+- URL: `https://97c30cb7.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
+### ✅ Smoke tests PROD (6/6)
+- `/static/app.js?v=43` → **HTTP 200** (467 332 bytes, contém 4 markers `HOTFIX 0036`)
+- `/static/styles.css?v=43` → **HTTP 200** (223 426 bytes)
+- HTML home referencia `app.js?v=43` e `styles.css?v=43` ✅
+- `GET /api/terc/remessas/1` sem auth → **401 friendly** ✅
+- `GET /api/terc/produtos` sem auth → **401 friendly** ✅
+- Home `/` → **HTTP 200**
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
+- [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)
 - [ ] Gráficos interativos adicionais no dashboard (já tem Chart.js carregado)
 - [ ] Mobile-first avançado para apontamento (PWA)

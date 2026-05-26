@@ -1186,12 +1186,19 @@ const TERC = {
     const list = onlyAtivos ? this.terceirizados.filter(t => t.ativo) : this.terceirizados;
     return ['<option value="">—</option>'].concat(list.map(t => `<option value="${t.id_terc}" ${sel == t.id_terc ? 'selected' : ''}>${t.nome_terc}${t.nome_setor ? ' · ' + t.nome_setor : ''}</option>`)).join('');
   },
-  optProdutos(sel, idColecao) {
+  optProdutos(sel, idColecao, codRefFallback) {
     let list = this.produtos.filter(p => p.ativo);
     if (idColecao) list = list.filter(p => !p.id_colecao || p.id_colecao == idColecao);
-    return ['<option value="">— Selecione um produto cadastrado —</option>']
-      .concat(list.map(p => `<option value="${p.id_produto}" ${sel == p.id_produto ? 'selected' : ''} data-cod="${(p.cod_ref || '').replace(/"/g, '&quot;')}" data-desc="${(p.desc_ref || '').replace(/"/g, '&quot;')}" data-col="${p.id_colecao || ''}" data-grade="${p.grade_padrao || 1}">${p.cod_ref} — ${p.desc_ref}${p.nome_colecao ? ' · ' + p.nome_colecao : ''}</option>`))
-      .join('');
+    const opts = ['<option value="">— Selecione um produto cadastrado —</option>']
+      .concat(list.map(p => `<option value="${p.id_produto}" ${sel == p.id_produto ? 'selected' : ''} data-cod="${(p.cod_ref || '').replace(/"/g, '&quot;')}" data-desc="${(p.desc_ref || '').replace(/"/g, '&quot;')}" data-col="${p.id_colecao || ''}" data-grade="${p.grade_padrao || 1}">${p.cod_ref} — ${p.desc_ref}${p.nome_colecao ? ' · ' + p.nome_colecao : ''}</option>`));
+    // 🛡️ HOTFIX 0036: Se o sel não foi encontrado na lista (produto foi auto-cadastrado
+    // pela migration mas o cache local ainda não recarregou), adiciona opção fantasma
+    // com base no cod_ref recebido para o usuário NÃO ver o select em branco.
+    if (sel && !list.some(p => p.id_produto == sel) && codRefFallback) {
+      opts.push(`<option value="${sel}" selected data-cod="${(codRefFallback || '').replace(/"/g, '&quot;')}" data-ghost="1">${codRefFallback} — (carregando cadastro…)</option>`);
+      console.warn('[optProdutos] id_produto', sel, 'não encontrado no cache — opção fantasma adicionada. Acione reloadProdutos().');
+    }
+    return opts.join('');
   },
   findProdutoByRef(cod_ref, idColecao) {
     if (!cod_ref) return null;
@@ -3282,6 +3289,14 @@ async function TERC_openRemModal(id, onSave) {
       const res = await api('get', '/terc/remessas/' + id);
       r = res.data || r;
       r.itens = Array.isArray(r.itens) ? r.itens : [];
+      // 🛡️ HOTFIX 0036: Se backend resolveu id_produto dinamicamente, recarrega cache
+      // de produtos para garantir que o select tenha a opção correta (produto pode
+      // ter sido auto-cadastrado pela migration recentemente).
+      const hasResolved = r.itens.some(it => it._resolved_id_produto || it._synthesized);
+      if (hasResolved) {
+        console.log('[remessa.edit] backend resolveu id_produto dinamicamente — recarregando cache de produtos');
+        await TERC.reloadProdutos();
+      }
     } catch { return; }
   }
 
@@ -3374,24 +3389,44 @@ async function TERC_openRemModal(id, onSave) {
   }
 
   let itens = [];
-  // 🔍 DEBUG estruturado para diagnóstico multi-tenant
+  // 🔍 DEBUG estruturado para diagnóstico multi-tenant (HOTFIX 0036)
   if (edit) {
+    const empresaAtual = (window.AppState && window.AppState.empresa) || null;
     console.log('[remessa.edit] payload backend:', {
-      id_remessa: r.id_remessa,
+      empresaAtual: empresaAtual ? { id: empresaAtual.id_empresa, nome: empresaAtual.nome_empresa } : null,
+      companyId: r.id_empresa,
+      remessaId: r.id_remessa,
       num_controle: r.num_controle,
-      id_empresa: r.id_empresa,
       qtd_total: r.qtd_total,
       preco_unit: r.preco_unit,
       valor_total: r.valor_total,
       itens_count: Array.isArray(r.itens) ? r.itens.length : 0,
       grade_count: Array.isArray(r.grade) ? r.grade.length : 0,
+      itens: Array.isArray(r.itens) ? r.itens.map(it => ({
+        id_item: it.id_item, id_produto: it.id_produto, cod_ref: it.cod_ref,
+        cor: it.cor, qtd_total: it.qtd_total, preco_unit: it.preco_unit,
+        grade_count: Array.isArray(it.grade) ? it.grade.length : 0,
+        _synthesized: it._synthesized || false,
+        _resolved_id_produto: it._resolved_id_produto || false,
+      })) : [],
       _synthesized: r._synthesized || false,
     });
   }
 
   if (edit && Array.isArray(r.itens) && r.itens.length > 0) {
-    // ✅ Caminho normal — backend devolveu itens (incluindo casos sintetizados)
-    itens = r.itens.map(it => newItem(it));
+    // ✅ Caminho normal — backend devolveu itens (incluindo casos sintetizados/resolvidos)
+    // 🛡️ HOTFIX 0036: Para cada item sem id_produto, tenta resolver pelo cod_ref antes do newItem.
+    // O backend já faz isso, mas mantemos como dupla proteção (defense in depth).
+    itens = r.itens.map(it => {
+      if (!it.id_produto && it.cod_ref && TERC.findProdutoByRef) {
+        const prod = TERC.findProdutoByRef(it.cod_ref, r.id_colecao);
+        if (prod) {
+          console.log('[remessa.edit] frontend resolved id_produto:', { cod_ref: it.cod_ref, id_produto: prod.id_produto });
+          it = { ...it, id_produto: prod.id_produto, _resolved_id_produto: true };
+        }
+      }
+      return newItem(it);
+    });
   } else if (edit) {
     // 🛡️ Fallback final no frontend: backend não devolveu itens nem sintetizou
     // (edge case extremo — proteção em profundidade). Hidrata 1 item a partir
@@ -3623,7 +3658,7 @@ async function TERC_openRemModal(id, onSave) {
 
       <div class="grid grid-cols-12 gap-2">
         <div class="col-span-5"><label>Produto *</label>
-          <select data-f="prod">${TERC.optProdutos(idProdSel, r.id_colecao)}</select></div>
+          <select data-f="prod">${TERC.optProdutos(idProdSel, r.id_colecao, it.cod_ref)}</select></div>
         <div class="col-span-3"><label>Serviço *</label>
           <select data-f="serv">${TERC.optServicos(it.id_servico)}</select></div>
         <div class="col-span-2"><label>Referência</label>
