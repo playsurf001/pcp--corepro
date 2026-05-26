@@ -414,6 +414,7 @@ const NAV = [
   { id: 'terc_produtos',         label: 'Produtos',          icon: 'fa-tshirt',           group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'terc_precos',           label: 'Preços / Coleções', icon: 'fa-money-bill-wave',  group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'cores',                 label: 'Cores',             icon: 'fa-palette',          group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'terc_terceirizados',    label: 'Terceirizados',     icon: 'fa-handshake',        group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Cadastros',     collapsible: true, adminOnly: true },
 
@@ -7802,7 +7803,9 @@ ROUTES.terc_servicos = async (main) => {
 };
 
 ROUTES.cores = async (main) => {
-  // Helpers internos
+  // ============================================================
+  // Módulo de Cores — v2 (tabela profissional + vínculos + duplicate)
+  // ============================================================
   function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
   function isValidHex(s) {
     let x = String(s || '').trim().toUpperCase().replace(/^#/, '');
@@ -7810,7 +7813,6 @@ ROUTES.cores = async (main) => {
     return /^[0-9A-F]{6}$/.test(x) ? '#' + x : null;
   }
   function contrastingText(hex) {
-    // Decide texto branco/preto pelo brilho percebido
     const h = String(hex || '').replace('#', '');
     if (h.length !== 6) return '#000';
     const r = parseInt(h.slice(0, 2), 16);
@@ -7819,10 +7821,22 @@ ROUTES.cores = async (main) => {
     const yiq = (r * 299 + g * 587 + b * 114) / 1000;
     return yiq >= 140 ? '#0f172a' : '#ffffff';
   }
+  function fmtDate(s) {
+    if (!s) return '—';
+    try { return new Date(String(s).replace(' ', 'T') + 'Z').toLocaleDateString('pt-BR'); } catch { return String(s).slice(0, 10); }
+  }
+
   state.route = 'cores';
+
+  // Paleta sugerida (padrão consistente com Serviços)
+  const PALETA = ['#2563EB','#7C3AED','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#8B5CF6','#14B8A6','#F97316','#84CC16','#0EA5E9','#64748B','#1E293B','#FFFFFF'];
 
   let lista = [];
   let filtro = { q: '', somenteAtivos: false };
+  let viewMode = 'table'; // 'table' | 'grid'
+  let sort = { col: 'nome', dir: 'asc' };
+
+  try { viewMode = localStorage.getItem('cores-view-mode') || 'table'; } catch {}
 
   async function loadList() {
     try {
@@ -7837,12 +7851,42 @@ ROUTES.cores = async (main) => {
     }
     render();
     // Invalida o cache global para outras telas pegarem a versão atualizada
-    window.Cores.invalidate();
+    if (window.Cores && typeof window.Cores.invalidate === 'function') {
+      window.Cores.invalidate();
+    }
+  }
+
+  function sortLista(arr) {
+    const dir = sort.dir === 'desc' ? -1 : 1;
+    const col = sort.col;
+    return [...arr].sort((a, b) => {
+      let va, vb;
+      if (col === 'nome' || col === 'hex') {
+        va = String(a[col] || '').toLowerCase();
+        vb = String(b[col] || '').toLowerCase();
+      } else if (col === 'vinculos') {
+        const ta = (a.qtd_precos || 0) + (a.qtd_variacoes || 0) + (a.qtd_remessas || 0) + (a.qtd_retornos || 0);
+        const tb = (b.qtd_precos || 0) + (b.qtd_variacoes || 0) + (b.qtd_remessas || 0) + (b.qtd_retornos || 0);
+        va = ta; vb = tb;
+      } else if (col === 'ativo') {
+        va = a.ativo || 0; vb = b.ativo || 0;
+      } else {
+        va = a[col]; vb = b[col];
+      }
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  }
+
+  function vinculosTotal(c) {
+    return (c.qtd_precos || 0) + (c.qtd_variacoes || 0) + (c.qtd_remessas || 0) + (c.qtd_retornos || 0);
   }
 
   function render() {
     const totalAtivas = lista.filter(c => c.ativo).length;
     const totalInativas = lista.length - totalAtivas;
+    const arr = sortLista(lista);
 
     main.innerHTML = `
       <div class="page-header mb-4 flex items-start justify-between gap-3 flex-wrap">
@@ -7851,9 +7895,12 @@ ROUTES.cores = async (main) => {
           <p class="page-subtitle">Cadastro centralizado das cores usadas em remessas, produtos, retornos e relatórios.</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
+          <div class="srv-view-toggle">
+            <button class="srv-view-btn ${viewMode === 'table' ? 'is-active' : ''}" data-view="table" title="Visualização em tabela"><i class="fas fa-table"></i></button>
+            <button class="srv-view-btn ${viewMode === 'grid' ? 'is-active' : ''}" data-view="grid" title="Visualização em grade"><i class="fas fa-th"></i></button>
+          </div>
           <button id="c-nova" class="btn btn-primary"><i class="fas fa-plus mr-1"></i>Nova cor</button>
           <button id="c-import" class="btn btn-secondary"><i class="fas fa-file-import mr-1"></i>Importar</button>
-          <button id="c-del-all" class="btn btn-danger" ${lista.length === 0 ? 'disabled' : ''}><i class="fas fa-trash-can mr-1"></i>Excluir todas</button>
         </div>
       </div>
 
@@ -7864,18 +7911,25 @@ ROUTES.cores = async (main) => {
               <label class="text-xs text-slate-500 font-medium">Buscar</label>
               <input id="c-busca" type="text" class="form-input" placeholder="Nome ou HEX (ex: #2563EB)" value="${escHtml(filtro.q)}" />
             </div>
-            <label class="flex items-center gap-2 text-sm select-none cursor-pointer">
-              <input id="c-ativos" type="checkbox" ${filtro.somenteAtivos ? 'checked' : ''} />
-              <span>Somente ativas</span>
-            </label>
-            <button id="c-reload" class="btn btn-secondary btn-sm"><i class="fas fa-rotate"></i></button>
+            <div>
+              <label class="text-xs text-slate-500 font-medium block">Status</label>
+              <label class="flex items-center gap-2 text-sm select-none cursor-pointer h-[38px]">
+                <input id="c-ativos" type="checkbox" ${filtro.somenteAtivos ? 'checked' : ''} />
+                <span>Somente ativas</span>
+              </label>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 font-medium block">&nbsp;</label>
+              <button id="c-reload" class="btn btn-secondary btn-sm h-[38px]" title="Recarregar"><i class="fas fa-rotate"></i></button>
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="text-xs text-slate-500 mb-2">
-        <i class="fas fa-info-circle mr-1"></i>
-        <b>${lista.length}</b> cores total — <b class="text-emerald-600">${totalAtivas}</b> ativas, <b class="text-slate-500">${totalInativas}</b> inativas
+      <div class="text-xs text-slate-500 mb-2 flex items-center gap-3 flex-wrap">
+        <span><i class="fas fa-info-circle mr-1"></i><b>${lista.length}</b> cores total</span>
+        <span class="srv-status-on" style="padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;"><b>${totalAtivas}</b> ativas</span>
+        <span class="srv-status-off" style="padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;"><b>${totalInativas}</b> inativas</span>
       </div>
 
       ${lista.length === 0 ? `
@@ -7886,35 +7940,14 @@ ROUTES.cores = async (main) => {
             <p class="text-sm mt-1">Clique em <b>Nova cor</b> ou <b>Importar</b> para começar.</p>
           </div>
         </div>
-      ` : `
-        <div class="cores-grid">
-          ${lista.map(c => `
-            <div class="cor-card ${c.ativo ? '' : 'is-inactive'}" data-id="${c.id}">
-              <div class="cor-preview" style="background:${escHtml(c.hex)};color:${contrastingText(c.hex)}">
-                <span class="cor-hex-overlay">${escHtml(c.hex)}</span>
-                ${c.ativo ? '' : '<span class="cor-badge-inativo">Inativa</span>'}
-              </div>
-              <div class="cor-info">
-                <div class="cor-nome" title="${escHtml(c.nome)}">${escHtml(c.nome)}</div>
-                <div class="cor-actions">
-                  <button class="btn-icon" data-act="edit" data-id="${c.id}" title="Editar"><i class="fas fa-pen"></i></button>
-                  <button class="btn-icon" data-act="toggle" data-id="${c.id}" title="${c.ativo ? 'Desativar' : 'Ativar'}">
-                    <i class="fas ${c.ativo ? 'fa-eye' : 'fa-eye-slash'}"></i>
-                  </button>
-                  <button class="btn-icon is-danger" data-act="del" data-id="${c.id}" title="Excluir"><i class="fas fa-trash"></i></button>
-                </div>
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      `}
+      ` : viewMode === 'table' ? renderTable(arr) : renderGrid(arr)}
     `;
 
-    // Listeners
+    // Listeners gerais
     $('#c-nova').onclick = () => openCorModal(null);
     $('#c-import').onclick = () => openImportModal();
-    $('#c-del-all').onclick = () => deleteAll();
     $('#c-reload').onclick = () => loadList();
+
     let _qtmr = 0;
     $('#c-busca').oninput = (e) => {
       clearTimeout(_qtmr);
@@ -7923,23 +7956,157 @@ ROUTES.cores = async (main) => {
     };
     $('#c-ativos').onchange = (e) => { filtro.somenteAtivos = e.target.checked; loadList(); };
 
+    main.querySelectorAll('[data-view]').forEach(btn => {
+      btn.onclick = () => {
+        viewMode = btn.dataset.view;
+        try { localStorage.setItem('cores-view-mode', viewMode); } catch {}
+        render();
+      };
+    });
+
+    // Sort handlers
+    main.querySelectorAll('[data-sort]').forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.sort;
+        if (sort.col === col) sort.dir = sort.dir === 'asc' ? 'desc' : 'asc';
+        else { sort.col = col; sort.dir = 'asc'; }
+        render();
+      };
+    });
+
+    // Action handlers (table + grid)
     main.querySelectorAll('[data-act]').forEach(btn => {
-      btn.onclick = async () => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
         const id = Number(btn.dataset.id);
         const act = btn.dataset.act;
         const cor = lista.find(c => c.id === id);
         if (!cor) return;
         if (act === 'edit') openCorModal(cor);
         else if (act === 'del') deleteOne(cor);
-        else if (act === 'toggle') {
-          try {
-            await api('put', '/cores/' + id, { ...cor, ativo: cor.ativo ? 0 : 1 }, { silent: false });
-            toast(cor.ativo ? 'Cor desativada' : 'Cor ativada', 'success');
-            loadList();
-          } catch {}
-        }
+        else if (act === 'duplicate') duplicate(cor);
+        else if (act === 'toggle') toggle(cor);
       };
     });
+  }
+
+  function sortIndicator(col) {
+    if (sort.col !== col) return '<i class="fas fa-sort opacity-30 ml-1"></i>';
+    return sort.dir === 'asc' ? '<i class="fas fa-sort-up ml-1"></i>' : '<i class="fas fa-sort-down ml-1"></i>';
+  }
+
+  function renderTable(arr) {
+    return `
+      <div class="card">
+        <div class="card-body p-0 overflow-x-auto">
+          <table class="srv-table w-full">
+            <thead>
+              <tr>
+                <th style="width:60px">Status</th>
+                <th data-sort="nome" class="cursor-pointer select-none">Cor / Nome ${sortIndicator('nome')}</th>
+                <th data-sort="hex" class="cursor-pointer select-none" style="width:120px">HEX ${sortIndicator('hex')}</th>
+                <th data-sort="vinculos" class="cursor-pointer select-none" style="width:200px">Vínculos ${sortIndicator('vinculos')}</th>
+                <th style="width:120px">Criação</th>
+                <th style="width:160px;text-align:right">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${arr.map(c => {
+                const total = vinculosTotal(c);
+                return `
+                <tr class="${c.ativo ? '' : 'opacity-60'}" data-id="${c.id}">
+                  <td>
+                    <button class="btn-icon srv-toggle-btn ${c.ativo ? 'is-on' : 'is-off'}" data-act="toggle" data-id="${c.id}" title="${c.ativo ? 'Desativar' : 'Ativar'}">
+                      <i class="fas ${c.ativo ? 'fa-check-circle' : 'fa-circle-xmark'}"></i>
+                    </button>
+                  </td>
+                  <td>
+                    <div class="flex items-center gap-3">
+                      <span class="srv-dot" style="background:${escHtml(c.hex)};box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)"></span>
+                      <div class="min-w-0">
+                        <div class="font-medium truncate">${escHtml(c.nome)}</div>
+                        ${c.observacoes ? `<div class="text-xs text-slate-500 line-clamp-1">${escHtml(c.observacoes)}</div>` : ''}
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <span class="srv-chip" style="background:${escHtml(c.hex)};color:${contrastingText(c.hex)};font-family:monospace;font-size:11px;letter-spacing:0.5px">
+                      ${escHtml(c.hex)}
+                    </span>
+                  </td>
+                  <td>
+                    ${total === 0
+                      ? '<span class="text-xs text-slate-400">Sem vínculos</span>'
+                      : `<div class="flex flex-wrap gap-1">
+                          ${c.qtd_precos    ? `<span class="srv-vinc-pill" title="Preços/Coleções"><i class="fas fa-money-bill-wave mr-1"></i>${c.qtd_precos}</span>` : ''}
+                          ${c.qtd_variacoes ? `<span class="srv-vinc-pill" title="Variações de produto"><i class="fas fa-tshirt mr-1"></i>${c.qtd_variacoes}</span>` : ''}
+                          ${c.qtd_remessas  ? `<span class="srv-vinc-pill" title="Itens de remessa"><i class="fas fa-truck-fast mr-1"></i>${c.qtd_remessas}</span>` : ''}
+                          ${c.qtd_retornos  ? `<span class="srv-vinc-pill" title="Itens de retorno"><i class="fas fa-truck-arrow-right mr-1"></i>${c.qtd_retornos}</span>` : ''}
+                        </div>`
+                    }
+                  </td>
+                  <td class="text-xs text-slate-500">${fmtDate(c.criado_em)}</td>
+                  <td>
+                    <div class="srv-actions">
+                      <button class="btn-icon" data-act="edit" data-id="${c.id}" title="Editar"><i class="fas fa-pen"></i></button>
+                      <button class="btn-icon" data-act="duplicate" data-id="${c.id}" title="Duplicar"><i class="fas fa-copy"></i></button>
+                      <button class="btn-icon is-danger" data-act="del" data-id="${c.id}" title="Excluir"><i class="fas fa-trash"></i></button>
+                    </div>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderGrid(arr) {
+    return `
+      <div class="cores-grid">
+        ${arr.map(c => {
+          const total = vinculosTotal(c);
+          return `
+          <div class="cor-card ${c.ativo ? '' : 'is-inactive'}" data-id="${c.id}">
+            <div class="cor-preview" style="background:${escHtml(c.hex)};color:${contrastingText(c.hex)}">
+              <span class="cor-hex-overlay">${escHtml(c.hex)}</span>
+              ${c.ativo ? '' : '<span class="cor-badge-inativo">Inativa</span>'}
+              ${total > 0 ? `<span class="cor-vinc-badge" title="${total} vínculos">${total}</span>` : ''}
+            </div>
+            <div class="cor-info">
+              <div class="cor-nome" title="${escHtml(c.nome)}">${escHtml(c.nome)}</div>
+              <div class="cor-actions">
+                <button class="btn-icon" data-act="edit" data-id="${c.id}" title="Editar"><i class="fas fa-pen"></i></button>
+                <button class="btn-icon" data-act="duplicate" data-id="${c.id}" title="Duplicar"><i class="fas fa-copy"></i></button>
+                <button class="btn-icon" data-act="toggle" data-id="${c.id}" title="${c.ativo ? 'Desativar' : 'Ativar'}">
+                  <i class="fas ${c.ativo ? 'fa-eye' : 'fa-eye-slash'}"></i>
+                </button>
+                <button class="btn-icon is-danger" data-act="del" data-id="${c.id}" title="Excluir"><i class="fas fa-trash"></i></button>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  // ---------- Toggle status ----------
+  async function toggle(cor) {
+    try {
+      await api('patch', '/cores/' + cor.id + '/toggle', null, { silent: false });
+      toast(cor.ativo ? 'Cor desativada' : 'Cor ativada', 'success');
+      loadList();
+    } catch {}
+  }
+
+  // ---------- Duplicate ----------
+  async function duplicate(cor) {
+    try {
+      const r = await api('post', '/cores/' + cor.id + '/duplicate', null, { silent: false });
+      toast('Cor duplicada: ' + (r?.data?.nome || ''), 'success');
+      loadList();
+    } catch {}
   }
 
   // ---------- Modal: Nova/Editar ----------
@@ -7948,7 +8115,7 @@ ROUTES.cores = async (main) => {
     const m = document.createElement('div');
     m.className = 'modal-backdrop';
     m.innerHTML = `
-      <div class="modal-card" style="max-width:480px">
+      <div class="modal-card" style="max-width:540px">
         <div class="modal-header">
           <h3><i class="fas fa-palette mr-2"></i>${isEdit ? 'Editar cor' : 'Nova cor'}</h3>
           <button class="modal-close" type="button">&times;</button>
@@ -7963,7 +8130,7 @@ ROUTES.cores = async (main) => {
             <div class="flex gap-3 items-end">
               <div class="flex-1">
                 <label class="form-label">Código HEX <span class="text-red-500">*</span></label>
-                <input id="cm-hex" type="text" class="form-input" maxlength="7"
+                <input id="cm-hex" type="text" class="form-input font-mono" maxlength="7"
                   value="${escHtml(cor?.hex || '#2563EB')}" placeholder="#2563EB" required />
               </div>
               <div>
@@ -7972,14 +8139,29 @@ ROUTES.cores = async (main) => {
                   style="height:38px;width:48px;border-radius:8px;border:1px solid var(--border-2,#cbd5e1);cursor:pointer" />
               </div>
             </div>
+
             <div>
-              <label class="form-label">Preview</label>
-              <div id="cm-preview" class="cor-preview-modal"
-                style="background:${escHtml(cor?.hex || '#2563EB')};color:${contrastingText(cor?.hex || '#2563EB')}">
-                <span id="cm-preview-text">${escHtml(cor?.nome || 'Azul Royal')}</span>
-                <span id="cm-preview-hex" style="opacity:.75;font-size:.8em">${escHtml(cor?.hex || '#2563EB')}</span>
+              <label class="form-label">Paleta sugerida</label>
+              <div class="srv-paleta">
+                ${PALETA.map(c => `<button type="button" class="srv-paleta-dot" data-paleta="${c}" style="background:${c}" title="${c}"></button>`).join('')}
               </div>
             </div>
+
+            <div>
+              <label class="form-label">Preview ao vivo</label>
+              <div id="cm-preview" class="srv-preview cor-preview-modal"
+                style="background:${escHtml(cor?.hex || '#2563EB')};color:${contrastingText(cor?.hex || '#2563EB')}">
+                <span id="cm-preview-text" class="srv-preview-text">${escHtml(cor?.nome || 'Azul Royal')}</span>
+                <span id="cm-preview-hex" class="srv-preview-hex">${escHtml(cor?.hex || '#2563EB')}</span>
+              </div>
+            </div>
+
+            <div>
+              <label class="form-label">Observações <span class="text-xs text-slate-400">(opcional)</span></label>
+              <textarea id="cm-obs" class="form-input" rows="2" maxlength="500"
+                placeholder="Notas internas sobre esta cor (referência, fornecedor, etc.)">${escHtml(cor?.observacoes || '')}</textarea>
+            </div>
+
             <label class="flex items-center gap-2 cursor-pointer">
               <input id="cm-ativo" type="checkbox" ${(cor?.ativo ?? 1) ? 'checked' : ''} />
               <span class="text-sm">Ativa (visível nos selects do sistema)</span>
@@ -8020,20 +8202,31 @@ ROUTES.cores = async (main) => {
     };
     $pick.oninput = () => { $hex.value = $pick.value.toUpperCase(); syncPreview(); };
 
+    // Paleta clicável
+    m.querySelectorAll('[data-paleta]').forEach(btn => {
+      btn.onclick = () => {
+        const c = btn.dataset.paleta;
+        $hex.value = c;
+        $pick.value = c;
+        syncPreview();
+      };
+    });
+
     setTimeout(() => $nome.focus(), 50);
 
     m.querySelector('[data-act="save"]').onclick = async () => {
       const nome = ($nome.value || '').trim();
       const hex = isValidHex($hex.value);
       const ativo = m.querySelector('#cm-ativo').checked ? 1 : 0;
+      const observacoes = (m.querySelector('#cm-obs').value || '').trim() || null;
       if (!nome) { toast('Informe o nome da cor', 'warning'); $nome.focus(); return; }
       if (!hex)  { toast('Código HEX inválido. Use #RRGGBB.', 'warning'); $hex.focus(); return; }
       try {
         if (isEdit) {
-          await api('put', '/cores/' + cor.id, { nome, hex, ativo }, { silent: false });
+          await api('put', '/cores/' + cor.id, { nome, hex, ativo, observacoes }, { silent: false });
           toast('Cor atualizada!', 'success');
         } else {
-          await api('post', '/cores', { nome, hex, ativo }, { silent: false });
+          await api('post', '/cores', { nome, hex, ativo, observacoes }, { silent: false });
           toast('Cor cadastrada!', 'success');
         }
         close();
@@ -8042,25 +8235,29 @@ ROUTES.cores = async (main) => {
     };
   }
 
-  // ---------- Excluir 1 ----------
+  // ---------- Excluir 1 (com validação de vínculos) ----------
   async function deleteOne(cor) {
-    if (!confirm(`Excluir a cor "${cor.nome}" (${cor.hex})?\n\nEsta ação é irreversível.`)) return;
+    const total = vinculosTotal(cor);
+    if (total === 0) {
+      if (!confirm(`Excluir a cor "${cor.nome}" (${cor.hex})?\n\nEsta ação é irreversível.`)) return;
+      try {
+        await api('delete', '/cores/' + cor.id, null, { silent: false });
+        toast('Cor excluída', 'success');
+        loadList();
+      } catch {}
+      return;
+    }
+    // Tem vínculos — confirmação dupla, oferece desativar
+    const partes = [];
+    if (cor.qtd_precos)    partes.push(cor.qtd_precos + ' preço(s)');
+    if (cor.qtd_variacoes) partes.push(cor.qtd_variacoes + ' variação(ões)');
+    if (cor.qtd_remessas)  partes.push(cor.qtd_remessas + ' item(ns) de remessa');
+    if (cor.qtd_retornos)  partes.push(cor.qtd_retornos + ' item(ns) de retorno');
+    const msg = `A cor "${cor.nome}" possui ${total} vínculo(s):\n- ${partes.join('\n- ')}\n\nPara preservar o histórico, recomendamos DESATIVAR em vez de excluir.\n\nClique OK para DESATIVAR (manter histórico) ou Cancelar para abortar.`;
+    if (!confirm(msg)) return;
     try {
-      await api('delete', '/cores/' + cor.id, null, { silent: false });
-      toast('Cor excluída', 'success');
-      loadList();
-    } catch {}
-  }
-
-  // ---------- Excluir TODAS (dupla confirmação) ----------
-  async function deleteAll() {
-    if (lista.length === 0) return;
-    if (!confirm(`Tem certeza que deseja excluir TODAS as ${lista.length} cores?\n\nEsta ação é IRREVERSÍVEL.`)) return;
-    const txt = prompt(`Para confirmar a exclusão de TODAS as cores, digite exatamente:\n\nEXCLUIR_TODAS\n\n(maiúsculas, sem espaços)`);
-    if (txt !== 'EXCLUIR_TODAS') { toast('Operação cancelada', 'info'); return; }
-    try {
-      const r = await api('delete', '/cores?confirm=true&confirm2=EXCLUIR_TODAS', null, { silent: false });
-      toast(`${r?.data?.deleted || 0} cores excluídas`, 'success');
+      await api('delete', '/cores/' + cor.id + '?force=1', null, { silent: false });
+      toast('Cor desativada (histórico preservado)', 'success');
       loadList();
     } catch {}
   }
@@ -8077,7 +8274,7 @@ ROUTES.cores = async (main) => {
         </div>
         <div class="modal-body">
           <p class="text-sm text-slate-600 mb-3">
-            Cole/cole as cores no formato <code>nome,#hex</code> (uma por linha).
+            Cole as cores no formato <code>nome,#hex</code> (uma por linha).
             Aceita também separação por <kbd>;</kbd>, <kbd>Tab</kbd> ou <kbd>|</kbd>.
             Excel/CSV: copie as duas colunas e cole abaixo.
           </p>
@@ -8132,15 +8329,13 @@ ROUTES.cores = async (main) => {
       for (let i = 0; i < lines.length; i++) {
         let line = lines[i].trim();
         if (!line) continue;
-        if (line.startsWith('#') && !/^#[0-9A-Fa-f]{3,6}\b/.test(line)) continue; // comentário (mas permite "#FFF" sozinho)
-        // Detecta separador
+        if (line.startsWith('#') && !/^#[0-9A-Fa-f]{3,6}\b/.test(line)) continue;
         const sep = line.indexOf(';') > -1 ? ';'
                    : line.indexOf('\t') > -1 ? '\t'
                    : line.indexOf('|') > -1 ? '|'
                    : ',';
         const parts = line.split(sep).map(s => s.trim());
         if (parts.length < 2) {
-          // formato "nome #hex" separado por espaço (último token = hex)
           const m2 = line.match(/^(.+?)\s+(#?[0-9A-Fa-f]{3,6})\s*$/);
           if (m2) { items.push({ row: i + 1, nome: m2[1].trim(), hex: m2[2] }); continue; }
           items.push({ row: i + 1, nome: parts[0] || '', hex: '' });
@@ -8183,7 +8378,7 @@ ROUTES.cores = async (main) => {
   }
 
   // Boot
-  loadList();
+  await loadList();
 };
 
 

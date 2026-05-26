@@ -798,6 +798,79 @@ A versão anterior usava apenas `grid-template-rows: 0fr → 1fr` + `opacity`, o
 
 **Deploy:** `https://70c2d9c3.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
 
+## 🎨 Módulo de Cores v2 (✅ CONCLUÍDO — deploy 2026-05-26)
+
+Centralização do cadastro de cores na aba **CADASTROS** do menu lateral. As cores ficam disponíveis automaticamente para remessas, retornos, produtos, preços e relatórios.
+
+### 🧭 Adição ao menu CADASTROS
+Estrutura final do grupo Cadastros:
+- Serviços · Produtos · Preços/Coleções · Grades de Tamanho · **Cores** (novo) · Terceirizados · Usuários
+
+### 🗄️ Migration `0030_cores_observacoes.sql` (LOCAL + REMOTE)
+- Adiciona coluna `observacoes TEXT` à tabela `cores` (campo livre, até 500 chars)
+- Cria índices para acelerar contagens de vínculos:
+  - `idx_precos_id_cor` em `terc_precos(id_cor)`
+  - `idx_var_id_cor` em `terc_produto_variacoes(id_cor)`
+  - `idx_remessa_itens_id_cor` em `terc_remessa_itens(id_cor)`
+  - `idx_retorno_itens_id_cor` em `terc_retorno_itens(id_cor)`
+- `idx_cores_ativo_empresa` em `cores(id_empresa, ativo)` para filtros rápidos
+- **Idempotente** (`ADD COLUMN` + `IF NOT EXISTS`) e preserva os dados existentes (34 cores)
+
+### 🛠️ Backend — `src/routes/cores.ts` (8 endpoints)
+
+| Método | Rota | Função |
+|---|---|---|
+| `GET` | `/api/cores` | Lista com `?q=`, `?ativo=` + contagens via subquery (qtd_precos, qtd_variacoes, qtd_remessas, qtd_retornos) |
+| `GET` | `/api/cores/:id` | Detalhe + objeto `vinculos: {precos, variacoes, remessa_itens, retorno_itens, total}` |
+| `POST` | `/api/cores` | Cria nova (validação HEX + anti-dup nome/HEX 409) |
+| `PUT` | `/api/cores/:id` | Atualiza (mesmas validações vs outras linhas) |
+| `PATCH` | `/api/cores/:id/toggle` | Flip `ativo` |
+| `POST` | `/api/cores/:id/duplicate` | Duplica com auto-rename `(cópia)` … até 50; varia o último dígito do HEX se necessário |
+| `DELETE` | `/api/cores/:id` | Valida vínculos. **409 + `code:'HAS_LINKS'`** com `data.vinculos`. `?force=1` → `UPDATE ativo=0` |
+| `POST` | `/api/cores/import` | Importação em massa (CSV/cole) — modos `skip` / `overwrite` |
+| `DELETE` | `/api/cores?confirm=true&confirm2=EXCLUIR_TODAS` | Exclusão em massa com dupla confirmação |
+
+**Helper `contarVinculosCor()`** consulta as 4 tabelas (`terc_precos`, `terc_produto_variacoes`, `terc_remessa_itens`, `terc_retorno_itens`) em paralelo via `Promise.all`.
+
+### 🎨 Frontend — `ROUTES.cores` reescrito (~440 linhas)
+- **Dois modos de visualização** alternáveis com toggle (preferência salva em `localStorage`):
+  - **Tabela profissional** (default): status toggle, nome+observação, HEX chip com contraste YIQ, vínculos em pills (4 tipos), data de criação, ações
+  - **Grade visual**: cards grandes com preview da cor + badge de vínculos
+- **Modal completo** com:
+  - Nome obrigatório (max 60)
+  - HEX + color picker nativo sincronizados
+  - **Paleta sugerida de 15 cores** clicável
+  - **Preview ao vivo** com contraste automático (algoritmo YIQ)
+  - **Observações** (textarea, max 500 chars)
+  - Toggle ativa/inativa
+- **Busca debounced** (280ms) por nome ou HEX
+- **Filtro** "Somente ativas"
+- **Ordenação** clicável por coluna (nome, hex, vínculos)
+- **Ações por linha**: editar, duplicar, toggle, excluir (com confirmação inteligente baseada em vínculos)
+- **Excluir cor com vínculos** → modal pergunta "DESATIVAR (preserva histórico)?" em vez de simplesmente bloquear
+- Cache `window.Cores.invalidate()` chamado após cada mutação — **selects de cor em outras telas (Remessas/Retornos/Produtos/Preços) atualizam automaticamente**
+
+### ✅ Smoke tests executados (11/11 LOCAL ✅)
+1. GET list (34 cores) com contagens de vínculos
+2. POST create com `observacoes`
+3. GET /:id detalhe com objeto `vinculos`
+4. PUT update preservando obs
+5. POST anti-dup → **409**
+6. PATCH /:id/toggle flip ativo
+7. POST /:id/duplicate → nome "(cópia)" + hex variado
+8. DELETE sem vínculo → 200 deleted
+9. DELETE com vínculo → **409 + HAS_LINKS** com `data.vinculos: {precos:1, ...}`
+10. DELETE `?force=1` → desativa (ativo=0) preservando histórico
+11. Estado final validado + cleanup
+
+### ✅ Smoke tests PROD
+- Assets `app.js?v=38` + `styles.css?v=38` servidos com HTTP/200
+- HTML referencia v=38
+- `/api/health` OK
+- `/api/cores` retorna 401 sem auth (esperado)
+
+**Deploy:** `https://15d67b2b.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
