@@ -1252,6 +1252,94 @@ Reparação on-demand acionável pelo botão na tela /retornos. Cria 1 registro 
 
 **Deploy:** `https://321cd889.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
 
+---
+
+## 🔥 HOTFIX Hidratação Modal de Edição de Remessas (2026-05-26)
+
+### 🐛 Sintoma reportado
+Ao clicar em **Editar Remessa Nº 193** (e demais remessas legadas da Empresa 1), o modal abria com:
+- ❌ Nenhum produto selecionado (`cod_ref`/`desc_ref` vazios)
+- ❌ Grade totalmente zerada
+- ❌ `Total item: 0 pç` / `R$ 0,00`
+- ❌ Cor, serviço, valor unitário e demais campos em branco
+
+…apesar do **grid de listagem mostrar os dados corretos** (qtd, valor, cor, serviço).
+
+### 🔍 Diagnóstico (auditoria PROD)
+Auditoria contou registros por empresa nas 4 tabelas do relacionamento:
+| Empresa | `terc_remessas` | `terc_remessa_itens` | `terc_remessa_grade` | `terc_remessa_item_grade` |
+|---|---|---|---|---|
+| **E1** (legado Kamylla v1.0) | 193 | **0** ❌ | **0** ❌ | **0** ❌ |
+| **E2** (novo cadastro) | 1 | 1 ✅ | 1 ✅ | 1 ✅ |
+
+**Causa raiz:** dados legados importados criaram apenas o *header* (`terc_remessas` com `qtd_total`, `preco_unit`, `cor`, `cod_ref` etc.), **mas nunca persistiram os itens-filho** (`terc_remessa_itens`), nem os tamanhos da grade (`terc_remessa_grade` / `terc_remessa_item_grade`). O endpoint `GET /terc/remessas/:id` retornava corretamente `itens: []` — não havia o que renderizar.
+
+### ✅ Correções aplicadas
+
+#### 1. Migration 0035 — reconstrução de itens órfãos (idempotente + tenant-scoped)
+- `migrations/0035_repair_orphan_remessa_itens.sql` (novo)
+- Para cada remessa sem itens em qualquer empresa: cria **1 item** preservando `cod_ref`, `cor`, `qtd_total`, `preco_unit`, `valor_total`, `id_servico`, `id_cor`, `num_op` do header
+- Cria **1 grade-header** com `tamanho='UNICO'` e `qtd = qtd_total`
+- Cria **1 item_grade** vinculando item ↔ tamanho UNICO
+- Backfill defensivo de `id_empresa = 1` em itens/grade legados sem tenant
+- Novos índices `(id_empresa, id_remessa, ativo)` e `(id_empresa, id_remessa, tamanho)`
+- Todas as inserções usam `NOT EXISTS` → seguro re-executar
+- **Resultado PROD:** E1 saiu de `193/0/0/0` para `193/193/193/193`; E2 preservada intacta
+
+#### 2. Backend defensivo — síntese on-the-fly
+- `GET /api/terc/remessas/:id` agora detecta `itens.length === 0 && qtd_total > 0` e **sintetiza** 1 item virtual a partir do header com flag `_synthesized: true`
+- Fallback de grade `[{ tamanho: 'UNICO', qtd: qtd_total }]` quando `terc_remessa_grade` também está vazia
+- Garante que **futuras importações legadas** sem itens persistidos ainda abram o modal corretamente
+- Logs estruturados:
+  - `[tenant] remessa.get { id_remessa, itens_count, synthesized, grade_count, qtd_total }`
+  - `[tenant] remessa.get.synthesized_item { id_remessa, qtd_total }`
+
+#### 3. Frontend — debug + fallback robusto
+- `public/static/app.js` (ao abrir modal de edição):
+  - `console.log('[remessa.edit] payload backend:', { id_remessa, num_controle, id_empresa, qtd_total, preco_unit, itens_count, grade_count, _synthesized })` — visibilidade total do payload recebido
+  - Quando backend devolve `itens: []` mas `qtd_total > 0`: monta item a partir do header com grade reconstruída
+  - Quando `r.grade` também está vazia, força `g['UNICO'] = qtd_total` (espelha fallback do backend)
+  - `console.warn('[remessa.edit] FALLBACK FRONTEND...')` quando a síntese frontend é acionada
+- Cache busting: `v=41` → `v=42` em `app.js` + `styles.css`
+
+### 🧪 Testes funcionais (5/5 LOCAL passando)
+1. ✅ Remessa LOCAL E1 reparada (id=3 qtd=15 itens=1 grades=1)
+2. ✅ `GET /terc/remessas/3` retorna itens populados (cod_ref=E1-001, cor=Vermelho, qtd=15, preço=0.30, grade=[{M:15}])
+3. ✅ Fallback dinâmico em remessa NOVA órfã: `_synthesized: true`, grade `[{UNICO:75}]`, item completo
+4. ✅ Logs estruturados [tenant] aparecem no console PM2
+5. ✅ Isolamento multi-tenant: E5 → 404 ao tentar ler remessa da E1
+
+### 🛡️ Garantias multi-tenant preservadas
+- Migration 0035 usa `r.id_empresa` em todos os `INSERT` → cada empresa só reconstrói o seu
+- Backend mantém `requireEmpresa(c)` antes de qualquer query
+- Síntese on-the-fly **não cria registros no banco** — é puramente in-memory na resposta
+- Frontend não envia/altera `id_empresa` (sempre derivado do token de sessão server-side)
+
+### 📁 Arquivos alterados
+| Arquivo | Tipo | Mudança |
+|---|---|---|
+| `migrations/0035_repair_orphan_remessa_itens.sql` | novo | Reconstrução de itens/grade/item_grade órfãos |
+| `src/routes/terceirizacao.ts` | editado | Síntese defensiva + logs em `GET /terc/remessas/:id` |
+| `public/static/app.js` | editado | Debug payload + fallback UNICO + warn |
+| `src/index.tsx` | editado | Cache bump `v=42` |
+
+### 🔢 Migrations aplicadas
+- LOCAL: `npx wrangler d1 migrations apply corepro-confeccao --local` → 9 cmds OK
+- REMOTE: `npx wrangler d1 migrations apply corepro-confeccao` → 9 cmds em 7.22 ms
+
+### 🚀 Deploy
+- Build: `npm run build` → dist/_worker.js **281.25 kB**
+- Deploy: `npx wrangler pages deploy dist --project-name corepro-confeccao`
+- URL: `https://7c1b26a8.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
+### ✅ Smoke tests PROD (6/6)
+- `/static/app.js?v=42` → **HTTP 200** (464 891 bytes)
+- `/static/styles.css?v=42` → **HTTP 200** (223 426 bytes)
+- HTML home referencia `app.js?v=42` e `styles.css?v=42` ✅
+- `GET /api/terc/remessas/1` sem auth → **401** `{"ok":false,"error":"Não autenticado.","code":"AUTH_REQUIRED"}` ✅
+- `GET /api/terc/retornos` sem auth → **401 friendly** ✅
+- Home `/` → **HTTP 200**
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

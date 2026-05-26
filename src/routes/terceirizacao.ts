@@ -1631,11 +1631,49 @@ app.get('/terc/remessas/:id', async (c) => {
     LEFT JOIN terc_servicos sv ON sv.id_servico=i.id_servico AND sv.id_empresa=i.id_empresa
     WHERE i.id_remessa=? AND i.id_empresa=? AND i.ativo=1
     ORDER BY i.ordem ASC, i.id_item ASC`).bind(id, id_empresa).all()).results as any[];
-  const itensParsed = itens.map((it: any) => {
+  let itensParsed = itens.map((it: any) => {
     let g: any[] = [];
     try { g = JSON.parse(it.grade_json || '[]'); } catch {}
     return { ...it, grade: g };
   });
+
+  // 🛡️ FALLBACK DEFENSIVO (HOTFIX 0035): se a remessa não tem itens no banco
+  // mas o header tem qtd_total>0, sintetiza 1 item virtual a partir do header.
+  // Isso garante que o modal de edição NUNCA abra zerado mesmo se a migration
+  // de reparação ainda não tiver rodado nesta empresa (ou se algum dado futuro
+  // chegar inconsistente). O item virtual recebe _synthesized:true para o
+  // frontend saber que veio do fallback e pode persistir corretamente no PUT.
+  let synthesized = false;
+  if (itensParsed.length === 0 && Number(rem.qtd_total) > 0) {
+    synthesized = true;
+    const gradeHeader = (grade && grade.length > 0)
+      ? grade.map((g: any) => ({ tamanho: g.tamanho, qtd: Number(g.qtd) || 0 }))
+      : [{ tamanho: 'UNICO', qtd: Number(rem.qtd_total) || 0 }];
+    itensParsed = [{
+      id_item: null, // null sinaliza para o PUT que precisa INSERT
+      id_remessa: rem.id_remessa,
+      id_produto: null,
+      cod_ref: rem.cod_ref,
+      desc_ref: rem.desc_ref,
+      id_servico: rem.id_servico,
+      desc_servico: (rem as any).desc_servico,
+      cor: rem.cor,
+      id_cor: rem.id_cor,
+      grade_num: rem.grade || 1,
+      qtd_total: rem.qtd_total,
+      preco_unit: rem.preco_unit,
+      valor_total: rem.valor_total,
+      tempo_peca: rem.tempo_peca,
+      num_op: rem.num_op,
+      id_grade_tamanho: null,
+      observacao: '[Item sintetizado a partir do header — legado sem itens persistidos]',
+      ordem: 0,
+      ativo: 1,
+      grade: gradeHeader,
+      _synthesized: true,
+    }];
+    logTenant(c, 'remessa.get.synthesized_item', { id_remessa: id, qtd_total: rem.qtd_total });
+  }
 
   const retornos = (await c.env.DB.prepare(`
     SELECT r.*,
@@ -1656,10 +1694,26 @@ app.get('/terc/remessas/:id', async (c) => {
     valor: a.valor + (Number(x.valor_pago) || 0),
   }), { boa: 0, refugo: 0, conserto: 0, total: 0, valor: 0 });
 
+  // 🛡️ Se a grade-header tb estiver vazia mas temos qtd_total>0, devolvemos
+  // uma grade virtual {UNICO: qtd_total} para o frontend desenhar corretamente.
+  let gradeOut = grade;
+  if ((!gradeOut || gradeOut.length === 0) && Number(rem.qtd_total) > 0) {
+    gradeOut = [{ tamanho: 'UNICO', qtd: Number(rem.qtd_total) || 0 }];
+  }
+
+  logTenant(c, 'remessa.get', {
+    id_remessa: id,
+    itens_count: itensParsed.length,
+    synthesized,
+    grade_count: gradeOut.length,
+    qtd_total: rem.qtd_total,
+  });
+
   return c.json(ok({
-    ...rem, grade, itens: itensParsed,
+    ...rem, grade: gradeOut, itens: itensParsed,
     retornos: retornosParsed, totais_retorno: totRet,
-    saldo: (Number(rem.qtd_total) || 0) - totRet.total
+    saldo: (Number(rem.qtd_total) || 0) - totRet.total,
+    _synthesized: synthesized, // flag global no payload — frontend pode usar para badge "dados reconstruídos"
   }));
 });
 

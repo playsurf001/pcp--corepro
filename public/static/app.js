@@ -3374,15 +3374,40 @@ async function TERC_openRemModal(id, onSave) {
   }
 
   let itens = [];
+  // 🔍 DEBUG estruturado para diagnóstico multi-tenant
+  if (edit) {
+    console.log('[remessa.edit] payload backend:', {
+      id_remessa: r.id_remessa,
+      num_controle: r.num_controle,
+      id_empresa: r.id_empresa,
+      qtd_total: r.qtd_total,
+      preco_unit: r.preco_unit,
+      valor_total: r.valor_total,
+      itens_count: Array.isArray(r.itens) ? r.itens.length : 0,
+      grade_count: Array.isArray(r.grade) ? r.grade.length : 0,
+      _synthesized: r._synthesized || false,
+    });
+  }
+
   if (edit && Array.isArray(r.itens) && r.itens.length > 0) {
+    // ✅ Caminho normal — backend devolveu itens (incluindo casos sintetizados)
     itens = r.itens.map(it => newItem(it));
   } else if (edit) {
-    // Remessa antiga sem itens — converte cabeçalho em 1 item
+    // 🛡️ Fallback final no frontend: backend não devolveu itens nem sintetizou
+    // (edge case extremo — proteção em profundidade). Hidrata 1 item a partir
+    // do header com a grade do header OU grade virtual {UNICO: qtd_total}.
     const g = {};
-    (r.grade || []).forEach(x => { g[x.tamanho] = Number(x.qtd || 0); });
+    if (Array.isArray(r.grade) && r.grade.length > 0) {
+      r.grade.forEach(x => { g[x.tamanho] = Number(x.qtd || 0); });
+    } else if (Number(r.qtd_total) > 0) {
+      // Grade vazia mas há quantidade — usa tamanho ÚNICO como fallback
+      g['UNICO'] = Number(r.qtd_total) || 0;
+    }
+    console.warn('[remessa.edit] FALLBACK FRONTEND: backend devolveu itens vazios — sintetizando do header. qtd_total=', r.qtd_total, ' grade reconstruída=', g);
     itens.push(newItem({
       cod_ref: r.cod_ref, desc_ref: r.desc_ref, id_servico: r.id_servico,
-      cor: r.cor, preco_unit: r.preco_unit, tempo_peca: r.tempo_peca, grade: g,
+      cor: r.cor, id_cor: r.id_cor, num_op: r.num_op,
+      preco_unit: r.preco_unit, tempo_peca: r.tempo_peca, grade: g,
     }));
   } else {
     itens.push(newItem());
