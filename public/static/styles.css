@@ -394,6 +394,13 @@ label {
   opacity: 0.55;
   margin-bottom: 2px;
   color: #94A3B8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nav-group-label-icon {
+  font-size: 11px;
+  opacity: 0.8;
 }
 
 /* Item do menu */
@@ -447,7 +454,9 @@ label {
 }
 
 /* ============================================================
- * GRUPO RECOLHÍVEL — Sistema (accordion no sidebar)
+ * GRUPO RECOLHÍVEL (accordion) — Cadastros / Configurações
+ * v36 (2026-05-26): refatorado para corrigir bug de vazamento
+ * visual quando recolhido (overflow hidden no container externo).
  * ============================================================ */
 .nav-section-collapsible {
   margin-top: 12px;
@@ -460,7 +469,7 @@ label {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 10px 12px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -470,16 +479,24 @@ label {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+  user-select: none;
 }
 .nav-group-toggle:hover {
-  background: rgba(99, 102, 241, 0.06);
+  background: rgba(99, 102, 241, 0.08);
   color: #CBD5E1;
+  border-color: rgba(99, 102, 241, 0.15);
+}
+.nav-group-toggle:active { transform: scale(0.98); }
+.nav-group-toggle:focus-visible {
+  outline: 2px solid #6366F1;
+  outline-offset: 2px;
 }
 .nav-group-toggle .nav-group-icon {
   width: 16px;
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: 13px;
+  opacity: 0.75;
+  transition: opacity 0.2s ease, color 0.2s ease;
 }
 .nav-group-toggle .nav-group-label-inline {
   flex: 1;
@@ -487,63 +504,107 @@ label {
 }
 .nav-group-toggle .nav-group-caret {
   font-size: 10px;
-  opacity: 0.6;
-  transition: transform 0.25s ease;
+  opacity: 0.55;
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .nav-section-collapsible.is-open .nav-group-toggle {
   color: #E0E7FF;
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(99, 102, 241, 0.10);
+  border-color: rgba(99, 102, 241, 0.20);
+}
+.nav-section-collapsible.is-open .nav-group-toggle .nav-group-icon {
+  color: #A5B4FC;
+  opacity: 1;
 }
 .nav-section-collapsible.is-open .nav-group-caret {
   transform: rotate(180deg);
   opacity: 1;
+  color: #A5B4FC;
 }
-/* Accordion robusto via grid-template-rows + wrapper inner.
- * Truque "0fr → 1fr" para animar altura SEM JS, mas exige UM único filho
- * direto (`.nav-group-inner`) com overflow hidden — caso contrário cada
- * .nav-item ficaria com altura própria e o collapse não funcionaria. */
+
+/* ============================================================
+ * ACCORDION ROBUSTO (corrige bug de vazamento)
+ * ------------------------------------------------------------
+ * Estratégia "belt + suspenders":
+ *   1) grid-template-rows: 0fr → 1fr (animação suave de altura)
+ *   2) overflow: hidden no container externo (.nav-group-items)
+ *      — impede QUALQUER renderização fora do container
+ *   3) visibility: hidden quando fechado (acessibilidade + perf)
+ *   4) max-height: 0 fallback para browsers antigos
+ * Caret rotaciona 180° quando aberto.
+ * ============================================================ */
 .nav-group-items {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.28s ease, opacity 0.2s ease, margin 0.2s ease;
+  /* overflow hidden no container EXTERNO — primeira barreira */
+  overflow: hidden;
+  max-height: 0;
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
+  transition:
+    grid-template-rows 0.30s cubic-bezier(0.4, 0, 0.2, 1),
+    max-height 0.30s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.22s ease 0.05s,
+    visibility 0s linear 0.30s;
 }
 .nav-section-collapsible.is-open .nav-group-items {
   grid-template-rows: 1fr;
+  /* max-height suficiente para qualquer grupo realista (até ~12 items) */
+  max-height: 720px;
+  visibility: visible;
   opacity: 1;
   pointer-events: auto;
+  transition:
+    grid-template-rows 0.30s cubic-bezier(0.4, 0, 0.2, 1),
+    max-height 0.30s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.20s ease,
+    visibility 0s linear 0s;
 }
 .nav-group-inner {
+  /* overflow hidden no container INTERNO — segunda barreira */
   overflow: hidden;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding-top: 4px;
+  padding: 4px 0 6px;
 }
 .nav-section-collapsible .nav-item {
   margin-left: 16px;
+  margin-right: 10px;
   font-size: 13px;
-  padding-left: 12px;
+  padding-left: 14px;
+  /* animação de entrada suave dos items quando o grupo abre */
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
+.nav-section-collapsible.is-open .nav-item {
+  opacity: 1;
+  transform: translateX(0);
+  /* delay escalonado para efeito "cascata" suave */
+  transition-delay: 0.06s;
+}
+
 /* Pílula com contagem de itens dentro do grupo (estilo SaaS premium) */
 .nav-group-toggle .nav-group-count {
   background: rgba(99, 102, 241, 0.18);
   color: #A5B4FC;
-  font-size: 9px;
+  font-size: 9.5px;
   font-weight: 800;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
   letter-spacing: 0.03em;
   margin-right: 4px;
-  min-width: 18px;
+  min-width: 20px;
   text-align: center;
-  transition: background 0.2s ease, color 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 .nav-section-collapsible.is-open .nav-group-toggle .nav-group-count {
-  background: rgba(99, 102, 241, 0.30);
+  background: rgba(99, 102, 241, 0.32);
   color: #C7D2FE;
+  transform: scale(1.05);
 }
 
 /* Bloqueia overrides do data-theme */
@@ -4299,6 +4360,198 @@ textarea.field-invalid {
   .gd-modal-body { padding: 16px; max-height: 60vh; }
   .gd-modal-footer, .gd-confirm-actions { padding: 12px 16px; flex-wrap: wrap; }
   .gd-presets { font-size: 11px; }
+}
+
+/* ============================================================
+ * MÓDULO SERVIÇOS — Tabela profissional + Modal (2026-05-26)
+ * ============================================================ */
+
+/* Tabela de serviços */
+.srv-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.srv-table thead th {
+  background: var(--surface-2, #f8fafc);
+  color: var(--text-2, #475569);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-2, rgba(15, 23, 42, 0.08));
+  white-space: nowrap;
+}
+.srv-table tbody td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-2, rgba(15, 23, 42, 0.05));
+  vertical-align: middle;
+}
+.srv-table tbody tr {
+  transition: background-color 0.15s ease;
+}
+.srv-table tbody tr:hover {
+  background: rgba(99, 102, 241, 0.04);
+}
+.srv-table tbody tr.is-inactive {
+  opacity: 0.55;
+}
+.srv-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Bolinha colorida do serviço */
+.srv-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--surface-1, #ffffff);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.12);
+  vertical-align: middle;
+}
+
+/* Chip de categoria */
+.srv-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Pílula de vínculos */
+.srv-vinc-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 3px 10px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4F46E5;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  cursor: help;
+}
+
+/* Status pill */
+.srv-status-on,
+.srv-status-off {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.srv-status-on {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+.srv-status-off {
+  background: rgba(100, 116, 139, 0.12);
+  color: #64748B;
+}
+.srv-status-on i,
+.srv-status-off i {
+  font-size: 9px;
+}
+
+/* Botões de ação na linha */
+.srv-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+/* Paleta de cores sugeridas no modal */
+.srv-paleta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.srv-paleta-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  padding: 0;
+}
+.srv-paleta-dot:hover {
+  transform: scale(1.12);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+}
+.srv-paleta-dot:active {
+  transform: scale(0.95);
+}
+
+/* Preview do modal */
+.srv-preview {
+  border: 1px dashed var(--border-2, rgba(15, 23, 42, 0.12));
+  border-radius: 10px;
+  padding: 16px;
+  background: var(--surface-2, #f8fafc);
+}
+.srv-preview-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.10);
+  font-weight: 600;
+  min-width: 240px;
+}
+.srv-preview-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.srv-preview-text { line-height: 1.25; }
+.srv-preview-nome { font-size: 14px; font-weight: 700; }
+.srv-preview-cat {
+  font-size: 11px;
+  opacity: 0.85;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 2px;
+}
+
+/* Dark theme overrides */
+[data-theme="dark"] .srv-table thead th {
+  background: var(--surface-2-dark, #1e293b);
+  color: var(--text-2-dark, #cbd5e1);
+}
+[data-theme="dark"] .srv-table tbody td {
+  border-bottom-color: rgba(148, 163, 184, 0.10);
+  color: #e2e8f0;
+}
+[data-theme="dark"] .srv-table tbody tr:hover {
+  background: rgba(99, 102, 241, 0.10);
+}
+[data-theme="dark"] .srv-preview {
+  background: rgba(15, 23, 42, 0.5);
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+/* line-clamp helper (caso não tenha já) */
+.line-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ============================================================

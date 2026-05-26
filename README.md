@@ -687,6 +687,117 @@ O CorePro evoluiu para uma plataforma SaaS multi-tenant com cobrança recorrente
 
 > ⚠️ **Pré-requisito de conta MP:** O usuário Mercado Pago **recebedor** precisa ter uma **chave PIX cadastrada** (CPF, CNPJ, email ou telefone) no painel MP. Sem isso, MP retorna erro 13253 — "Collector user without key enabled for QR render". O CorePro detecta esse erro e mostra mensagem clara ao usuário.
 
+## 🧭 Sprint Sidebar Reorganization + Módulo de Serviços (✅ CONCLUÍDO — deploy 2026-05-26)
+
+Reestruturação completa da navegação lateral e entrega do módulo de **Serviços** como cadastro central da operação de terceirização.
+
+### 🧭 Sidebar reorganizada — 4 grupos lógicos
+A antiga aba **"Sistema"** foi substituída por **dois grupos colapsáveis** (`Cadastros` e `Configurações`), e itens foram reagrupados conforme intenção de uso. Estrutura final:
+
+| Grupo | Itens | Ícone do grupo |
+|---|---|---|
+| **TERCEIRIZAÇÃO** (fixo) | Dashboard, Remessas, Retornos | `fa-truck` |
+| **ANÁLISES** (fixo) | Relatórios | `fa-chart-line` |
+| **CADASTROS** (colapsável) | **Serviços** (novo) · Produtos · Preços/Coleções · Grades de Tamanho · Terceirizados · Usuários | `fa-folder-tree` |
+| **CONFIGURAÇÕES** (colapsável) | Importação · Minha Empresa · Assinatura & Plano · Configurações | `fa-gear` |
+
+- Estado **aberto/fechado por grupo** persistido em `localStorage` (`nav-grp-open:<grupo>`)
+- Pill de contagem (`.nav-group-count`) animada ao lado do nome do grupo
+- "Cores" removido do menu (continua acessível via URL `#cores`)
+- "Terceirizados" movido de Terceirização → Cadastros
+
+### 🐛 Bug do submenu corrigido (vazamento visual)
+A versão anterior usava apenas `grid-template-rows: 0fr → 1fr` + `opacity`, o que deixava o submenu **visível fora da área** em alguns navegadores ao colapsar. A nova solução em camadas defensivas resolve em 100% dos casos:
+
+```css
+.nav-group-items {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;        /* 1ª barreira — corta filhos */
+  max-height: 0;           /* 2ª barreira — fallback */
+  visibility: hidden;      /* 3ª barreira — remove do fluxo */
+  opacity: 0;
+  transition: grid-template-rows 0.30s cubic-bezier(0.4,0,0.2,1),
+              max-height 0.30s cubic-bezier(0.4,0,0.2,1),
+              opacity 0.22s ease 0.05s,
+              visibility 0s linear 0.30s;
+}
+.nav-section-collapsible.is-open .nav-group-items {
+  grid-template-rows: 1fr;
+  max-height: 720px;
+  visibility: visible;
+  opacity: 1;
+  transition: ..., visibility 0s linear 0s;
+}
+.nav-group-inner { overflow: hidden; }  /* 4ª barreira no wrapper */
+```
+
+### 🛠️ Módulo Serviços — Cadastro completo (`#terc_servicos`)
+
+**Migration `0029_servicos_full.sql`** (aplicada LOCAL + REMOTE):
+- Adiciona 7 colunas a `terc_servicos`: `descricao`, `categoria`, `cor` (hex `#RRGGBB`), `preco_padrao` (REAL), `tempo_padrao` (INTEGER min), `observacoes`, `dt_alteracao`
+- **Backfill heurístico** atribui categoria + cor por padrão do nome:
+  - "estamp*" → **Estamparia** / `#8B5CF6` (violeta)
+  - "embala*" → **Acabamento** / `#2563EB` (azul)
+  - "apara*", "corte" → **Acabamento** / `#06B6D4` (ciano)
+  - "costura", "bordado" → **Confecção** / `#F59E0B` (âmbar)
+  - demais → **Outros** / `#64748B` (slate)
+- Cria `idx_servicos_categoria` e `idx_servicos_ativo`
+
+**Backend — 9 endpoints REST (`src/routes/terceirizacao.ts`):**
+
+| Método | Rota | Função |
+|---|---|---|
+| `GET` | `/api/terc/servicos` | Lista com filtros `?q=`, `?ativo=`, `?categoria=` + contagens de vínculos (`qtd_precos`, `qtd_produtos`, `qtd_remessas`) |
+| `GET` | `/api/terc/servicos/categorias` | Categorias distintas com contagem |
+| `GET` | `/api/terc/servicos/:id` | Detalhe + objeto `vinculos: {precos, produtos, remessa_itens, total}` |
+| `POST` | `/api/terc/servicos` | Cria — anti-duplicidade case-insensitive (409 se existe) |
+| `PUT` | `/api/terc/servicos/:id` | Atualiza — anti-duplicidade vs outras linhas |
+| `PATCH` | `/api/terc/servicos/:id/toggle` | Flip `ativo` |
+| `POST` | `/api/terc/servicos/:id/duplicate` | Duplica auto-renomeando `(cópia)`, `(cópia 2)` … até 50 |
+| `DELETE` | `/api/terc/servicos/:id` | Valida vínculos. **409 + `code:'HAS_LINKS'`** se houver. `?force=1` → `UPDATE ativo=0` (preserva histórico) |
+
+**Helpers internos:**
+- `corSegura(s)` valida hex `#RGB` ou `#RRGGBB`
+- `contarVinculosServico(db, id_empresa, id_servico)` consulta `terc_precos`, `terc_produtos`, `terc_remessa_itens`
+
+**Frontend — `ROUTES.terc_servicos` (~460 linhas em `app.js`):**
+- Tabela com colunas: status (toggle), cor + nome + descrição, categoria, preço padrão, tempo padrão, vínculos (3 pills clicáveis), ações
+- **Busca debounced** (280ms) em nome + descrição + categoria
+- **Filtros**: ativo/inativo, categoria (datalist autocomplete)
+- **Ordenação por coluna** (nome, categoria, preço, vínculos)
+- **Modal completo** com:
+  - Input nome (obrigatório), categoria (datalist com sugestões), descrição
+  - **Paleta de 15 cores** clicável + color picker nativo
+  - **Preview ao vivo** do chip com contraste YIQ automático
+  - Preço padrão (formatado R$) + tempo padrão (min)
+  - Observações (textarea)
+- **Ações por linha**: editar, duplicar, ativar/desativar, excluir (com confirmação dupla se houver vínculos)
+- Cache `window.TERC.servicos` invalidado após mutações — **Remessas/Retornos/Relatórios usam serviços ativos automaticamente**
+
+**Smoke tests executados (13/13 LOCAL ✅):**
+1. `GET /terc/servicos` lista
+2. `GET /terc/servicos/categorias`
+3. `POST` cria novo
+4. `GET /:id` detalhe com vínculos
+5. `PUT /:id` atualiza
+6. `POST` anti-dup → **409**
+7. `PATCH /:id/toggle` flip ativo
+8. `POST /:id/duplicate` → "(cópia)"
+9. `DELETE` sem vínculo → **200**
+10. `DELETE` com vínculo → **409 + HAS_LINKS**
+11. `DELETE ?force=1` → desativa em vez de excluir
+12. Estado final verificado
+13. Cleanup OK
+
+**PROD smoke tests ✅:**
+- Assets `app.js?v=37` + `styles.css?v=37` servidos com HTTP/200
+- HTML referencia v=37 corretamente
+- `/api/health` OK
+- Endpoints com auth retornam estrutura esperada
+
+**Deploy:** `https://70c2d9c3.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

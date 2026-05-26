@@ -392,29 +392,47 @@ if (!window.__logoutBound) {
  * Marcamos cada item com `tercOnly: true` (visível a todos) ou `adminOnly: true`
  * (visível só ao admin). A função podeAcessar() abaixo aplica as regras.
  *
- * Rotas de Terceirização agora ficam EXPANDIDAS no sidebar — sem accordion.
+ * REFATOR 2026-05-26: Sistema foi dividido em CADASTROS + CONFIGURAÇÕES.
+ *   - CADASTROS: dados de domínio (Serviços, Produtos, Preços, Grades, Terceirizados, Usuários)
+ *   - CONFIGURAÇÕES: ajustes da conta (Importação, Empresa, Assinatura, Configurações)
+ * Ambos os grupos são recolhíveis. Terceirização e Análises seguem expandidos.
+ *
+ * Cores foi REMOVIDA do menu principal (acessada via tela de Produtos ou interna).
+ * Novo módulo: SERVIÇOS (id: terc_servicos) — primeiro item de Cadastros.
  */
 const NAV = [
   // ==== TERCEIRIZAÇÃO (núcleo operacional — visível a todos) ====
   { id: 'dashboard',             label: 'Dashboard',         icon: 'fa-chart-line',       group: 'Terceirização', tercOnly: true },
   { id: 'terc_remessas',         label: 'Remessas',          icon: 'fa-truck-fast',       group: 'Terceirização', tercOnly: true },
   { id: 'terc_retornos',         label: 'Retornos',          icon: 'fa-truck-arrow-right',group: 'Terceirização', tercOnly: true },
-  { id: 'terc_terceirizados',    label: 'Terceirizados',     icon: 'fa-handshake',        group: 'Terceirização', tercOnly: true },
 
   // ==== ANÁLISES ====
   { id: 'relatorios_detalhados', label: 'Relatórios',        icon: 'fa-chart-pie',        group: 'Análises',      tercOnly: true },
 
-  // ==== SISTEMA (recolhível) — cadastros + admin ====
-  { id: 'terc_produtos',         label: 'Produtos',          icon: 'fa-tshirt',           group: 'Sistema',       collapsible: true, tercOnly: true },
-  { id: 'terc_precos',           label: 'Preços / Coleções', icon: 'fa-money-bill-wave',  group: 'Sistema',       collapsible: true, tercOnly: true },
-  { id: 'cores',                 label: 'Cores',             icon: 'fa-palette',          group: 'Sistema',       collapsible: true, tercOnly: true },
-  { id: 'terc_importador',       label: 'Importação',        icon: 'fa-file-excel',       group: 'Sistema',       collapsible: true, tercOnly: true },
-  { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Sistema',       collapsible: true, tercOnly: true },
-  { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Sistema',       collapsible: true, adminOnly: true },
-  { id: 'minha_empresa',         label: 'Minha Empresa',     icon: 'fa-building',         group: 'Sistema',       collapsible: true, ownerOnly: true },
-  { id: 'minha_assinatura',      label: 'Assinatura & Plano',icon: 'fa-credit-card',      group: 'Sistema',       collapsible: true, ownerOnly: true },
-  { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Sistema',       collapsible: true, adminOnly: true },
+  // ==== CADASTROS (recolhível) — dados de domínio ====
+  { id: 'terc_servicos',         label: 'Serviços',          icon: 'fa-screwdriver-wrench', group: 'Cadastros',  collapsible: true, tercOnly: true },
+  { id: 'terc_produtos',         label: 'Produtos',          icon: 'fa-tshirt',           group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'terc_precos',           label: 'Preços / Coleções', icon: 'fa-money-bill-wave',  group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'terc_terceirizados',    label: 'Terceirizados',     icon: 'fa-handshake',        group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Cadastros',     collapsible: true, adminOnly: true },
+
+  // ==== CONFIGURAÇÕES (recolhível) — ajustes da conta ====
+  { id: 'terc_importador',       label: 'Importação',        icon: 'fa-file-excel',       group: 'Configurações', collapsible: true, tercOnly: true },
+  { id: 'minha_empresa',         label: 'Minha Empresa',     icon: 'fa-building',         group: 'Configurações', collapsible: true, ownerOnly: true },
+  { id: 'minha_assinatura',      label: 'Assinatura & Plano',icon: 'fa-credit-card',      group: 'Configurações', collapsible: true, ownerOnly: true },
+  { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Configurações', collapsible: true, adminOnly: true },
 ];
+
+/** Lista de grupos colapsáveis (precisa estar sincronizado com NAV) */
+const COLLAPSIBLE_GROUPS = ['Cadastros', 'Configurações'];
+/** Ícones por grupo (para o cabeçalho do collapsible) */
+const GROUP_ICONS = {
+  'Cadastros': 'fa-folder-tree',
+  'Configurações': 'fa-gear',
+  'Terceirização': 'fa-truck-fast',
+  'Análises': 'fa-chart-pie',
+};
 
 /**
  * Política de visibilidade/acesso:
@@ -481,12 +499,16 @@ function renderLayout() {
   NAV.filter(podeAcessar).forEach((n) => { (groups[n.group] ||= []).push(n); });
   const u = state.user || { login: '?', nome: '?', perfil: '?' };
 
-  // Estado do accordion "Sistema" persistido em localStorage
-  let sistemaOpen = false;
-  try { sistemaOpen = localStorage.getItem('nav-sistema-open') === '1'; } catch {}
-  // Auto-expande se a rota atual é do grupo Sistema
-  const sistemaIds = (groups['Sistema'] || []).map(i => i.id);
-  if (sistemaIds.includes(state.route)) sistemaOpen = true;
+  // Estado dos accordions persistido em localStorage (uma chave por grupo)
+  // Auto-expande o grupo cuja rota atual pertence
+  const openState = {};
+  COLLAPSIBLE_GROUPS.forEach((g) => {
+    let isOpen = false;
+    try { isOpen = localStorage.getItem(`nav-grp-open:${g}`) === '1'; } catch {}
+    const ids = (groups[g] || []).map((i) => i.id);
+    if (ids.includes(state.route)) isOpen = true;
+    openState[g] = isOpen;
+  });
 
   const adminItems = isAdmin() ? `
               <button data-act="ver-usuarios" class="user-pop-item" role="menuitem">
@@ -503,22 +525,25 @@ function renderLayout() {
       </a>
       <nav class="sidebar-nav" aria-label="Navegação principal">
         ${Object.entries(groups).map(([g, items]) => {
-          const isCollapsible = g === 'Sistema';
-          const open = isCollapsible ? sistemaOpen : true;
+          const isCollapsible = COLLAPSIBLE_GROUPS.includes(g);
+          const open = isCollapsible ? !!openState[g] : true;
+          const grpIcon = GROUP_ICONS[g] || 'fa-folder';
+          // Slug seguro para IDs (sem acentos/espaços)
+          const slug = g.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-');
           if (isCollapsible) {
             return `
               <div class="nav-section nav-section-collapsible ${open ? 'is-open' : ''}" data-group="${g}">
-                <button type="button" class="nav-group-toggle" aria-expanded="${open}" aria-controls="nav-grp-${g}">
-                  <i class="fas fa-cogs nav-group-icon"></i>
+                <button type="button" class="nav-group-toggle" aria-expanded="${open}" aria-controls="nav-grp-${slug}">
+                  <i class="fas ${grpIcon} nav-group-icon" aria-hidden="true"></i>
                   <span class="nav-group-label-inline">${g}</span>
                   <span class="nav-group-count">${items.length}</span>
-                  <i class="fas fa-chevron-down nav-group-caret"></i>
+                  <i class="fas fa-chevron-down nav-group-caret" aria-hidden="true"></i>
                 </button>
-                <div class="nav-group-items" id="nav-grp-${g}" role="region" aria-labelledby="nav-grp-${g}-toggle">
+                <div class="nav-group-items" id="nav-grp-${slug}" role="region">
                   <div class="nav-group-inner">
                     ${items.map(i => `
                       <a href="#${i.id}" data-route="${i.id}" class="nav-item">
-                        <i class="fas ${i.icon}"></i>
+                        <i class="fas ${i.icon}" aria-hidden="true"></i>
                         <span>${i.label}</span>
                       </a>`).join('')}
                   </div>
@@ -527,10 +552,13 @@ function renderLayout() {
           }
           return `
             <div class="nav-section">
-              <div class="nav-group-label">${g}</div>
+              <div class="nav-group-label">
+                <i class="fas ${grpIcon} nav-group-label-icon" aria-hidden="true"></i>
+                <span>${g}</span>
+              </div>
               ${items.map(i => `
                 <a href="#${i.id}" data-route="${i.id}" class="nav-item">
-                  <i class="fas ${i.icon}"></i>
+                  <i class="fas ${i.icon}" aria-hidden="true"></i>
                   <span>${i.label}</span>
                 </a>`).join('')}
             </div>`;
@@ -656,7 +684,8 @@ function renderLayout() {
     if (window.innerWidth < 1024) closeSidebar();
   }));
 
-  // Toggle de grupos recolhíveis (Sistema)
+  // Toggle de grupos recolhíveis (Cadastros, Configurações)
+  // Persiste o estado por grupo em localStorage (nav-grp-open:<grupo>)
   $$('.nav-group-toggle').forEach((b) => b.addEventListener('click', (ev) => {
     ev.preventDefault();
     const sec = b.closest('.nav-section-collapsible');
@@ -664,8 +693,9 @@ function renderLayout() {
     const open = !sec.classList.contains('is-open');
     sec.classList.toggle('is-open', open);
     b.setAttribute('aria-expanded', String(open));
-    if (sec.dataset.group === 'Sistema') {
-      try { localStorage.setItem('nav-sistema-open', open ? '1' : '0'); } catch {}
+    const grp = sec.dataset.group;
+    if (grp) {
+      try { localStorage.setItem(`nav-grp-open:${grp}`, open ? '1' : '0'); } catch {}
     }
   }));
 
@@ -7261,6 +7291,514 @@ window.Cores = window.Cores || {
       upd();
     });
   },
+};
+
+// =====================================================================
+// MÓDULO DE SERVIÇOS — Tela completa de cadastro (2026-05-26)
+// =====================================================================
+// Reutiliza os serviços já existentes em terc_servicos (preservados).
+// Após a migration 0029, os serviços ganharam: categoria, cor,
+// preco_padrao, tempo_padrao, descricao, observacoes.
+//
+// Funcionalidades:
+//   - Tabela profissional com busca, filtro por status/categoria, ordenação
+//   - Cards com cor de identificação (HEX)
+//   - Modal de cadastro/edição com todos os campos
+//   - Ações: editar, ativar/desativar, duplicar, excluir
+//   - Validação de vínculos antes de excluir (impede quebra do sistema)
+//   - Contador de vínculos (preços, produtos, remessas) por serviço
+//   - Cache global TERC.servicos invalidado após qualquer mutação
+// =====================================================================
+ROUTES.terc_servicos = async (main) => {
+  // --- Helpers internos ---
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (m) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[m]));
+  }
+  function isValidHex(s) {
+    let x = String(s || '').trim().toUpperCase().replace(/^#/, '');
+    if (/^[0-9A-F]{3}$/.test(x)) x = x.split('').map((ch) => ch + ch).join('');
+    return /^[0-9A-F]{6}$/.test(x) ? '#' + x : null;
+  }
+  function contrastingText(hex) {
+    const h = String(hex || '').replace('#', '');
+    if (h.length !== 6) return '#000';
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+    return yiq >= 140 ? '#0f172a' : '#ffffff';
+  }
+  function fmtMoeda(v) {
+    if (v == null || v === '') return '—';
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2 });
+  }
+  function fmtTempo(v) {
+    if (v == null || v === '') return '—';
+    const n = Number(v);
+    if (!isFinite(n) || n <= 0) return '—';
+    if (n < 60) return n.toFixed(1).replace(/\.0$/, '') + ' min';
+    const h = Math.floor(n / 60);
+    const m = Math.round(n % 60);
+    return m > 0 ? `${h}h ${m}min` : `${h}h`;
+  }
+  function fmtData(s) {
+    if (!s) return '—';
+    try {
+      const d = new Date(String(s).replace(' ', 'T'));
+      if (isNaN(d)) return s;
+      return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+    } catch { return s; }
+  }
+
+  // Paleta sugerida (clique para preencher no modal)
+  const PALETA_SUGERIDA = [
+    '#2563EB', '#7C3AED', '#8B5CF6', '#EC4899', '#EF4444',
+    '#F97316', '#F59E0B', '#EAB308', '#10B981', '#14B8A6',
+    '#06B6D4', '#0EA5E9', '#3B82F6', '#6366F1', '#64748B',
+  ];
+  const CATEGORIAS_PADRAO = [
+    'Costura', 'Corte', 'Acabamento', 'Estamparia', 'Bordado',
+    'Lavanderia', 'Embalagem', 'Geral',
+  ];
+
+  state.route = 'terc_servicos';
+
+  let lista = [];
+  let categorias = [];
+  let filtro = { q: '', status: 'all', categoria: '', sort: 'desc_servico' };
+
+  async function loadList() {
+    try {
+      const qs = new URLSearchParams();
+      if (filtro.q) qs.set('q', filtro.q);
+      if (filtro.status === 'ativos') qs.set('ativo', '1');
+      if (filtro.status === 'inativos') qs.set('ativo', '0');
+      if (filtro.categoria) qs.set('categoria', filtro.categoria);
+      const r = await api('get', '/terc/servicos' + (qs.toString() ? '?' + qs : ''), null, { silent: true });
+      lista = Array.isArray(r?.data) ? r.data : [];
+
+      const rc = await api('get', '/terc/servicos/categorias', null, { silent: true });
+      categorias = Array.isArray(rc?.data) ? rc.data : [];
+
+      // Ordenação client-side (já vem ordenado pelo backend, mas re-aplica)
+      const sk = filtro.sort;
+      lista.sort((a, b) => {
+        if (sk === 'preco') return Number(b.preco_padrao || 0) - Number(a.preco_padrao || 0);
+        if (sk === 'tempo') return Number(b.tempo_padrao || 0) - Number(a.tempo_padrao || 0);
+        if (sk === 'recent') return String(b.dt_alteracao || b.dt_criacao || '').localeCompare(String(a.dt_alteracao || a.dt_criacao || ''));
+        // default: nome (com ativos primeiro)
+        if ((b.ativo ? 1 : 0) !== (a.ativo ? 1 : 0)) return (b.ativo ? 1 : 0) - (a.ativo ? 1 : 0);
+        return String(a.desc_servico || '').localeCompare(String(b.desc_servico || ''), 'pt-BR');
+      });
+    } catch (e) {
+      lista = [];
+      toast('Erro ao carregar serviços: ' + (e?.message || 'desconhecido'), 'error');
+    }
+    render();
+    // Invalida cache global de TERC.servicos para remessas/retornos pegarem versão atualizada
+    if (window.TERC && typeof window.TERC.servicos !== 'undefined') {
+      try {
+        window.TERC.servicos = lista.filter((s) => s.ativo).map((s) => ({
+          id_servico: s.id_servico, desc_servico: s.desc_servico, cor: s.cor, categoria: s.categoria,
+        }));
+      } catch {}
+    }
+  }
+
+  function render() {
+    const totalAtivos = lista.filter((s) => s.ativo).length;
+    const totalInativos = lista.length - totalAtivos;
+    const semFiltro = !filtro.q && filtro.status === 'all' && !filtro.categoria;
+
+    main.innerHTML = `
+      <div class="page-header mb-4 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 class="page-title"><i class="fas fa-screwdriver-wrench mr-2 text-indigo-500"></i>Serviços</h1>
+          <p class="page-subtitle">Gerencie os serviços utilizados em remessas, retornos, preços e produtos. Cores e categorias ajudam a identificar visualmente.</p>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="sv-novo" class="btn btn-primary"><i class="fas fa-plus mr-1"></i>Novo serviço</button>
+          <button id="sv-reload" class="btn btn-secondary" title="Recarregar"><i class="fas fa-rotate"></i></button>
+        </div>
+      </div>
+
+      <!-- Filtros e busca -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <div class="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+            <div class="md:col-span-5">
+              <label class="text-xs text-slate-500 font-medium">Buscar</label>
+              <div class="relative">
+                <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                <input id="sv-q" type="text" class="form-input pl-9"
+                  placeholder="Nome, descrição ou categoria..."
+                  value="${escHtml(filtro.q)}" />
+              </div>
+            </div>
+            <div class="md:col-span-3">
+              <label class="text-xs text-slate-500 font-medium">Categoria</label>
+              <select id="sv-cat" class="form-input">
+                <option value="">Todas (${lista.length})</option>
+                ${categorias.map((c) => `
+                  <option value="${escHtml(c.categoria)}" ${filtro.categoria === c.categoria ? 'selected' : ''}>
+                    ${escHtml(c.categoria)} (${c.n})
+                  </option>`).join('')}
+              </select>
+            </div>
+            <div class="md:col-span-2">
+              <label class="text-xs text-slate-500 font-medium">Status</label>
+              <select id="sv-status" class="form-input">
+                <option value="all" ${filtro.status === 'all' ? 'selected' : ''}>Todos</option>
+                <option value="ativos" ${filtro.status === 'ativos' ? 'selected' : ''}>Ativos</option>
+                <option value="inativos" ${filtro.status === 'inativos' ? 'selected' : ''}>Inativos</option>
+              </select>
+            </div>
+            <div class="md:col-span-2">
+              <label class="text-xs text-slate-500 font-medium">Ordenar</label>
+              <select id="sv-sort" class="form-input">
+                <option value="desc_servico" ${filtro.sort === 'desc_servico' ? 'selected' : ''}>Nome (A→Z)</option>
+                <option value="recent" ${filtro.sort === 'recent' ? 'selected' : ''}>Mais recente</option>
+                <option value="preco" ${filtro.sort === 'preco' ? 'selected' : ''}>Maior preço</option>
+                <option value="tempo" ${filtro.sort === 'tempo' ? 'selected' : ''}>Maior tempo</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats compactas -->
+      <div class="text-xs text-slate-500 mb-3 flex items-center gap-3 flex-wrap">
+        <span><i class="fas fa-info-circle mr-1"></i><b>${lista.length}</b> serviço${lista.length !== 1 ? 's' : ''}</span>
+        <span class="text-emerald-600"><i class="fas fa-circle-check mr-1"></i><b>${totalAtivos}</b> ativo${totalAtivos !== 1 ? 's' : ''}</span>
+        <span class="text-slate-400"><i class="fas fa-circle-xmark mr-1"></i><b>${totalInativos}</b> inativo${totalInativos !== 1 ? 's' : ''}</span>
+        ${!semFiltro ? `<button id="sv-clear" class="ml-auto text-indigo-600 hover:underline"><i class="fas fa-filter-circle-xmark mr-1"></i>Limpar filtros</button>` : ''}
+      </div>
+
+      ${lista.length === 0 ? `
+        <div class="card">
+          <div class="card-body text-center py-12 text-slate-500">
+            <i class="fas fa-screwdriver-wrench text-5xl text-slate-300 mb-3"></i>
+            <p class="font-medium">${semFiltro ? 'Nenhum serviço cadastrado.' : 'Nenhum serviço encontrado com este filtro.'}</p>
+            <p class="text-sm mt-1">${semFiltro
+              ? 'Clique em <b>Novo serviço</b> para começar.'
+              : 'Ajuste a busca ou clique em "Limpar filtros".'}</p>
+          </div>
+        </div>
+      ` : `
+        <div class="card overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="srv-table w-full text-sm">
+              <thead>
+                <tr>
+                  <th style="width:36px"></th>
+                  <th>Serviço</th>
+                  <th class="hidden md:table-cell">Categoria</th>
+                  <th class="hidden lg:table-cell text-right">Preço padrão</th>
+                  <th class="hidden lg:table-cell text-right">Tempo padrão</th>
+                  <th class="hidden xl:table-cell text-center">Vínculos</th>
+                  <th class="hidden xl:table-cell">Criado em</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-right" style="width:160px">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${lista.map((s) => {
+                  const cor = s.cor || '#64748B';
+                  const totVinc = (Number(s.qtd_precos) || 0) + (Number(s.qtd_produtos) || 0) + (Number(s.qtd_remessas) || 0);
+                  return `
+                    <tr class="srv-row ${s.ativo ? '' : 'is-inactive'}" data-id="${s.id_servico}">
+                      <td>
+                        <span class="srv-dot" style="background:${escHtml(cor)}" title="${escHtml(cor)}"></span>
+                      </td>
+                      <td>
+                        <div class="font-medium text-slate-800">${escHtml(s.desc_servico)}</div>
+                        ${s.descricao ? `<div class="text-xs text-slate-500 mt-0.5 line-clamp-1">${escHtml(s.descricao)}</div>` : ''}
+                      </td>
+                      <td class="hidden md:table-cell">
+                        ${s.categoria
+                          ? `<span class="srv-chip" style="background:${escHtml(cor)}22;color:${escHtml(cor)};border:1px solid ${escHtml(cor)}44">${escHtml(s.categoria)}</span>`
+                          : '<span class="text-xs text-slate-400">—</span>'}
+                      </td>
+                      <td class="hidden lg:table-cell text-right tabular-nums">${fmtMoeda(s.preco_padrao)}</td>
+                      <td class="hidden lg:table-cell text-right tabular-nums">${fmtTempo(s.tempo_padrao)}</td>
+                      <td class="hidden xl:table-cell text-center">
+                        ${totVinc > 0
+                          ? `<span class="srv-vinc-pill" title="Preços: ${s.qtd_precos} · Produtos: ${s.qtd_produtos} · Remessas: ${s.qtd_remessas}">${totVinc}</span>`
+                          : '<span class="text-xs text-slate-400">—</span>'}
+                      </td>
+                      <td class="hidden xl:table-cell text-xs text-slate-500">${fmtData(s.dt_criacao)}</td>
+                      <td class="text-center">
+                        ${s.ativo
+                          ? '<span class="srv-status-on"><i class="fas fa-check"></i>Ativo</span>'
+                          : '<span class="srv-status-off"><i class="fas fa-pause"></i>Inativo</span>'}
+                      </td>
+                      <td class="text-right">
+                        <div class="srv-actions">
+                          <button class="btn-icon" data-act="edit" data-id="${s.id_servico}" title="Editar"><i class="fas fa-pen"></i></button>
+                          <button class="btn-icon" data-act="toggle" data-id="${s.id_servico}" title="${s.ativo ? 'Desativar' : 'Ativar'}">
+                            <i class="fas ${s.ativo ? 'fa-eye' : 'fa-eye-slash'}"></i>
+                          </button>
+                          <button class="btn-icon" data-act="dup" data-id="${s.id_servico}" title="Duplicar"><i class="fas fa-copy"></i></button>
+                          <button class="btn-icon is-danger" data-act="del" data-id="${s.id_servico}" title="Excluir"><i class="fas fa-trash"></i></button>
+                        </div>
+                      </td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `}
+    `;
+
+    // --- Listeners ---
+    $('#sv-novo').onclick = () => openServicoModal(null);
+    $('#sv-reload').onclick = () => loadList();
+    let _qtmr = 0;
+    $('#sv-q').oninput = (e) => {
+      clearTimeout(_qtmr);
+      const v = e.target.value;
+      _qtmr = setTimeout(() => { filtro.q = v; loadList(); }, 280);
+    };
+    $('#sv-cat').onchange = (e) => { filtro.categoria = e.target.value; loadList(); };
+    $('#sv-status').onchange = (e) => { filtro.status = e.target.value; loadList(); };
+    $('#sv-sort').onchange = (e) => { filtro.sort = e.target.value; render(); };
+    const $clear = $('#sv-clear');
+    if ($clear) $clear.onclick = () => {
+      filtro = { q: '', status: 'all', categoria: '', sort: 'desc_servico' };
+      loadList();
+    };
+
+    // Ações na tabela
+    main.querySelectorAll('[data-act]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = Number(btn.dataset.id);
+        const act = btn.dataset.act;
+        const s = lista.find((x) => x.id_servico === id);
+        if (!s) return;
+        if (act === 'edit') openServicoModal(s);
+        else if (act === 'toggle') toggleAtivo(s);
+        else if (act === 'dup') duplicarServico(s);
+        else if (act === 'del') excluirServico(s);
+      };
+    });
+  }
+
+  // --- Modal: Novo/Editar ---
+  function openServicoModal(srv) {
+    const isEdit = !!srv;
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    m.innerHTML = `
+      <div class="modal-card" style="max-width:680px">
+        <div class="modal-header">
+          <h3><i class="fas fa-screwdriver-wrench mr-2"></i>${isEdit ? 'Editar serviço' : 'Novo serviço'}</h3>
+          <button class="modal-close" type="button" aria-label="Fechar">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="md:col-span-2">
+              <label class="form-label">Nome do serviço <span class="text-red-500">*</span></label>
+              <input id="sm-nome" type="text" class="form-input" maxlength="120"
+                value="${escHtml(srv?.desc_servico || '')}" placeholder="Ex: Costura overlock" required />
+            </div>
+
+            <div>
+              <label class="form-label">Categoria</label>
+              <input id="sm-cat" type="text" class="form-input" list="sm-cat-list" maxlength="60"
+                value="${escHtml(srv?.categoria || '')}" placeholder="Ex: Costura" />
+              <datalist id="sm-cat-list">
+                ${CATEGORIAS_PADRAO.map((c) => `<option value="${escHtml(c)}">`).join('')}
+                ${categorias.filter((c) => !CATEGORIAS_PADRAO.includes(c.categoria))
+                  .map((c) => `<option value="${escHtml(c.categoria)}">`).join('')}
+              </datalist>
+            </div>
+
+            <div>
+              <label class="form-label">Cor de identificação</label>
+              <div class="flex gap-2 items-center">
+                <input id="sm-cor" type="text" class="form-input flex-1" maxlength="7"
+                  value="${escHtml(srv?.cor || '#6366F1')}" placeholder="#6366F1" />
+                <input id="sm-cor-pick" type="color"
+                  value="${escHtml(srv?.cor || '#6366F1')}"
+                  style="height:38px;width:48px;border-radius:8px;border:1px solid var(--border-2,#cbd5e1);cursor:pointer" />
+              </div>
+              <div class="srv-paleta mt-2">
+                ${PALETA_SUGERIDA.map((c) => `
+                  <button type="button" class="srv-paleta-dot" data-cor="${c}" style="background:${c}" title="${c}"></button>
+                `).join('')}
+              </div>
+            </div>
+
+            <div>
+              <label class="form-label">Preço padrão (R$)</label>
+              <input id="sm-preco" type="number" min="0" step="0.01" class="form-input"
+                value="${srv?.preco_padrao != null ? srv.preco_padrao : ''}" placeholder="0,00" />
+            </div>
+
+            <div>
+              <label class="form-label">Tempo padrão (min)</label>
+              <input id="sm-tempo" type="number" min="0" step="0.1" class="form-input"
+                value="${srv?.tempo_padrao != null ? srv.tempo_padrao : ''}" placeholder="0" />
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="form-label">Descrição</label>
+              <input id="sm-desc" type="text" class="form-input" maxlength="240"
+                value="${escHtml(srv?.descricao || '')}" placeholder="Breve descrição do serviço (opcional)" />
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="form-label">Observações</label>
+              <textarea id="sm-obs" rows="2" class="form-input" maxlength="500"
+                placeholder="Notas internas, instruções para fornecedores, etc. (opcional)">${escHtml(srv?.observacoes || '')}</textarea>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input id="sm-ativo" type="checkbox" ${(srv?.ativo ?? 1) ? 'checked' : ''} />
+                <span class="text-sm">Ativo (visível nos selects do sistema)</span>
+              </label>
+            </div>
+
+            <!-- Preview -->
+            <div class="md:col-span-2">
+              <label class="form-label">Pré-visualização</label>
+              <div id="sm-preview" class="srv-preview"></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-act="cancel" type="button">Cancelar</button>
+          <button class="btn btn-primary" data-act="save" type="button">
+            <i class="fas fa-save mr-1"></i>${isEdit ? 'Salvar alterações' : 'Cadastrar'}
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.querySelector('.modal-close').onclick = close;
+    m.querySelector('[data-act="cancel"]').onclick = close;
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+
+    const $nome = m.querySelector('#sm-nome');
+    const $cat = m.querySelector('#sm-cat');
+    const $cor = m.querySelector('#sm-cor');
+    const $corPick = m.querySelector('#sm-cor-pick');
+    const $prev = m.querySelector('#sm-preview');
+
+    function syncPreview() {
+      const cor = isValidHex($cor.value) || '#6366F1';
+      const nome = ($nome.value || '').trim() || 'Nome do serviço';
+      const cat = ($cat.value || '').trim();
+      const txt = contrastingText(cor);
+      $prev.innerHTML = `
+        <div class="srv-preview-card" style="background:${cor};color:${txt}">
+          <span class="srv-preview-dot" style="background:${txt}"></span>
+          <div class="srv-preview-text">
+            <div class="srv-preview-nome">${escHtml(nome)}</div>
+            ${cat ? `<div class="srv-preview-cat">${escHtml(cat)}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+    $nome.oninput = syncPreview;
+    $cat.oninput = syncPreview;
+    $cor.oninput = () => {
+      const v = isValidHex($cor.value);
+      if (v) $corPick.value = v;
+      syncPreview();
+    };
+    $corPick.oninput = () => { $cor.value = $corPick.value.toUpperCase(); syncPreview(); };
+    m.querySelectorAll('.srv-paleta-dot').forEach((d) => {
+      d.onclick = () => {
+        const c = d.dataset.cor;
+        $cor.value = c;
+        $corPick.value = c;
+        syncPreview();
+      };
+    });
+    syncPreview();
+    setTimeout(() => $nome.focus(), 60);
+
+    m.querySelector('[data-act="save"]').onclick = async () => {
+      const nome = ($nome.value || '').trim();
+      if (!nome) { toast('Informe o nome do serviço', 'warning'); $nome.focus(); return; }
+      const cor = isValidHex($cor.value);
+      const payload = {
+        desc_servico: nome,
+        descricao: m.querySelector('#sm-desc').value.trim() || null,
+        categoria: $cat.value.trim() || null,
+        cor: cor || null,
+        preco_padrao: m.querySelector('#sm-preco').value !== '' ? Number(m.querySelector('#sm-preco').value) : null,
+        tempo_padrao: m.querySelector('#sm-tempo').value !== '' ? Number(m.querySelector('#sm-tempo').value) : null,
+        observacoes: m.querySelector('#sm-obs').value.trim() || null,
+        ativo: m.querySelector('#sm-ativo').checked ? 1 : 0,
+      };
+      try {
+        if (isEdit) {
+          await api('put', '/terc/servicos/' + srv.id_servico, payload, { silent: false });
+          toast('Serviço atualizado!', 'success');
+        } else {
+          await api('post', '/terc/servicos', payload, { silent: false });
+          toast('Serviço cadastrado!', 'success');
+        }
+        close();
+        loadList();
+      } catch {}
+    };
+  }
+
+  // --- Toggle ativo/inativo ---
+  async function toggleAtivo(s) {
+    try {
+      const r = await api('patch', `/terc/servicos/${s.id_servico}/toggle`, null, { silent: false });
+      toast(r?.data?.ativo ? 'Serviço ativado' : 'Serviço desativado', 'success');
+      loadList();
+    } catch {}
+  }
+
+  // --- Duplicar ---
+  async function duplicarServico(s) {
+    if (!confirm(`Criar uma cópia de "${s.desc_servico}"?`)) return;
+    try {
+      const r = await api('post', `/terc/servicos/${s.id_servico}/duplicate`, null, { silent: false });
+      toast(`Serviço duplicado: ${r?.data?.desc_servico || 'cópia'}`, 'success');
+      loadList();
+    } catch {}
+  }
+
+  // --- Excluir (com validação de vínculos) ---
+  async function excluirServico(s) {
+    const totVinc = (Number(s.qtd_precos) || 0) + (Number(s.qtd_produtos) || 0) + (Number(s.qtd_remessas) || 0);
+    if (totVinc > 0) {
+      const detalhes = `${s.qtd_precos || 0} preço(s), ${s.qtd_produtos || 0} produto(s), ${s.qtd_remessas || 0} item(ns) de remessa`;
+      const msg = `O serviço "${s.desc_servico}" está vinculado a:\n${detalhes}\n\n` +
+                  `Por segurança, não é possível EXCLUIR um serviço vinculado.\n\n` +
+                  `Deseja DESATIVÁ-LO? (o serviço some dos selects mas mantém o histórico)`;
+      if (!confirm(msg)) return;
+      try {
+        await api('delete', `/terc/servicos/${s.id_servico}?force=1`, null, { silent: false });
+        toast('Serviço desativado (mantido por vínculos)', 'success');
+        loadList();
+      } catch {}
+      return;
+    }
+    if (!confirm(`Excluir o serviço "${s.desc_servico}"?\n\nEsta ação é irreversível.`)) return;
+    try {
+      await api('delete', `/terc/servicos/${s.id_servico}`, null, { silent: false });
+      toast('Serviço excluído', 'success');
+      loadList();
+    } catch {}
+  }
+
+  // Inicializa
+  await loadList();
 };
 
 ROUTES.cores = async (main) => {

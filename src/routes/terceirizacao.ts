@@ -84,32 +84,251 @@ app.delete('/terc/setores/:id', async (c) => {
   return c.json(ok({ id, deleted: true }));
 });
 
-// -------- Serviços (tenant-scoped)
+// =====================================================================
+// SERVIÇOS — Módulo completo (tenant-scoped)
+// =====================================================================
+// Campos suportados (após migration 0029):
+//   id_servico, desc_servico, descricao, categoria, cor, preco_padrao,
+//   tempo_padrao, observacoes, ativo, dt_criacao, dt_alteracao, id_empresa
+//
+// Endpoints:
+//   GET    /terc/servicos                 lista (suporta ?q= ?ativo= ?categoria=)
+//   GET    /terc/servicos/categorias      lista distinct das categorias usadas
+//   GET    /terc/servicos/:id             detalhe (com contagem de vínculos)
+//   POST   /terc/servicos                 cria
+//   PUT    /terc/servicos/:id             atualiza (full)
+//   PATCH  /terc/servicos/:id/toggle      ativa/desativa
+//   POST   /terc/servicos/:id/duplicate   duplica
+//   DELETE /terc/servicos/:id             remove (valida vínculos; força com ?force=1 desativa)
+// =====================================================================
+
+/** Cor HEX válida (#RGB ou #RRGGBB) — retorna null se inválida */
+function corSegura(s: any): string | null {
+  if (!s) return null;
+  let x = String(s).trim().toUpperCase().replace(/^#/, '');
+  if (/^[0-9A-F]{3}$/.test(x)) x = x.split('').map((ch) => ch + ch).join('');
+  return /^[0-9A-F]{6}$/.test(x) ? '#' + x : null;
+}
+
+/** Conta vínculos do serviço para validação de delete */
+async function contarVinculosServico(db: D1Database, id_empresa: number, id_servico: number) {
+  const [precos, produtos, remessaItens]: any = await Promise.all([
+    db.prepare(`SELECT COUNT(*) as n FROM terc_precos WHERE id_empresa=? AND id_servico=?`).bind(id_empresa, id_servico).first(),
+    db.prepare(`SELECT COUNT(*) as n FROM terc_produtos WHERE id_empresa=? AND id_servico_padrao=?`).bind(id_empresa, id_servico).first(),
+    db.prepare(`SELECT COUNT(*) as n FROM terc_remessa_itens WHERE id_empresa=? AND id_servico=?`).bind(id_empresa, id_servico).first(),
+  ]);
+  return {
+    precos: Number(precos?.n || 0),
+    produtos: Number(produtos?.n || 0),
+    remessa_itens: Number(remessaItens?.n || 0),
+    total: Number(precos?.n || 0) + Number(produtos?.n || 0) + Number(remessaItens?.n || 0),
+  };
+}
+
 app.get('/terc/servicos', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
-  const rs = await c.env.DB.prepare('SELECT * FROM terc_servicos WHERE id_empresa=? ORDER BY desc_servico').bind(id_empresa).all();
+  const q = c.req.query();
+  const where: string[] = ['id_empresa=?'];
+  const binds: any[] = [id_empresa];
+  if (q.q) {
+    where.push('(LOWER(desc_servico) LIKE ? OR LOWER(COALESCE(descricao,\'\')) LIKE ? OR LOWER(COALESCE(categoria,\'\')) LIKE ?)');
+    const like = '%' + String(q.q).toLowerCase().trim() + '%';
+    binds.push(like, like, like);
+  }
+  if (q.ativo === '1') where.push('ativo=1');
+  if (q.ativo === '0') where.push('ativo=0');
+  if (q.categoria) { where.push('categoria=?'); binds.push(q.categoria); }
+
+  // Lista com contagem de vínculos via subconsulta (LEFT JOIN seria custoso)
+  const rs = await c.env.DB.prepare(
+    `SELECT s.*,
+            (SELECT COUNT(*) FROM terc_precos      p WHERE p.id_empresa=s.id_empresa AND p.id_servico=s.id_servico)         AS qtd_precos,
+            (SELECT COUNT(*) FROM terc_produtos    pr WHERE pr.id_empresa=s.id_empresa AND pr.id_servico_padrao=s.id_servico) AS qtd_produtos,
+            (SELECT COUNT(*) FROM terc_remessa_itens r WHERE r.id_empresa=s.id_empresa AND r.id_servico=s.id_servico)        AS qtd_remessas
+       FROM terc_servicos s
+      WHERE ${where.join(' AND ')}
+      ORDER BY s.ativo DESC, s.categoria, s.desc_servico`
+  ).bind(...binds).all();
   return c.json(ok(rs.results));
 });
+
+app.get('/terc/servicos/categorias', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const rs = await c.env.DB.prepare(
+    `SELECT categoria, COUNT(*) as n FROM terc_servicos
+       WHERE id_empresa=? AND categoria IS NOT NULL AND categoria <> ''
+       GROUP BY categoria ORDER BY categoria`
+  ).bind(id_empresa).all();
+  return c.json(ok(rs.results));
+});
+
+app.get('/terc/servicos/:id', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  const row: any = await c.env.DB.prepare(
+    `SELECT * FROM terc_servicos WHERE id_servico=? AND id_empresa=?`
+  ).bind(id, id_empresa).first();
+  if (!row) return fail('Serviço não encontrado.', 404);
+  const vinc = await contarVinculosServico(c.env.DB, id_empresa, id);
+  return c.json(ok({ ...row, vinculos: vinc }));
+});
+
 app.post('/terc/servicos', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
-  const b = await c.req.json();
-  if (!b.desc_servico) return fail('desc_servico é obrigatório');
-  const r = await c.env.DB.prepare('INSERT INTO terc_servicos (desc_servico, ativo, id_empresa) VALUES (?, 1, ?)').bind(b.desc_servico, id_empresa).run();
-  await audit(c, MOD, 'INS', `servico:${r.meta.last_row_id}`, 'desc_servico', '', b.desc_servico);
+  const b = await c.req.json<any>();
+  const nome = String(b.desc_servico || '').trim();
+  if (!nome) return fail('Nome do serviço é obrigatório.', 400);
+  if (nome.length > 120) return fail('Nome muito longo (máx 120 caracteres).', 400);
+
+  // Anti-duplicidade (case-insensitive) na mesma empresa
+  const dup: any = await c.env.DB.prepare(
+    `SELECT id_servico FROM terc_servicos WHERE id_empresa=? AND LOWER(desc_servico)=LOWER(?) LIMIT 1`
+  ).bind(id_empresa, nome).first();
+  if (dup) return fail('Já existe um serviço com este nome.', 409);
+
+  const r = await c.env.DB.prepare(
+    `INSERT INTO terc_servicos
+       (desc_servico, descricao, categoria, cor, preco_padrao, tempo_padrao, observacoes, ativo, id_empresa, dt_criacao, dt_alteracao)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+  ).bind(
+    nome,
+    b.descricao ? String(b.descricao).trim() : null,
+    b.categoria ? String(b.categoria).trim() : null,
+    corSegura(b.cor),
+    b.preco_padrao != null && b.preco_padrao !== '' ? Number(b.preco_padrao) : null,
+    b.tempo_padrao != null && b.tempo_padrao !== '' ? Number(b.tempo_padrao) : null,
+    b.observacoes ? String(b.observacoes).trim() : null,
+    b.ativo === 0 || b.ativo === false ? 0 : 1,
+    id_empresa
+  ).run();
+  await audit(c, MOD, 'INS', `servico:${r.meta.last_row_id}`, 'desc_servico', '', nome);
   return c.json(ok({ id: r.meta.last_row_id }));
 });
+
 app.put('/terc/servicos/:id', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
-  const id = toInt(c.req.param('id')); const b = await c.req.json();
-  await c.env.DB.prepare('UPDATE terc_servicos SET desc_servico=?, ativo=? WHERE id_servico=? AND id_empresa=?').bind(b.desc_servico, b.ativo ? 1 : 0, id, id_empresa).run();
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  const b = await c.req.json<any>();
+  const nome = String(b.desc_servico || '').trim();
+  if (!nome) return fail('Nome do serviço é obrigatório.', 400);
+  if (nome.length > 120) return fail('Nome muito longo (máx 120 caracteres).', 400);
+
+  // Anti-duplicidade contra OUTROS registros
+  const dup: any = await c.env.DB.prepare(
+    `SELECT id_servico FROM terc_servicos WHERE id_empresa=? AND LOWER(desc_servico)=LOWER(?) AND id_servico<>? LIMIT 1`
+  ).bind(id_empresa, nome, id).first();
+  if (dup) return fail('Já existe outro serviço com este nome.', 409);
+
+  await c.env.DB.prepare(
+    `UPDATE terc_servicos
+        SET desc_servico=?, descricao=?, categoria=?, cor=?, preco_padrao=?, tempo_padrao=?,
+            observacoes=?, ativo=?, dt_alteracao=datetime('now')
+      WHERE id_servico=? AND id_empresa=?`
+  ).bind(
+    nome,
+    b.descricao ? String(b.descricao).trim() : null,
+    b.categoria ? String(b.categoria).trim() : null,
+    corSegura(b.cor),
+    b.preco_padrao != null && b.preco_padrao !== '' ? Number(b.preco_padrao) : null,
+    b.tempo_padrao != null && b.tempo_padrao !== '' ? Number(b.tempo_padrao) : null,
+    b.observacoes ? String(b.observacoes).trim() : null,
+    b.ativo === 0 || b.ativo === false ? 0 : 1,
+    id, id_empresa
+  ).run();
   await audit(c, MOD, 'UPD', `servico:${id}`);
   return c.json(ok({ id }));
 });
+
+app.patch('/terc/servicos/:id/toggle', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  const cur: any = await c.env.DB.prepare(
+    `SELECT ativo FROM terc_servicos WHERE id_servico=? AND id_empresa=?`
+  ).bind(id, id_empresa).first();
+  if (!cur) return fail('Serviço não encontrado.', 404);
+  const novo = cur.ativo ? 0 : 1;
+  await c.env.DB.prepare(
+    `UPDATE terc_servicos SET ativo=?, dt_alteracao=datetime('now') WHERE id_servico=? AND id_empresa=?`
+  ).bind(novo, id, id_empresa).run();
+  await audit(c, MOD, 'TOGGLE', `servico:${id}`, 'ativo', String(cur.ativo), String(novo));
+  return c.json(ok({ id, ativo: novo }));
+});
+
+app.post('/terc/servicos/:id/duplicate', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  if (!id) return fail('ID inválido.', 400);
+  const src: any = await c.env.DB.prepare(
+    `SELECT * FROM terc_servicos WHERE id_servico=? AND id_empresa=?`
+  ).bind(id, id_empresa).first();
+  if (!src) return fail('Serviço não encontrado.', 404);
+
+  // Gera nome único: "X (cópia)", "X (cópia 2)", "X (cópia 3)" ...
+  let baseNome = `${src.desc_servico} (cópia)`;
+  let n = 1;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const exists: any = await c.env.DB.prepare(
+      `SELECT 1 FROM terc_servicos WHERE id_empresa=? AND LOWER(desc_servico)=LOWER(?) LIMIT 1`
+    ).bind(id_empresa, baseNome).first();
+    if (!exists) break;
+    n += 1;
+    baseNome = `${src.desc_servico} (cópia ${n})`;
+    if (n > 50) return fail('Muitas cópias deste serviço — renomeie as cópias antigas.', 409);
+  }
+
+  const r = await c.env.DB.prepare(
+    `INSERT INTO terc_servicos
+       (desc_servico, descricao, categoria, cor, preco_padrao, tempo_padrao, observacoes, ativo, id_empresa, dt_criacao, dt_alteracao)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`
+  ).bind(
+    baseNome, src.descricao, src.categoria, src.cor,
+    src.preco_padrao, src.tempo_padrao, src.observacoes, id_empresa
+  ).run();
+  await audit(c, MOD, 'DUP', `servico:${r.meta.last_row_id}`, 'from_id', '', String(id));
+  return c.json(ok({ id: r.meta.last_row_id, desc_servico: baseNome }));
+});
+
 app.delete('/terc/servicos/:id', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const id = toInt(c.req.param('id'));
-  await c.env.DB.prepare('DELETE FROM terc_servicos WHERE id_servico=? AND id_empresa=?').bind(id, id_empresa).run();
-  await audit(c, MOD, 'DEL', `servico:${id}`);
+  if (!id) return fail('ID inválido.', 400);
+  const force = c.req.query('force') === '1';
+
+  // Verifica existência + vínculos
+  const cur: any = await c.env.DB.prepare(
+    `SELECT id_servico, desc_servico FROM terc_servicos WHERE id_servico=? AND id_empresa=?`
+  ).bind(id, id_empresa).first();
+  if (!cur) return fail('Serviço não encontrado.', 404);
+
+  const vinc = await contarVinculosServico(c.env.DB, id_empresa, id);
+  if (vinc.total > 0 && !force) {
+    return c.json({
+      ok: false,
+      error: `Serviço está vinculado: ${vinc.precos} preço(s), ${vinc.produtos} produto(s), ${vinc.remessa_itens} item(ns) de remessa. ` +
+             `Use ?force=1 para apenas desativar (não exclui).`,
+      code: 'HAS_LINKS',
+      data: { vinculos: vinc },
+    }, 409);
+  }
+
+  if (force && vinc.total > 0) {
+    // Modo seguro: desativa em vez de excluir (preserva histórico)
+    await c.env.DB.prepare(
+      `UPDATE terc_servicos SET ativo=0, dt_alteracao=datetime('now') WHERE id_servico=? AND id_empresa=?`
+    ).bind(id, id_empresa).run();
+    await audit(c, MOD, 'DISABLE', `servico:${id}`, 'desc_servico', cur.desc_servico, '');
+    return c.json(ok({ id, deleted: false, disabled: true, vinculos: vinc }));
+  }
+
+  // Sem vínculos → DELETE real
+  await c.env.DB.prepare(
+    `DELETE FROM terc_servicos WHERE id_servico=? AND id_empresa=?`
+  ).bind(id, id_empresa).run();
+  await audit(c, MOD, 'DEL', `servico:${id}`, 'desc_servico', cur.desc_servico, '');
   return c.json(ok({ id, deleted: true }));
 });
 
