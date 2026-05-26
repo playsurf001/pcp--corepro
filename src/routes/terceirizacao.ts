@@ -2259,7 +2259,9 @@ app.get('/terc/retornos', async (c) => {
 
   // ---- Sanitização de inputs
   const today = new Date().toISOString().slice(0, 10);
-  const de  = q.de  || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  // 📅 Janela default: 90 dias (era 30 — alargamos para capturar dados legados
+  // que ficavam invisíveis quando o usuário não mudava o filtro).
+  const de  = q.de  || new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
   const ate = q.ate || today;
   const idTerc = toInt(q.id_terc || 0);
   const search = (q.search || '').trim();
@@ -2331,6 +2333,29 @@ app.get('/terc/retornos', async (c) => {
     LIMIT ? OFFSET ?`;
   const rs = await c.env.DB.prepare(rowsSql).bind(...binds, perPage, offset2).all();
 
+  // 🔍 Detecção de inconsistência: remessas Retornado/Concluido sem retorno vinculado
+  // (tenant-scoped — só conta as da empresa atual)
+  const inconsist = await c.env.DB.prepare(`
+    SELECT COUNT(*) AS orfas
+      FROM terc_remessas r
+     WHERE r.id_empresa = ?
+       AND r.status IN ('Retornado','Concluido','Parcial','Pago')
+       AND NOT EXISTS (
+         SELECT 1 FROM terc_retornos rt
+          WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa
+       )
+  `).bind(id_empresa).first<any>() || { orfas: 0 };
+  const orfas = Number(inconsist.orfas) || 0;
+
+  // 📊 Logs estruturados (sempre, para debug em PROD)
+  logTenant(c, 'retornos.list', {
+    filtro: { de, ate, id_terc: idTerc || null, search: search || null, status_pag: statusPag || null },
+    page, per_page: perPage,
+    total: totalGeral,
+    kpi: { boa: Number(kpi.boa)||0, refugo: Number(kpi.refugo)||0, conserto: Number(kpi.conserto)||0, valor_pago: Number(kpi.valor_pago)||0 },
+    orfas, // alerta de integridade
+  });
+
   return c.json(ok({
     rows: rs.results || [],
     total: totalGeral,
@@ -2347,7 +2372,101 @@ app.get('/terc/retornos', async (c) => {
       valor_pago_pendente: Number(kpi.valor_pendente) || 0,
       valor_pago_quitado: Number(kpi.valor_quitado) || 0,
     },
-    filtro: { de, ate, id_terc: idTerc || null, search: search || null, status_pag: statusPag || null }
+    filtro: { de, ate, id_terc: idTerc || null, search: search || null, status_pag: statusPag || null },
+    // 🚨 Sinalizador de inconsistência para o frontend mostrar banner de reparação
+    integridade: {
+      orfas,
+      mensagem: orfas > 0
+        ? `${orfas} remessa(s) com status Retornado/Concluído sem retorno vinculado nesta empresa. Use o botão "Reparar integridade" para reconstruir.`
+        : null,
+    },
+  }));
+});
+
+/* =================================================================
+ * GET /terc/retornos/audit
+ * Auditoria de integridade — diagnóstico detalhado (tenant-scoped).
+ * Lista as remessas que estão com status='Retornado' (ou Concluído/Parcial/Pago)
+ * mas que NÃO possuem registro em terc_retornos — útil para o painel admin
+ * mostrar exatamente quais remessas precisam de reparação.
+ * ================================================================= */
+app.get('/terc/retornos/audit', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const orfas = await c.env.DB.prepare(`
+    SELECT
+      r.id_remessa, r.num_controle, r.cod_ref, r.cor, r.qtd_total,
+      r.valor_total, r.valor_pago, r.dt_recebimento, r.dt_pagamento,
+      r.status, r.status_fin, r.id_empresa
+    FROM terc_remessas r
+    WHERE r.id_empresa = ?
+      AND r.status IN ('Retornado','Concluido','Parcial','Pago')
+      AND NOT EXISTS (
+        SELECT 1 FROM terc_retornos rt
+         WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa
+      )
+    ORDER BY r.id_remessa DESC
+  `).bind(id_empresa).all();
+
+  const lista = (orfas.results || []) as any[];
+  logTenant(c, 'retornos.audit', { orfas: lista.length });
+  return c.json(ok({
+    orfas: lista.length,
+    remessas_orfas: lista,
+    pode_reparar: lista.length > 0,
+  }));
+});
+
+/* =================================================================
+ * POST /terc/retornos/repair
+ * Reparação on-demand — recria registros faltantes em terc_retornos
+ * para todas as remessas Retornadas órfãs desta empresa.
+ *
+ * Cria 1 retorno sintético por remessa órfã, assumindo qtd_boa = qtd_total
+ * (modo "basico" sem refugo/conserto). Idempotente: NOT EXISTS impede duplicação.
+ *
+ * Apenas usuários com sessão válida + id_empresa podem disparar
+ * (não exige role específica — auto-reparação dos próprios dados).
+ * ================================================================= */
+app.post('/terc/retornos/repair', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const user = c.get('user') as any;
+
+  // Reconstrói retornos órfãos — tenant-scoped, idempotente
+  const result = await c.env.DB.prepare(`
+    INSERT INTO terc_retornos (
+      id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
+      valor_pago, dt_pagamento, observacao, criado_por, dt_criacao, id_empresa
+    )
+    SELECT
+      r.id_remessa,
+      COALESCE(r.dt_recebimento, r.dt_saida, date('now')),
+      r.qtd_total,
+      r.qtd_total,
+      0, 0,
+      COALESCE(r.valor_pago, 0),
+      r.dt_pagamento,
+      '[Reparação on-demand] Retorno reconstruído a partir da remessa #' || r.num_controle || ' — modo legado/basico.',
+      ?,
+      datetime('now'),
+      r.id_empresa
+    FROM terc_remessas r
+    WHERE r.id_empresa = ?
+      AND r.status IN ('Retornado','Concluido','Parcial','Pago')
+      AND NOT EXISTS (
+        SELECT 1 FROM terc_retornos rt
+         WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa
+      )
+  `).bind(`repair-by:${user?.login || 'anon'}`, id_empresa).run();
+
+  const criados = result.meta?.changes || 0;
+  logTenant(c, 'retornos.repair', { criados });
+  await audit(c, MOD, 'REPAIR_RET', 'integridade', '', '', String(criados));
+
+  return c.json(ok({
+    criados,
+    mensagem: criados > 0
+      ? `${criados} retorno(s) reconstruído(s) com sucesso. A tela de Retornos agora reflete todos os dados.`
+      : 'Nenhuma remessa órfã encontrada. Integridade OK.',
   }));
 });
 

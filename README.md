@@ -1097,6 +1097,161 @@ Mesmo padrão para `terc_consertos`. **193 remessas pré-existentes em PROD pres
 
 **Deploy:** `https://e411a8f4.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
 
+## 🔥 HOTFIX Módulo Retornos — Reparação de integridade (✅ CONCLUÍDO — deploy 2026-05-26)
+
+### 🐛 Bug crítico identificado
+A tela **/retornos** da empresa principal (id=1) aparecia **vazia** mesmo com 167 remessas marcadas como `status='Retornado'` na tela de Remessas. Todos os KPIs (Retornos, Peças boas, Peças em falta, Valor pago) ficavam zerados. Outras empresas funcionavam normalmente.
+
+### 🔍 Causa raiz
+**Dados legados sem vínculo em `terc_retornos`:**
+- Empresa 1 tinha **167 remessas com `status='Retornado'`** mas **ZERO registros** em `terc_retornos`
+- Esses dados foram importados da planilha legada "Kamylla v1.0" no modo `basico` (sem grade detalhada)
+- A tela /retornos consulta `terc_retornos` (correto, conforme arquitetura), então mostrava vazio
+- Empresa 2 tinha 1 remessa Retornada + 1 retorno → funcionava normalmente
+- **Não era bug de tenant/query** — era inconsistência de dados legados
+
+Auditoria PROD antes da reparação:
+```
+id_empresa=1 → 167 remessas 'Retornado' + 0 terc_retornos = 167 órfãs
+id_empresa=2 → 1 remessa 'Retornado' + 1 terc_retornos = OK
+```
+
+### ✅ Correção em 5 frentes
+
+**1. Migration `0034_repair_orphan_retornos.sql` (LOCAL + REMOTE — 7 cmds):**
+Reconstrução automática de retornos faltantes para TODAS as empresas (idempotente):
+```sql
+INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa,
+                            qtd_refugo, qtd_conserto, valor_pago, dt_pagamento,
+                            observacao, criado_por, dt_criacao, id_empresa)
+SELECT
+  r.id_remessa,
+  COALESCE(r.dt_recebimento, r.dt_saida, date('now')),
+  r.qtd_total, r.qtd_total,  -- assume qtd_boa = qtd_total (modo basico)
+  0, 0,
+  COALESCE(r.valor_pago, 0), r.dt_pagamento,
+  '[Reparação automática 0034] Retorno reconstruído a partir da remessa #'
+    || r.num_controle || ' — dados legados sem grade detalhada.',
+  'system:repair-0034', datetime('now'),
+  r.id_empresa
+FROM terc_remessas r
+WHERE r.status = 'Retornado'
+  AND NOT EXISTS (
+    SELECT 1 FROM terc_retornos rt
+    WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa
+  );
+```
++ índices `(id_empresa, dt_retorno DESC)` e `(id_empresa, dt_pagamento)` para performance.
+
+**Resultado em PROD após migration:**
+| Empresa | Antes (retornos) | Depois (retornos) | Total peças boa |
+|---|---|---|---|
+| 1 | 0 | **167** | 11.396 |
+| 2 | 1 | 1 (preservado) | 10 |
+
+**2. Novo endpoint `GET /api/terc/retornos/audit` (tenant-scoped):**
+Diagnóstico em tempo real — lista todas as remessas Retornadas/Concluídas/Pagas que não têm retorno vinculado nesta empresa:
+```json
+{
+  "ok": true,
+  "data": {
+    "orfas": 0,
+    "remessas_orfas": [],
+    "pode_reparar": false
+  }
+}
+```
+
+**3. Novo endpoint `POST /api/terc/retornos/repair` (tenant-scoped, idempotente):**
+Reparação on-demand acionável pelo botão na tela /retornos. Cria 1 registro sintético em `terc_retornos` por remessa órfã desta empresa. Devolve a contagem de criados:
+```json
+{
+  "ok": true,
+  "data": {
+    "criados": 2,
+    "mensagem": "2 retorno(s) reconstruído(s) com sucesso..."
+  }
+}
+```
+
+**4. `GET /api/terc/retornos` — alterações:**
+- **Janela default ampliada de 30 → 90 dias** (capturar dados legados sem o usuário precisar mudar o filtro)
+- **Novo campo `integridade`** no payload da resposta:
+  ```json
+  {
+    "integridade": {
+      "orfas": 2,
+      "mensagem": "2 remessa(s) com status Retornado/Concluído sem retorno vinculado nesta empresa..."
+    }
+  }
+  ```
+- **Logs estruturados** via `logTenant('retornos.list', { filtro, total, kpi, orfas })`
+
+**5. Frontend — banner de integridade na tela /retornos:**
+- Quando `data.integridade.orfas > 0`, aparece banner ⚠️ amarelo entre os KPIs e a tabela
+- 2 botões: **"Reparar integridade (N)"** + **"Ver detalhes"**
+- Clique em "Reparar" → confirma → POST `/repair` → exibe toast + recarrega lista
+- Clique em "Ver detalhes" → GET `/audit` → modal com lista das remessas órfãs
+- Cache bump `v=40 → v=41`
+- Console log debug:
+  ```js
+  console.log('[retornos] resposta backend:', { total, kpis, filtro, integridade, rows_count })
+  ```
+
+### 🧪 Smoke tests LOCAL — 5/5 ✅
+| # | Cenário | Resultado |
+|---|---|---|
+| 1 | GET /retornos antes da reparação (E1 com 2 órfãs) | ✅ total=0, integridade.orfas=2, mensagem amigável |
+| 2 | GET /retornos/audit (E1) | ✅ orfas=2, nums=[999, 998] |
+| 3 | POST /retornos/repair (E1) | ✅ criados=2, mensagem amigável |
+| 4 | GET /retornos APÓS reparação (E1) | ✅ total=2, kpis.qtd=2, boa=150, orfas=0 |
+| 5 | POST /retornos/repair novamente (idempotência) | ✅ criados=0, "Integridade OK" |
+
+### 🧪 Testes de isolamento multi-tenant ✅
+| # | Cenário | Resultado |
+|---|---|---|
+| A | Empresa 5 GET /retornos | ✅ total=0 (não vê dados da E1) |
+| B | Empresa 5 GET /retornos/audit | ✅ orfas=0 (não vê órfãs da E1) |
+| C | Empresa 5 POST /retornos/repair | ✅ criados=0 (não afeta E1) |
+| D | Verificação final: E1 manteve seus 2 retornos | ✅ E1=2 retornos preservados |
+
+### 🧪 Smoke tests PROD ✅
+- ✅ `https://corepro-confeccao.pages.dev/static/app.js?v=41` → HTTP 200 (463 KB)
+- ✅ `https://corepro-confeccao.pages.dev/static/styles.css?v=41` → HTTP 200 (223 KB)
+- ✅ HTML serve `?v=41` para cache busting
+- ✅ `/api/terc/retornos` sem auth → 401 friendly
+- ✅ `/api/terc/retornos/audit` (novo) sem auth → 401 friendly
+- ✅ `/api/terc/retornos/repair` (novo) sem auth → 401 friendly
+- ✅ PROD pós-migration: empresa 1 com 167 retornos, total 11.396 peças boa
+
+### 📊 Garantias entregues
+| Regra | Status |
+|---|---|
+| Tela /retornos da empresa principal mostra os 167 retornos legados | ✅ |
+| KPIs (Retornos, Peças boas, Peças em falta, Valor pago) corretos | ✅ |
+| Detecção automática de inconsistência via campo `integridade` | ✅ |
+| Banner UX amigável com botões "Reparar" + "Ver detalhes" | ✅ |
+| Reparação on-demand (idempotente, tenant-scoped) | ✅ |
+| Isolamento total: E5 não consegue ler/reparar dados da E1 | ✅ |
+| Logs estruturados `[tenant]` com id_empresa + login + orfas + criados | ✅ |
+| Janela default 90 dias evita "filtro escondido" para dados antigos | ✅ |
+| Dados pré-existentes em E2 totalmente preservados | ✅ |
+| Reconstrução respeita `valor_pago` e `dt_pagamento` da remessa | ✅ |
+
+### 📁 Arquivos modificados
+- `src/routes/terceirizacao.ts` — janela 30→90 dias, campo `integridade`, endpoints `/audit` e `/repair`, logs `[tenant]` em retornos.list/audit/repair
+- `public/static/app.js` — banner de integridade + `repairIntegrity()` + `auditIntegrity()` + console.log debug
+- `src/index.tsx` — cache bump v=40 → v=41
+- `migrations/0034_repair_orphan_retornos.sql` (novo) — reconstrução automática de 167 órfãs em E1
+
+### 🔗 Endpoints novos
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/terc/retornos/audit` | Lista remessas Retornadas sem retorno vinculado (tenant-scoped) |
+| POST | `/api/terc/retornos/repair` | Reconstrói retornos faltantes desta empresa (idempotente) |
+
+**Deploy:** `https://321cd889.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

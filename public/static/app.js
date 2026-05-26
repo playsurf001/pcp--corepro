@@ -5509,6 +5509,9 @@ ROUTES.terc_retornos = async (main) => {
           <!-- Linha 1: cards de resumo (KPIs) -->
           <div id="ret-kpis" class="ret-kpis-grid"></div>
 
+          <!-- 🚨 Banner de alerta de integridade (oculto por padrão) -->
+          <div id="ret-integrity-banner" style="display:none"></div>
+
           <!-- Linha 2: filtros -->
           <div class="page-sticky-grid">
             <div class="filter-cell filter-cell-search">
@@ -5621,6 +5624,107 @@ ROUTES.terc_retornos = async (main) => {
       card('Peças em falta',fmt.int(k.refugo),     'text-red-600',       'fa-times-circle'),
       card('Valor pago',    TERC.fmtBRL(k.valor_pago_quitado) + ' <span class="text-xs text-amber-600 font-normal">+ ' + TERC.fmtBRL(k.valor_pago_pendente) + ' pend.</span>', 'text-indigo-600', 'fa-coins'),
     ].join('');
+  }
+
+  // 🚨 Banner de integridade — só aparece quando o backend detecta órfãs
+  function renderIntegrityBanner(integridade) {
+    const banner = document.getElementById('ret-integrity-banner');
+    if (!banner) return;
+    const orfas = Number(integridade?.orfas || 0);
+    if (orfas <= 0) {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+      return;
+    }
+    banner.style.display = '';
+    banner.innerHTML = `
+      <div style="background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(239,68,68,0.10));
+                  border: 1px solid rgba(245,158,11,0.45); border-radius: 12px;
+                  padding: 14px 18px; margin-top: 12px;
+                  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+        <div style="font-size: 28px; color: #f59e0b; line-height: 1;">
+          <i class="fas fa-triangle-exclamation"></i>
+        </div>
+        <div style="flex:1; min-width: 260px;">
+          <div style="font-weight: 700; color: #f59e0b; font-size: 14px; margin-bottom: 4px;">
+            Inconsistência detectada nesta empresa
+          </div>
+          <div style="font-size: 13px; color: var(--text-secondary, #94a3b8); line-height: 1.45;">
+            ${escapeHtml(integridade.mensagem || '')}
+          </div>
+        </div>
+        <button id="btn-repair-integrity" class="btn btn-primary btn-sm" style="white-space:nowrap;">
+          <i class="fas fa-wrench mr-1"></i>Reparar integridade (${orfas})
+        </button>
+        <button id="btn-audit-integrity" class="btn btn-secondary btn-sm" style="white-space:nowrap;">
+          <i class="fas fa-list mr-1"></i>Ver detalhes
+        </button>
+      </div>`;
+    // bindings
+    document.getElementById('btn-repair-integrity').onclick = repairIntegrity;
+    document.getElementById('btn-audit-integrity').onclick = auditIntegrity;
+  }
+
+  // Executa reparação on-demand (recria retornos órfãos da empresa atual)
+  async function repairIntegrity() {
+    if (!confirm('Deseja reconstruir os retornos faltantes desta empresa?\n\nO sistema criará 1 registro de retorno sintético para cada remessa com status "Retornado" que ainda não tem retorno vinculado, usando os dados existentes na remessa (qtd_total, valor_pago, dt_recebimento).\n\nEsta operação é segura, idempotente e tenant-scoped.')) return;
+    const btn = document.getElementById('btn-repair-integrity');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Reparando…'; }
+    try {
+      const r = await api('post', '/terc/retornos/repair', {});
+      const criados = Number(r?.data?.criados || 0);
+      toast(r?.data?.mensagem || `${criados} retorno(s) reconstruído(s).`, 'success');
+      cacheInvalidate();
+      fetchData({ bypassCache: true });
+    } catch (e) {
+      console.error('[repair-integrity] erro', e);
+      toast('Falha ao reparar integridade. Tente novamente.', 'error');
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-wrench mr-1"></i>Reparar integridade'; }
+    }
+  }
+
+  // Mostra detalhes das remessas órfãs (modal simples)
+  async function auditIntegrity() {
+    try {
+      const r = await api('get', '/terc/retornos/audit');
+      const lista = r?.data?.remessas_orfas || [];
+      if (!lista.length) {
+        toast('Nenhuma inconsistência encontrada.', 'success');
+        return;
+      }
+      const rows = lista.slice(0, 50).map(x => `
+        <tr>
+          <td class="text-right font-mono">${x.num_controle || '—'}</td>
+          <td class="font-mono text-xs">${escapeHtml(x.cod_ref || '—')}</td>
+          <td>${escapeHtml(x.cor || '—')}</td>
+          <td class="text-right">${fmt.int(x.qtd_total)}</td>
+          <td class="text-right">${TERC.fmtBRL(fmt.safeNum(x.valor_total))}</td>
+          <td>${fmt.date(x.dt_recebimento)}</td>
+          <td><span class="badge">${escapeHtml(x.status)}</span></td>
+        </tr>`).join('');
+      const extra = lista.length > 50 ? `<div class="text-xs text-slate-500 mt-2">+ ${lista.length - 50} outras remessas…</div>` : '';
+      const html = `
+        <div style="max-height: 60vh; overflow:auto;">
+          <table class="w-full text-sm">
+            <thead><tr>
+              <th>Ctrl</th><th>Ref</th><th>Cor</th><th class="text-right">Qtd</th>
+              <th class="text-right">Valor</th><th>Recebimento</th><th>Status</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          ${extra}
+        </div>`;
+      // usa modal genérico se existir
+      if (typeof showModal === 'function') {
+        showModal(`Remessas órfãs (${lista.length})`, html);
+      } else {
+        const w = window.open('', '_blank');
+        if (w) { w.document.write(`<title>Auditoria de retornos</title>${html}`); w.document.close(); }
+      }
+    } catch (e) {
+      console.error('[audit-integrity] erro', e);
+      toast('Falha ao buscar auditoria.', 'error');
+    }
   }
 
   function rowHtml(x) {
@@ -5798,8 +5902,19 @@ ROUTES.terc_retornos = async (main) => {
         silent: true, signal: _abortCtrl.signal
       });
       const data = r?.data || { rows: [], kpis: {}, total: 0, page: 1, per_page: state.per_page, total_pages: 1 };
+
+      // 🔍 DEBUG: logs estruturados para diagnóstico multi-tenant
+      console.log('[retornos] resposta backend:', {
+        total: data.total,
+        kpis: data.kpis,
+        filtro: data.filtro,
+        integridade: data.integridade,
+        rows_count: (data.rows || []).length,
+      });
+
       cacheSet(data);
       renderKpis(data.kpis || {});
+      renderIntegrityBanner(data.integridade || null);
       renderTable(data.rows || []);
       renderPager(data.total || 0, data.page || 1, data.per_page || state.per_page, data.total_pages || 1);
     } catch (e) {
