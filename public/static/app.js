@@ -79,9 +79,18 @@ async function api(method, path, body, opts = {}) {
     }
     const status = e.response?.status;
     const code = e.response?.data?.code;
-    const msg = e.response?.data?.error || e.message || 'Erro';
+    let msg = e.response?.data?.error || e.message || 'Erro';
+    const detail = e.response?.data?.detail;
     // Log estruturado p/ debug
-    console.error('[api]', method?.toUpperCase(), path, 'status=' + status, 'code=' + code, '→', msg);
+    console.error('[api]', method?.toUpperCase(), path, 'status=' + status, 'code=' + code, '→', msg, detail ? `\n  detail: ${detail}` : '');
+    // 🛡️ FALLBACK: se o backend devolveu 500 sem body JSON (text/plain "Internal Server Error"),
+    // damos uma mensagem amigável em vez do "Request failed with status code 500" cru do axios.
+    if (status >= 500 && (msg === 'Request failed with status code 500' || /Request failed with status code/i.test(msg))) {
+      msg = 'Erro interno do servidor. Tente novamente ou contate o suporte.';
+    }
+    if (status === 0 || e.code === 'ERR_NETWORK') {
+      msg = 'Falha de conexão. Verifique sua internet.';
+    }
     // Token expirado ou inválido
     if (status === 401 && code === 'AUTH_REQUIRED' && !opts.silent) {
       AUTH.clearToken(); AUTH.clearUser();

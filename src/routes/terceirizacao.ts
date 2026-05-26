@@ -2,7 +2,7 @@
 // Baseado na planilha "Controle de Terceirização Versão.xlsx"
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum, getUser } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser, logTenant } from '../lib/db';
 import { assertLimit, LimitExceededError } from '../lib/plan_limits';
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -11,40 +11,81 @@ const MOD = 'TERC';
 const TAMS = ['P','M','G','GG','EG','SG','T7','T8','T9','T10'];
 
 /**
- * Resolve nome de cor (texto) para id_cor (FK em cores.id).
- * - Case-insensitive (COLLATE NOCASE).
- * - Retorna null se corText vazio ou não encontrado (mantém compat).
- * - Auto-cria a cor caso não exista, gerando hex determinístico, para que
- *   inserts antigos continuem funcionando sem quebrar (denormalização).
+ * Resolve nome de cor (texto) para id_cor (FK em cores.id) — TENANT-SCOPED.
+ *
+ * IMPORTANTE: id_empresa agora é OBRIGATÓRIO (não tem default).
+ * Qualquer chamada sem id_empresa é um BUG de tenant-leak e será sinalizado
+ * no log. Para manter compat com chamadas antigas que ainda não foram
+ * atualizadas, mantemos o fallback `|| 1` defensivo, mas LOGAMOS para
+ * permitir caça aos call sites legados.
+ *
+ * Comportamento:
+ *  - Case-insensitive (COLLATE NOCASE).
+ *  - Retorna null se corText vazio (cor não obrigatória no schema antigo).
+ *  - Auto-cria a cor caso não exista NA EMPRESA, gerando hex determinístico.
+ *  - SEMPRE escopa SELECT + INSERT + UPDATE por id_empresa.
+ *  - Em caso de race condition (UNIQUE collision), refaz busca tenant-scoped.
  */
-async function resolveColorId(db: D1Database, corText: any, id_empresa: number = 1): Promise<number | null> {
+async function resolveColorId(
+  db: D1Database,
+  corText: any,
+  id_empresa: number
+): Promise<number | null> {
+  if (!Number.isFinite(id_empresa) || id_empresa <= 0) {
+    // Log de bug para caçar tenant-leak em produção
+    console.error('[resolveColorId] BUG: id_empresa inválido =', id_empresa, '— fallback=1 aplicado');
+    id_empresa = 1;
+  }
   const nome = (corText == null ? '' : String(corText)).trim();
   if (!nome) return null;
+
   // Busca case-insensitive, tenant-scoped
   const row = await db.prepare(
     'SELECT id FROM cores WHERE nome = ? COLLATE NOCASE AND id_empresa = ? LIMIT 1'
   ).bind(nome, id_empresa).first<{ id: number }>();
   if (row && row.id) return row.id;
-  // Auto-create: hex placeholder determinístico
+
+  // Auto-create tenant-scoped. Gera hex determinístico baseado em
+  // (id_empresa + nome) para evitar colisões entre tenants e dentro do tenant.
+  // Se a tabela `cores` tem UNIQUE(id_empresa, hex), garantimos unicidade
+  // dentro do escopo.
+  const seed = (id_empresa * 7919 + Array.from(nome).reduce((a, ch) => a + ch.charCodeAt(0), 0)) >>> 0;
+  const baseHex = '#' + ((seed * 999983) % 16777215).toString(16).toUpperCase().padStart(6, '0');
   try {
     const ins = await db.prepare(
-      `INSERT INTO cores (id_empresa, nome, hex, ativo) VALUES (?, ?, '#000000', 1)`
-    ).bind(id_empresa, nome).run();
+      `INSERT INTO cores (id_empresa, nome, hex, ativo) VALUES (?, ?, ?, 1)`
+    ).bind(id_empresa, nome, baseHex).run();
     const newId = Number(ins.meta?.last_row_id || 0);
-    if (newId) {
-      // Atualiza hex para algo único determinístico
-      const hex = '#' + ((newId * 999983) % 16777215).toString(16).toUpperCase().padStart(6, '0');
-      try {
-        await db.prepare('UPDATE cores SET hex=? WHERE id=? AND id_empresa=?').bind(hex, newId, id_empresa).run();
-      } catch {}
-      return newId;
+    if (newId) return newId;
+  } catch (e: any) {
+    // Possíveis causas:
+    //  (a) Race condition: outra request inseriu a mesma cor — refaz busca
+    //  (b) Conflito de hex: já existe nesta empresa com hex igual (raro). Tenta achar pelo nome.
+    const msg = String(e?.message || e);
+    if (!/UNIQUE/i.test(msg)) {
+      console.error('[resolveColorId] erro inesperado:', msg, '| tenant=', id_empresa, 'nome=', nome);
     }
-  } catch {
-    // Race condition: outra request inseriu — refaz busca
     const row2 = await db.prepare(
       'SELECT id FROM cores WHERE nome = ? COLLATE NOCASE AND id_empresa = ? LIMIT 1'
     ).bind(nome, id_empresa).first<{ id: number }>();
     if (row2 && row2.id) return row2.id;
+
+    // Se conflito foi por HEX (cor "Azul" não existe mas hex já existe),
+    // tenta novamente com hex alternativo (acrescenta sufixo no seed).
+    try {
+      const altHex = '#' + (((seed + Date.now()) * 999983) % 16777215).toString(16).toUpperCase().padStart(6, '0');
+      const ins2 = await db.prepare(
+        `INSERT INTO cores (id_empresa, nome, hex, ativo) VALUES (?, ?, ?, 1)`
+      ).bind(id_empresa, nome, altHex).run();
+      const newId2 = Number(ins2.meta?.last_row_id || 0);
+      if (newId2) return newId2;
+    } catch (e2) {
+      // Última tentativa: busca de novo (race)
+      const row3 = await db.prepare(
+        'SELECT id FROM cores WHERE nome = ? COLLATE NOCASE AND id_empresa = ? LIMIT 1'
+      ).bind(nome, id_empresa).first<{ id: number }>();
+      if (row3 && row3.id) return row3.id;
+    }
   }
   return null;
 }
@@ -1706,6 +1747,7 @@ async function lookupPrecoHier(
 app.post('/terc/remessas', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
+  logTenant(c, 'remessa.create.start', { id_terc: b?.id_terc, itens: Array.isArray(b?.itens) ? b.itens.length : 0 });
   if (!b.id_terc) return fail('Terceirizado é obrigatório');
 
   // SPRINT 2 — Limite de remessas/mês do plano
@@ -1770,7 +1812,7 @@ app.post('/terc/remessas', async (c) => {
     if (it.cod_ref && (preco === 0 || tempo === 0 || !descRef)) {
       const found = await lookupPrecoHier(
         c.env.DB, String(it.cod_ref), it._idServ, it.cor || null,
-        null, toInt(it.grade_num, 1), toInt(b.id_colecao) || null
+        null, toInt(it.grade_num, 1), toInt(b.id_colecao) || null, id_empresa
       );
       if (preco === 0) preco = found.preco;
       if (tempo === 0) tempo = found.tempo;
@@ -1832,7 +1874,7 @@ app.post('/terc/remessas', async (c) => {
     const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
       ? it.num_op.trim()
       : (b.num_op || null);
-    const itIdCor = await resolveColorId(c.env.DB, it.cor);
+    const itIdCor = await resolveColorId(c.env.DB, it.cor, id_empresa);
     const ri = await c.env.DB.prepare(`
       INSERT INTO terc_remessa_itens
         (id_remessa, id_produto, cod_ref, desc_ref, id_servico, cor, id_cor, grade_num,
@@ -1866,6 +1908,14 @@ app.post('/terc/remessas', async (c) => {
   await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, 'CRIADA', ?, ?, ?)`)
     .bind(idR, `Remessa ${num_controle} criada — ${itensValidos.length} item(ns), ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c), id_empresa).run();
   await audit(c, MOD, 'INS_REM', `remessa:${idR}`, 'num_controle', '', String(num_controle));
+
+  logTenant(c, 'remessa.create.success', {
+    id_remessa: idR,
+    num_controle,
+    itens: itensValidos.length,
+    qtd: totQtd,
+    valor: totValor,
+  });
 
   return c.json(ok({
     id: idR, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal,

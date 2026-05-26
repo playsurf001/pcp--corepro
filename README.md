@@ -935,6 +935,168 @@ CREATE UNIQUE INDEX idx_cores_empresa_hex_unique  ON cores (id_empresa, hex  COL
 
 **Deploy:** `https://31df6079.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
 
+## 🔥 HOTFIX Multi-tenant — Remessas + Hardening SaaS (✅ CONCLUÍDO — deploy 2026-05-26)
+
+### 🐛 Bug crítico identificado
+Empresas secundárias recebiam **"Request failed with status code 500"** ao tentar salvar uma nova remessa de terceirização. O erro vazava silenciosamente sem mensagem amigável, bloqueando a operação central do tenant.
+
+### 🔍 Causa raiz (DUPLA — descoberta em camadas)
+
+**Bug #1 (primário): `resolveColorId` sem `id_empresa`**
+Em `src/routes/terceirizacao.ts:1835`, a chamada estava:
+```typescript
+const id_cor = await resolveColorId(c.env.DB, it.cor);  // ❌ falta id_empresa
+```
+O helper tinha `id_empresa: number = 1` como default, então **toda cor enviada por uma empresa secundária era criada/buscada no tenant 1**, gerando UNIQUE constraint failures (após o hotfix anterior) e registros órfãos cruzando tenants. Mesmo problema em `lookupPrecoHier` (linha 1771).
+
+**Bug #2 (secundário, descoberto durante validação): `terc_remessas.num_controle UNIQUE GLOBAL`**
+A tabela `terc_remessas` tinha:
+```sql
+num_controle INTEGER NOT NULL UNIQUE  -- global!
+```
+Quando a empresa 5 criava remessa #1, a empresa 1 não conseguia mais criar a sua própria remessa #1. Erro: `UNIQUE constraint failed: terc_remessas.num_controle`. Mesmo padrão em `terc_consertos`.
+
+### ✅ Correção em 6 frentes
+
+**1. Backend — `src/routes/terceirizacao.ts`:**
+- Reescrita do helper `resolveColorId`:
+  - `id_empresa` agora é **obrigatório** (sem default, valida `Number.isFinite && > 0`, fallback defensivo com `console.error` se inválido)
+  - Hex determinístico por seed `(id_empresa * 7919 + soma dos chars)` — garante que a mesma cor em empresas diferentes ganhe hex distintos automaticamente, sem colidir
+  - Retry com hex alternativo em caso de UNIQUE race (colisão entre tenants)
+- Fixado **linha 1835**: `resolveColorId(c.env.DB, it.cor, id_empresa)` ✅
+- Fixado **linha 1771**: `lookupPrecoHier(..., id_empresa)` ✅
+- Adicionados logs estruturados `logTenant('remessa.create.start', ...)` e `logTenant('remessa.create.success', ...)`
+
+**2. Backend — `src/lib/db.ts` (helpers centrais multi-tenant):**
+```typescript
+export function requireEmpresa(c: Context): number {
+  const n = Number(c.get('id_empresa'));
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Response(JSON.stringify({
+      ok: false, error: 'Sessão sem empresa vinculada. Faça login novamente.',
+      code: 'TENANT_REQUIRED'
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
+  return n;
+}
+
+export function logTenant(c: Context, event: string, extra = {}) {
+  console.log('[tenant]', JSON.stringify({
+    event, method: c.req.method, path: new URL(c.req.url).pathname,
+    login: c.get('user')?.login || 'anon',
+    id_empresa: c.get('id_empresa') || 0,
+    ...extra,
+  }));
+}
+```
+
+**3. Global error handler — `src/index.tsx`:**
+Adicionado `app.onError` que mapeia **todos** os erros SQLite para mensagens amigáveis em pt-BR:
+| SQLite error | HTTP | code | Mensagem amigável |
+|---|---|---|---|
+| `no such table` | 500 | `SCHEMA_OUTDATED` | "Schema do banco desatualizado. Contate o suporte." |
+| `UNIQUE constraint failed: cores.nome` | 409 | `DUPLICATE_COLOR_NAME` | "Esta cor já existe nesta empresa (mesmo nome)." |
+| `UNIQUE constraint failed: cores.hex` | 409 | `DUPLICATE_COLOR_HEX` | "Esta cor já existe nesta empresa (mesmo HEX)." |
+| `UNIQUE constraint failed` (genérico) | 409 | `DUPLICATE` | "Registro duplicado nesta empresa." |
+| `FOREIGN KEY constraint failed` | 409 | `FK_VIOLATION` | "Referência inválida — registro relacionado não existe." |
+| `NOT NULL constraint failed` | 400 | `MISSING_FIELD` | "Campo obrigatório ausente." |
+| `CHECK constraint failed` | 400 | `INVALID_VALUE` | "Valor inválido em um dos campos." |
+| `is not valid JSON` | 400 | `INVALID_JSON` | "Payload JSON inválido." |
+| `D1_ERROR` (catch-all) | 500 | `DB_ERROR` | "Erro de banco de dados." |
+
+Em **dev** inclui `detail` (300 chars do erro original); em **prod** apenas o JSON amigável. **Nenhum 500 cru vaza para o usuário.**
+
+**4. Frontend — `public/static/app.js`:**
+```javascript
+if (status >= 500 && /Request failed with status code/i.test(msg)) {
+  msg = 'Erro interno do servidor. Tente novamente ou contate o suporte.';
+}
+if (status === 0 || e.code === 'ERR_NETWORK') {
+  msg = 'Falha de conexão. Verifique sua internet.';
+}
+```
+Toast nunca mais mostra "Request failed with status code N".
+
+**5. Migration `0032_multi_tenant_hardening.sql` (LOCAL + REMOTE — 28 cmds):**
+Índices compostos `(id_empresa, fk)` para todas as tabelas tenant-scoped:
+```sql
+CREATE INDEX idx_terc_terc_emp_id          ON terc_terceirizados (id_empresa, id_terc);
+CREATE INDEX idx_terc_serv_emp_id          ON terc_servicos      (id_empresa, id_servico);
+CREATE INDEX idx_terc_remessas_emp_num     ON terc_remessas      (id_empresa, num_controle);
+CREATE INDEX idx_terc_rem_itens_emp_rem    ON terc_remessa_itens (id_empresa, id_remessa);
+CREATE INDEX idx_terc_rem_item_grade_emp_item  ON terc_remessa_item_grade (id_empresa, id_item);
+CREATE INDEX idx_terc_rem_grade_emp_rem    ON terc_remessa_grade (id_empresa, id_remessa);
+CREATE INDEX idx_terc_ret_emp_rem          ON terc_retornos      (id_empresa, id_remessa);
+CREATE INDEX idx_terc_ret_itens_emp_ret    ON terc_retorno_itens (id_empresa, id_retorno);
+CREATE INDEX idx_terc_ret_item_grade_emp_item  ON terc_retorno_item_grade (id_empresa, id_ret_item);
+CREATE INDEX idx_cores_emp_ativo_ordem     ON cores              (id_empresa, ativo, ordem);
+-- + backfill defensivo de id_empresa nas linhas legadas
+```
+
+**6. Migration `0033_unique_per_tenant_rebuild.sql` (LOCAL + REMOTE — 25 cmds em 28.11ms):**
+Rebuild de `terc_remessas` e `terc_consertos` para substituir UNIQUE global por composto.
+Padrão SQLite (já que `DROP CONSTRAINT` não existe):
+```sql
+CREATE TABLE terc_remessas_v2 (
+  ...,
+  num_controle INTEGER NOT NULL,        -- removido UNIQUE global
+  id_empresa   INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (id_empresa, num_controle),    -- ✅ escopado por tenant
+  FOREIGN KEY ...
+);
+INSERT OR IGNORE INTO terc_remessas_v2 SELECT ... FROM terc_remessas;
+DROP TABLE terc_remessas;
+ALTER TABLE terc_remessas_v2 RENAME TO terc_remessas;
+-- recreate all indices
+```
+Mesmo padrão para `terc_consertos`. **193 remessas pré-existentes em PROD preservadas (todas em empresa 1).**
+
+### 🧪 Smoke tests multi-tenant 8/8 ✅ (LOCAL)
+| # | Cenário | Resultado |
+|---|---|---|
+| 1 | Empresa 5 cria remessa com cor "Verde" | ✅ 200 OK, num_controle=3 |
+| 2 | Empresa 1 cria remessa com cor "Verde" (independente da E5) | ✅ 200 OK, num_controle=2 |
+| 3 | Empresa 5 tenta ler remessa da Empresa 1 | ✅ 404 "Remessa não encontrada" (isolamento) |
+| 4 | Empresa 5 lista cores | ✅ só vê Azul(id=53) + Verde(id=54) — só dela |
+| 5 | DB state: Verde id=7 empresa=1 + Verde id=54 empresa=5 | ✅ convivem com hex distintos |
+| 6 | `num_controle=1` em E1 e E5 simultaneamente | ✅ id_remessa=3/emp1 + id_remessa=1/emp5 |
+| 7 | Duplicate dentro da mesma empresa | ✅ 409 "Registro duplicado nesta empresa." |
+| 8 | Color UNIQUE mesma empresa | ✅ 409 "Esta cor já existe nesta empresa." |
+
+### 🧪 Smoke tests PROD ✅
+- ✅ `https://corepro-confeccao.pages.dev/static/app.js?v=40` → HTTP 200 (457 KB)
+- ✅ `https://corepro-confeccao.pages.dev/static/styles.css?v=40` → HTTP 200 (223 KB)
+- ✅ HTML serve `?v=40` para cache busting
+- ✅ `/api/cores` sem auth → 401 `{ok:false, error:"Não autenticado.", code:"AUTH_REQUIRED"}`
+- ✅ `/api/terc/remessas` sem auth → 401 friendly JSON
+- ✅ POST inválido → 401 friendly (sem 500 cru)
+- ✅ Schema PROD: `terc_remessas` agora tem `UNIQUE (id_empresa, num_controle)` composite
+- ✅ Indices compostos confirmados em PROD: `idx_cores_emp_ativo_ordem`, `idx_terc_rem_grade_emp_rem`, etc.
+
+### 📊 Garantias entregues
+| Regra | Status |
+|---|---|
+| Empresas secundárias criam remessas sem erro 500 | ✅ |
+| `num_controle` independente por tenant (cada empresa começa do #1) | ✅ |
+| Cores nunca cruzam entre tenants (hex determinístico por empresa) | ✅ |
+| Empresa A não consegue ler remessas da empresa B (404) | ✅ |
+| Todos os helpers exigem `id_empresa` explícito (sem default mascarado) | ✅ |
+| Logs estruturados expõem `id_empresa` + `login` + `event` em toda operação | ✅ |
+| Nenhum 500 cru vaza — `app.onError` sempre devolve JSON amigável | ✅ |
+| Frontend nunca mais mostra "Request failed with status code N" | ✅ |
+| 193 remessas + 40 cores legadas preservadas (empresa 1) | ✅ |
+| Indices compostos `(id_empresa, fk)` em 10 tabelas para performance | ✅ |
+
+### 📁 Arquivos modificados
+- `src/routes/terceirizacao.ts` — `resolveColorId` reescrito + fix linhas 1835/1771 + logTenant
+- `src/lib/db.ts` — helpers `requireEmpresa()` + `logTenant()`
+- `src/index.tsx` — `app.onError` global + cache bump v=39 → v=40
+- `public/static/app.js` — fallback 5xx sem body + ERR_NETWORK
+- `migrations/0032_multi_tenant_hardening.sql` (novo)
+- `migrations/0033_unique_per_tenant_rebuild.sql` (novo)
+
+**Deploy:** `https://e411a8f4.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

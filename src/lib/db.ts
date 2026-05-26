@@ -43,6 +43,54 @@ export function getEmpresa(c: Context): number {
 }
 
 /**
+ * Versão estrita: exige que o id_empresa esteja injetado no contexto.
+ * Use em rotas críticas (criação de remessas, retornos, financeiro) onde
+ * NÃO queremos fallback silencioso para empresa 1 caso o middleware falhe.
+ *
+ * Lança um Response 401 caso não exista — o handler global captura.
+ */
+export function requireEmpresa(c: Context): number {
+  const v = c.get('id_empresa') as any;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Response(
+      JSON.stringify({
+        ok: false,
+        error: 'Sessão sem empresa vinculada. Faça login novamente.',
+        code: 'TENANT_REQUIRED',
+      }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+  return n;
+}
+
+/**
+ * Log estruturado de eventos tenant-scoped. Aparece em pm2 logs e wrangler tail.
+ * Útil para auditoria de operações críticas em produção.
+ */
+export function logTenant(
+  c: Context,
+  event: string,
+  extra: Record<string, any> = {}
+) {
+  const user = c.get('user') as any;
+  const path = new URL(c.req.url).pathname;
+  const id_empresa = (c.get('id_empresa') as number) || 0;
+  console.log(
+    '[tenant]',
+    JSON.stringify({
+      event,
+      method: c.req.method,
+      path,
+      login: user?.login || 'anon',
+      id_empresa,
+      ...extra,
+    })
+  );
+}
+
+/**
  * Registra auditoria.
  * @param dbOrCtx — pode ser um D1Database (passa usuário como último arg)
  *                  OU um Context do Hono (usuário é extraído de c.get('user'))

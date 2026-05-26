@@ -22,6 +22,92 @@ const app = new Hono<{ Bindings: Bindings; Variables: { user: any; master: any }
 app.use('*', logger());
 app.use('/api/*', cors());
 
+/* =============================================================
+ * HANDLER GLOBAL DE ERROS (Multi-Tenant Safe)
+ *
+ * Captura QUALQUER exceção não tratada nas rotas /api/* e devolve
+ * resposta JSON estruturada em português, com código + diagnóstico.
+ *
+ * Garantias:
+ *  - Nunca devolve "Internal Server Error" cru com 500 vazio
+ *  - Loga sempre id_empresa + login + path + método + payload abreviado
+ *  - Detecta erros conhecidos de SQLite e converte para mensagens amigáveis
+ *  - Mantém HTTP 5xx para erros não conhecidos (frontend pode retentar)
+ * ============================================================= */
+app.onError((err, c) => {
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method;
+  const user = c.get('user') as any;
+  const id_empresa = (c.get('id_empresa') as number) || 0;
+  const login = user?.login || 'anon';
+
+  const raw = String(err?.message || err || 'Erro desconhecido');
+  const stack = String((err as any)?.stack || '').split('\n').slice(0, 5).join('\n');
+
+  // Log estruturado (visível em pm2 logs / wrangler tail)
+  console.error(
+    '[onError]',
+    JSON.stringify({
+      method, path, login, id_empresa,
+      msg: raw.slice(0, 500),
+    })
+  );
+  if (stack) console.error('[onError] stack:', stack);
+
+  // --- Mapeamento de erros conhecidos para mensagens amigáveis ---
+  let status = 500;
+  let friendly = 'Erro interno do servidor. Tente novamente em instantes.';
+  let code: string | undefined = 'INTERNAL_ERROR';
+
+  if (/no such table/i.test(raw)) {
+    status = 500;
+    code = 'SCHEMA_OUTDATED';
+    friendly = 'Estrutura do banco desatualizada. Contate o suporte.';
+  } else if (/no such column/i.test(raw)) {
+    status = 500;
+    code = 'SCHEMA_OUTDATED';
+    friendly = 'Coluna ausente no banco. Atualize as migrations.';
+  } else if (/UNIQUE constraint failed/i.test(raw)) {
+    status = 409;
+    code = 'DUPLICATE';
+    if (/cores\.nome/i.test(raw))   friendly = 'Já existe uma cor com este nome nesta empresa.';
+    else if (/cores\.hex/i.test(raw)) friendly = 'Já existe uma cor com este código HEX nesta empresa.';
+    else friendly = 'Registro duplicado nesta empresa.';
+  } else if (/FOREIGN KEY constraint failed/i.test(raw)) {
+    status = 409;
+    code = 'FK_VIOLATION';
+    friendly = 'Referência inválida (cadastro vinculado não existe ou pertence a outra empresa).';
+  } else if (/NOT NULL constraint failed/i.test(raw)) {
+    status = 400;
+    code = 'MISSING_FIELD';
+    const m = raw.match(/NOT NULL constraint failed:\s*([\w.]+)/i);
+    friendly = m ? `Campo obrigatório ausente: ${m[1]}.` : 'Campo obrigatório ausente.';
+  } else if (/CHECK constraint failed/i.test(raw)) {
+    status = 400;
+    code = 'INVALID_VALUE';
+    friendly = 'Valor inválido para o campo.';
+  } else if (/is not valid JSON|Unexpected token/i.test(raw)) {
+    status = 400;
+    code = 'INVALID_JSON';
+    friendly = 'Corpo da requisição inválido (JSON malformado).';
+  } else if (/D1_ERROR/i.test(raw)) {
+    status = 500;
+    code = 'DB_ERROR';
+    friendly = 'Erro no banco de dados. Equipe foi notificada.';
+  }
+
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: friendly,
+      code,
+      // Em dev, manda detalhe técnico abreviado para facilitar debug
+      detail: (c.env as any)?.NODE_ENV === 'production' ? undefined : raw.slice(0, 300),
+    }),
+    { status, headers: { 'Content-Type': 'application/json' } }
+  );
+});
+
 // API — healthcheck (público)
 app.get('/api/health', (c) =>
   c.json({
@@ -111,7 +197,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=39" rel="stylesheet" />
+  <link href="/static/styles.css?v=40" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -145,7 +231,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=39"></script>
+  <script src="/static/app.js?v=40"></script>
   <script src="/static/relatorios_det.js?v=5"></script>
 </body>
 </html>`;
