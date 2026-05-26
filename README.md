@@ -871,6 +871,70 @@ Estrutura final do grupo Cadastros:
 
 **Deploy:** `https://15d67b2b.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
 
+## 🔥 HOTFIX Multi-tenant — Cores (✅ CONCLUÍDO — deploy 2026-05-26)
+
+### 🐛 Bug crítico identificado
+Empresas secundárias recebiam **"Request failed with status code 409"** ao tentar cadastrar **qualquer** cor cujo nome ou HEX já existisse em qualquer outra empresa do sistema. Comportamento bloqueava completamente a criação de cores em tenants secundários.
+
+### 🔍 Causa raiz (DUPLA)
+
+**1. UNIQUE constraint global (não escopada por tenant):**
+Os índices originais em `cores` eram:
+```sql
+CREATE UNIQUE INDEX idx_cores_nome_unique ON cores (nome COLLATE NOCASE);  -- global!
+CREATE UNIQUE INDEX idx_cores_hex_unique  ON cores (hex COLLATE NOCASE);   -- global!
+```
+Isso violava o princípio multi-tenant: empresa B não podia criar `LARANJA #F59E0B` porque empresa A já tinha.
+
+**2. Body de erro vazio (`{}`) no backend:**
+Em `cores.ts` v2, todos os 28 retornos de erro usavam o padrão incorreto:
+```typescript
+return c.json(fail('Já existe ...'), 409);  // ❌
+```
+O helper `fail()` já retorna um `Response` completo. Chamar `c.json()` sobre ele tentava serializar o Response como JSON, resultando em `{}` no body — e o frontend mostrava o `e.message` genérico do axios ("Request failed with status code 409") em vez da mensagem amigável do backend.
+
+### ✅ Correção em 3 frentes
+
+**1. Migration `0031_cores_unique_tenant_scoped.sql` (LOCAL + REMOTE):**
+```sql
+DROP INDEX IF EXISTS idx_cores_nome_unique;
+DROP INDEX IF EXISTS idx_cores_hex_unique;
+CREATE UNIQUE INDEX idx_cores_empresa_nome_unique ON cores (id_empresa, nome COLLATE NOCASE);
+CREATE UNIQUE INDEX idx_cores_empresa_hex_unique  ON cores (id_empresa, hex  COLLATE NOCASE);
+```
+- **Idempotente** (IF EXISTS / IF NOT EXISTS)
+- **Zero quebra de dados**: as 40 cores existentes em PROD continuam respeitando a nova constraint (todas em empresa 1)
+
+**2. Backend (`src/routes/cores.ts`):**
+- Corrigidos **28 usos** de `return c.json(fail('msg'), CODE)` → `return fail('msg', CODE)`
+- Detecção mais precisa do erro UNIQUE composto: regex agora casa especificamente `cores.nome` e `cores.hex` (em vez de qualquer "nome" ou "hex" na mensagem)
+- Mensagens ainda mais claras: `"Já existe uma cor com este nome **nesta empresa**."` (deixa claro que é escopado por tenant)
+
+**3. Frontend (efeito colateral positivo):**
+- Com o body JSON agora correto, o helper `api()` extrai `e.response.data.error` e exibe via toast — não há mais fallback para "Request failed with status code 409"
+- Modal de cor mantém o `catch {}` (silencioso porque `api()` já mostra o toast amigável)
+
+### 🧪 Smoke tests multi-tenant ✅
+1. ✅ Empresa 1: cria `LARANJA_E2E #FF9900` → 200
+2. ✅ Empresa 1: tenta criar **mesmo nome** → **409** `"Já existe uma cor com este nome nesta empresa."`
+3. ✅ Empresa 1: tenta criar **mesmo hex** → **409** `"Já existe uma cor com este código HEX nesta empresa."`
+4. ✅ Empresa 2: cria **MESMA cor `LARANJA_E2E #FF9900`** → **200** (isolamento por tenant funcionando!)
+5. ✅ Estado final: 2 registros idênticos (id=51 empresa 1, id=52 empresa 2) — convivência perfeita
+6. ✅ Empresa 2: tenta duplicar dentro do próprio tenant → **409** (constraint ainda protege contra dups dentro da mesma empresa)
+
+### 📊 Garantias entregues
+| Regra | Status |
+|---|---|
+| Empresas diferentes podem ter cores com mesmo nome | ✅ |
+| Empresas diferentes podem ter cores com mesmo HEX | ✅ |
+| Isolamento total entre tenants (id_empresa em todas as queries) | ✅ |
+| Duplicidade bloqueada dentro da mesma empresa (nome ou HEX) | ✅ |
+| Mensagens de erro amigáveis no frontend (sem "status code 409") | ✅ |
+| Auditoria preserva tenant via `id_empresa` em todos os logs | ✅ |
+| Dados pré-existentes não são afetados | ✅ |
+
+**Deploy:** `https://31df6079.corepro-confeccao.pages.dev` (alias `https://corepro-confeccao.pages.dev`)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)

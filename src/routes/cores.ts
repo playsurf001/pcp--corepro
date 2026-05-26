@@ -78,12 +78,12 @@ app.get('/cores', async (c) => {
 
 app.get('/cores/:id', async (c) => {
   const id = Number(c.req.param('id'));
-  if (!id) return c.json(fail('ID inválido.'), 400);
+  if (!id) return fail('ID inválido.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const row = await c.env.DB.prepare(
     `SELECT id, nome, hex, ativo, ordem, observacoes, criado_em, atualizado_em FROM cores WHERE id = ? AND id_empresa = ?`
   ).bind(id, id_empresa).first();
-  if (!row) return c.json(fail('Cor não encontrada.'), 404);
+  if (!row) return fail('Cor não encontrada.', 404);
   const vinculos = await contarVinculosCor(c.env.DB, id_empresa, id);
   return c.json(ok({ ...row, vinculos }));
 });
@@ -98,8 +98,8 @@ app.post('/cores', async (c) => {
   const ordem = Number.isFinite(body?.ordem) ? Number(body.ordem) : 0;
   const observacoes = body?.observacoes ? String(body.observacoes).slice(0, 500) : null;
 
-  if (!nome) return c.json(fail('Nome da cor é obrigatório.'), 400);
-  if (!hex)  return c.json(fail('Código HEX inválido. Use #RRGGBB.'), 400);
+  if (!nome) return fail('Nome da cor é obrigatório.', 400);
+  if (!hex)  return fail('Código HEX inválido. Use #RRGGBB.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
 
   // Duplicatas (case-insensitive via UNIQUE INDEX COLLATE NOCASE no schema)
@@ -116,10 +116,13 @@ app.post('/cores', async (c) => {
     return c.json(ok(row));
   } catch (e: any) {
     const msg = String(e?.message || e);
-    if (/UNIQUE/i.test(msg) && /nome/i.test(msg)) return c.json(fail('Já existe uma cor com este nome.'), 409);
-    if (/UNIQUE/i.test(msg) && /hex/i.test(msg))  return c.json(fail('Já existe uma cor com este código HEX.'), 409);
-    if (/UNIQUE/i.test(msg)) return c.json(fail('Nome ou HEX já cadastrado.'), 409);
-    return c.json(fail('Erro ao salvar cor: ' + msg), 500);
+    // Detecta violação de UNIQUE — mensagem do SQLite:
+    //   UNIQUE constraint failed: cores.id_empresa, cores.nome
+    //   UNIQUE constraint failed: cores.id_empresa, cores.hex
+    if (/UNIQUE/i.test(msg) && /cores\.nome/i.test(msg)) return fail('Já existe uma cor com este nome nesta empresa.', 409);
+    if (/UNIQUE/i.test(msg) && /cores\.hex/i.test(msg))  return fail('Já existe uma cor com este código HEX nesta empresa.', 409);
+    if (/UNIQUE/i.test(msg)) return fail('Nome ou HEX já cadastrado nesta empresa.', 409);
+    return fail('Erro ao salvar cor: ' + msg, 500);
   }
 });
 
@@ -127,15 +130,15 @@ app.post('/cores', async (c) => {
 
 app.put('/cores/:id', async (c) => {
   const id = Number(c.req.param('id'));
-  if (!id) return c.json(fail('ID inválido.'), 400);
+  if (!id) return fail('ID inválido.', 400);
   const body = await c.req.json().catch(() => ({}));
   const nome = normalizeNome(body?.nome);
   const hex  = normalizeHex(body?.hex);
   const ativo = body?.ativo === false || body?.ativo === 0 ? 0 : 1;
   const ordem = Number.isFinite(body?.ordem) ? Number(body.ordem) : 0;
   const observacoes = body?.observacoes ? String(body.observacoes).slice(0, 500) : null;
-  if (!nome) return c.json(fail('Nome da cor é obrigatório.'), 400);
-  if (!hex)  return c.json(fail('Código HEX inválido. Use #RRGGBB.'), 400);
+  if (!nome) return fail('Nome da cor é obrigatório.', 400);
+  if (!hex)  return fail('Código HEX inválido. Use #RRGGBB.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
 
   try {
@@ -144,7 +147,7 @@ app.put('/cores/:id', async (c) => {
          SET nome = ?, hex = ?, ativo = ?, ordem = ?, observacoes = ?, atualizado_em = CURRENT_TIMESTAMP
        WHERE id = ? AND id_empresa = ?`
     ).bind(nome, hex, ativo, ordem, observacoes, id, id_empresa).run();
-    if (!r.meta?.changes) return c.json(fail('Cor não encontrada.'), 404);
+    if (!r.meta?.changes) return fail('Cor não encontrada.', 404);
     const u = c.get('user');
     await audit(c.env.DB, u?.login || 'system', 'cores', 'UPDATE', String(id), { nome, hex, ativo });
     const row = await c.env.DB.prepare(
@@ -153,10 +156,10 @@ app.put('/cores/:id', async (c) => {
     return c.json(ok(row));
   } catch (e: any) {
     const msg = String(e?.message || e);
-    if (/UNIQUE/i.test(msg) && /nome/i.test(msg)) return c.json(fail('Já existe outra cor com este nome.'), 409);
-    if (/UNIQUE/i.test(msg) && /hex/i.test(msg))  return c.json(fail('Já existe outra cor com este código HEX.'), 409);
-    if (/UNIQUE/i.test(msg)) return c.json(fail('Nome ou HEX já cadastrado em outra cor.'), 409);
-    return c.json(fail('Erro ao atualizar cor: ' + msg), 500);
+    if (/UNIQUE/i.test(msg) && /cores\.nome/i.test(msg)) return fail('Já existe outra cor com este nome nesta empresa.', 409);
+    if (/UNIQUE/i.test(msg) && /cores\.hex/i.test(msg))  return fail('Já existe outra cor com este código HEX nesta empresa.', 409);
+    if (/UNIQUE/i.test(msg)) return fail('Nome ou HEX já cadastrado em outra cor desta empresa.', 409);
+    return fail('Erro ao atualizar cor: ' + msg, 500);
   }
 });
 
@@ -164,7 +167,7 @@ app.put('/cores/:id', async (c) => {
 
 app.patch('/cores/:id/toggle', async (c) => {
   const id = Number(c.req.param('id'));
-  if (!id) return c.json(fail('ID inválido.'), 400);
+  if (!id) return fail('ID inválido.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
   try {
     const r = await c.env.DB.prepare(
@@ -172,7 +175,7 @@ app.patch('/cores/:id/toggle', async (c) => {
                         atualizado_em = CURRENT_TIMESTAMP
        WHERE id = ? AND id_empresa = ?`
     ).bind(id, id_empresa).run();
-    if (!r.meta?.changes) return c.json(fail('Cor não encontrada.'), 404);
+    if (!r.meta?.changes) return fail('Cor não encontrada.', 404);
     const u = c.get('user');
     await audit(c.env.DB, u?.login || 'system', 'cores', 'TOGGLE', String(id), {});
     const row = await c.env.DB.prepare(
@@ -180,7 +183,7 @@ app.patch('/cores/:id/toggle', async (c) => {
     ).bind(id, id_empresa).first();
     return c.json(ok(row));
   } catch (e: any) {
-    return c.json(fail('Erro ao alterar status: ' + (e?.message || e)), 500);
+    return fail('Erro ao alterar status: ' + (e?.message || e), 500);
   }
 });
 
@@ -188,12 +191,12 @@ app.patch('/cores/:id/toggle', async (c) => {
 
 app.post('/cores/:id/duplicate', async (c) => {
   const id = Number(c.req.param('id'));
-  if (!id) return c.json(fail('ID inválido.'), 400);
+  if (!id) return fail('ID inválido.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const orig = await c.env.DB.prepare(
     `SELECT nome, hex, ativo, ordem, observacoes FROM cores WHERE id = ? AND id_empresa = ?`
   ).bind(id, id_empresa).first<any>();
-  if (!orig) return c.json(fail('Cor não encontrada.'), 404);
+  if (!orig) return fail('Cor não encontrada.', 404);
 
   // Gera nome único: "Nome (cópia)", "Nome (cópia 2)" ... até 50
   let novoNome = orig.nome + ' (cópia)';
@@ -238,7 +241,7 @@ app.post('/cores/:id/duplicate', async (c) => {
     ).bind(newId, id_empresa).first();
     return c.json(ok(row));
   } catch (e: any) {
-    return c.json(fail('Erro ao duplicar cor: ' + (e?.message || e)), 500);
+    return fail('Erro ao duplicar cor: ' + (e?.message || e), 500);
   }
 });
 
@@ -246,7 +249,7 @@ app.post('/cores/:id/duplicate', async (c) => {
 
 app.delete('/cores/:id', async (c) => {
   const id = Number(c.req.param('id'));
-  if (!id) return c.json(fail('ID inválido.'), 400);
+  if (!id) return fail('ID inválido.', 400);
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const force = c.req.query('force') === '1';
 
@@ -268,19 +271,19 @@ app.delete('/cores/:id', async (c) => {
       const r = await c.env.DB.prepare(
         `UPDATE cores SET ativo = 0, atualizado_em = CURRENT_TIMESTAMP WHERE id = ? AND id_empresa = ?`
       ).bind(id, id_empresa).run();
-      if (!r.meta?.changes) return c.json(fail('Cor não encontrada.'), 404);
+      if (!r.meta?.changes) return fail('Cor não encontrada.', 404);
       const u = c.get('user');
       await audit(c.env.DB, u?.login || 'system', 'cores', 'FORCE_DISABLE', String(id), { vinculos });
       return c.json(ok({ id, disabled: true, vinculos }));
     }
     // Sem vínculos: DELETE real
     const r = await c.env.DB.prepare(`DELETE FROM cores WHERE id = ? AND id_empresa = ?`).bind(id, id_empresa).run();
-    if (!r.meta?.changes) return c.json(fail('Cor não encontrada.'), 404);
+    if (!r.meta?.changes) return fail('Cor não encontrada.', 404);
     const u = c.get('user');
     await audit(c.env.DB, u?.login || 'system', 'cores', 'DELETE', String(id), {});
     return c.json(ok({ id, deleted: true }));
   } catch (e: any) {
-    return c.json(fail('Erro ao excluir cor: ' + (e?.message || e)), 500);
+    return fail('Erro ao excluir cor: ' + (e?.message || e), 500);
   }
 });
 
@@ -290,7 +293,7 @@ app.delete('/cores', async (c) => {
   const confirm1 = c.req.query('confirm') === 'true';
   const confirm2 = c.req.query('confirm2') === 'EXCLUIR_TODAS';
   if (!confirm1 || !confirm2) {
-    return c.json(fail('Operação requer dupla confirmação: ?confirm=true&confirm2=EXCLUIR_TODAS'), 400);
+    return fail('Operação requer dupla confirmação: ?confirm=true&confirm2=EXCLUIR_TODAS', 400);
   }
   const id_empresa = (c.get('id_empresa') as number) || 1;
   try {
@@ -299,7 +302,7 @@ app.delete('/cores', async (c) => {
     await audit(c.env.DB, u?.login || 'system', 'cores', 'DELETE_ALL', '*', { deleted: r.meta?.changes || 0 });
     return c.json(ok({ deleted: r.meta?.changes || 0 }));
   } catch (e: any) {
-    return c.json(fail('Erro ao excluir todas as cores: ' + (e?.message || e)), 500);
+    return fail('Erro ao excluir todas as cores: ' + (e?.message || e), 500);
   }
 });
 
