@@ -94,34 +94,219 @@ async function resolveColorId(
  * CADASTROS AUXILIARES
  * ================================================================= */
 
-// -------- Setores (tenant-scoped)
+// =====================================================================
+// SETORES — Módulo completo (tenant-scoped, HOTFIX 0037)
+// =====================================================================
+// Rotas:
+//   GET    /terc/setores                lista (?q= busca por nome/codigo, ?ativo=0|1)
+//   GET    /terc/setores/:id            detalhe com contagens de vinculos
+//   POST   /terc/setores                cria
+//   PUT    /terc/setores/:id            atualiza (full)
+//   PATCH  /terc/setores/:id/toggle     ativa/desativa
+//   PATCH  /terc/setores/ordenar        reordena (body: { ordens: [{id, ordem}] })
+//   DELETE /terc/setores/:id            soft delete (valida vinculos; ?force=1 desativa)
+// =====================================================================
+
+// Helper: normaliza codigo/slug
+function _slugSetor(s: string): string {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+// LIST — com busca + filtros + contagem de vínculos
 app.get('/terc/setores', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
-  const rs = await c.env.DB.prepare('SELECT * FROM terc_setores WHERE id_empresa=? ORDER BY nome_setor').bind(id_empresa).all();
+  const q = c.req.query('q')?.trim() || '';
+  const ativo = c.req.query('ativo');
+  const where: string[] = ['s.id_empresa=?'];
+  const binds: any[] = [id_empresa];
+  if (q) {
+    where.push('(LOWER(s.nome_setor) LIKE ? OR LOWER(s.codigo) LIKE ? OR LOWER(COALESCE(s.descricao,\'\')) LIKE ?)');
+    binds.push(`%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`);
+  }
+  if (ativo === '0' || ativo === '1') {
+    where.push('s.ativo=?');
+    binds.push(Number(ativo));
+  }
+  const rs = await c.env.DB.prepare(`
+    SELECT s.*,
+      (SELECT COUNT(*) FROM terc_servicos     sv WHERE sv.id_setor=s.id_setor AND sv.id_empresa=s.id_empresa) AS qtd_servicos,
+      (SELECT COUNT(*) FROM terc_terceirizados t  WHERE t.id_setor =s.id_setor AND t.id_empresa =s.id_empresa) AS qtd_terceirizados,
+      (SELECT COUNT(*) FROM terc_remessas      r  WHERE r.id_setor =s.id_setor AND r.id_empresa =s.id_empresa) AS qtd_remessas
+    FROM terc_setores s
+    WHERE ${where.join(' AND ')}
+    ORDER BY s.ordem ASC, s.nome_setor ASC
+  `).bind(...binds).all();
+  logTenant(c, 'setores.list', { total: rs.results?.length || 0, q, ativo });
   return c.json(ok(rs.results));
 });
+
+// DETAIL — com contagens de vínculos
+app.get('/terc/setores/:id', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  const setor = await c.env.DB.prepare(`
+    SELECT s.*,
+      (SELECT COUNT(*) FROM terc_servicos     sv WHERE sv.id_setor=s.id_setor AND sv.id_empresa=s.id_empresa) AS qtd_servicos,
+      (SELECT COUNT(*) FROM terc_terceirizados t  WHERE t.id_setor =s.id_setor AND t.id_empresa =s.id_empresa) AS qtd_terceirizados,
+      (SELECT COUNT(*) FROM terc_remessas      r  WHERE r.id_setor =s.id_setor AND r.id_empresa =s.id_empresa) AS qtd_remessas
+    FROM terc_setores s
+    WHERE s.id_setor=? AND s.id_empresa=?
+  `).bind(id, id_empresa).first<any>();
+  if (!setor) return fail('Setor não encontrado', 404);
+  return c.json(ok(setor));
+});
+
+// CREATE
 app.post('/terc/setores', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
-  if (!b.nome_setor) return fail('nome_setor é obrigatório');
-  const r = await c.env.DB.prepare('INSERT INTO terc_setores (nome_setor, ativo, id_empresa) VALUES (?, 1, ?)').bind(b.nome_setor, id_empresa).run();
-  await audit(c, MOD, 'INS', `setor:${r.meta.last_row_id}`, 'nome_setor', '', b.nome_setor);
-  return c.json(ok({ id: r.meta.last_row_id }));
+  const nome = String(b.nome_setor || '').trim();
+  if (!nome) return fail('Nome do setor é obrigatório', 400);
+  const codigo = b.codigo ? _slugSetor(b.codigo) : _slugSetor(nome);
+  const descricao = b.descricao ? String(b.descricao).trim() : null;
+  const cor = b.cor ? String(b.cor).trim() : null;
+  const ordem = Number.isFinite(Number(b.ordem)) ? Number(b.ordem) : 0;
+  const ativo = (b.ativo === false || b.ativo === 0) ? 0 : 1;
+
+  // Validação: duplicidade por tenant (nome OU codigo)
+  const dup = await c.env.DB.prepare(
+    'SELECT id_setor, nome_setor, codigo FROM terc_setores WHERE id_empresa=? AND (LOWER(nome_setor)=LOWER(?) OR (codigo IS NOT NULL AND codigo=?)) LIMIT 1'
+  ).bind(id_empresa, nome, codigo).first<any>();
+  if (dup) {
+    if (String(dup.nome_setor || '').toLowerCase() === nome.toLowerCase()) {
+      return fail('Já existe um setor com este nome nesta empresa.', 409);
+    }
+    return fail('Já existe um setor com este código nesta empresa.', 409);
+  }
+
+  // Auto-ordem se ordem=0: pega max+1 da empresa
+  let ordemFinal = ordem;
+  if (ordemFinal <= 0) {
+    const maxOrd = await c.env.DB.prepare('SELECT COALESCE(MAX(ordem),0) AS m FROM terc_setores WHERE id_empresa=?').bind(id_empresa).first<any>();
+    ordemFinal = (Number(maxOrd?.m) || 0) + 1;
+  }
+
+  const login = (c.get('login') as string) || 'system';
+  const r = await c.env.DB.prepare(`
+    INSERT INTO terc_setores (id_empresa, nome_setor, codigo, descricao, cor, ordem, ativo, criado_por)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id_empresa, nome, codigo, descricao, cor, ordemFinal, ativo, login).run();
+  await audit(c, MOD, 'INS', `setor:${r.meta.last_row_id}`, 'nome_setor', '', nome);
+  logTenant(c, 'setores.create', { id_setor: r.meta.last_row_id, nome });
+  return c.json(ok({ id: r.meta.last_row_id, id_setor: r.meta.last_row_id }));
 });
+
+// UPDATE (full)
 app.put('/terc/setores/:id', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
-  const id = toInt(c.req.param('id')); const b = await c.req.json();
-  await c.env.DB.prepare('UPDATE terc_setores SET nome_setor=?, ativo=? WHERE id_setor=? AND id_empresa=?').bind(b.nome_setor, b.ativo ? 1 : 0, id, id_empresa).run();
+  const id = toInt(c.req.param('id'));
+  const b = await c.req.json();
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_setores WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  if (!cur) return fail('Setor não encontrado', 404);
+
+  const nome = String(b.nome_setor ?? cur.nome_setor).trim();
+  if (!nome) return fail('Nome do setor é obrigatório', 400);
+  const codigo = b.codigo !== undefined
+    ? (b.codigo ? _slugSetor(b.codigo) : _slugSetor(nome))
+    : cur.codigo;
+  const descricao = b.descricao !== undefined ? (b.descricao || null) : cur.descricao;
+  const cor = b.cor !== undefined ? (b.cor || null) : cur.cor;
+  const ordem = b.ordem !== undefined && Number.isFinite(Number(b.ordem)) ? Number(b.ordem) : cur.ordem;
+  const ativo = b.ativo !== undefined ? ((b.ativo === false || b.ativo === 0) ? 0 : 1) : cur.ativo;
+
+  // Validação de duplicidade contra outros setores da mesma empresa
+  const dup = await c.env.DB.prepare(
+    'SELECT id_setor FROM terc_setores WHERE id_empresa=? AND id_setor<>? AND (LOWER(nome_setor)=LOWER(?) OR (codigo IS NOT NULL AND codigo=?)) LIMIT 1'
+  ).bind(id_empresa, id, nome, codigo).first<any>();
+  if (dup) return fail('Já existe outro setor com este nome ou código nesta empresa.', 409);
+
+  const login = (c.get('login') as string) || 'system';
+  await c.env.DB.prepare(`
+    UPDATE terc_setores
+       SET nome_setor=?, codigo=?, descricao=?, cor=?, ordem=?, ativo=?,
+           dt_alteracao=datetime('now'), alterado_por=?
+     WHERE id_setor=? AND id_empresa=?
+  `).bind(nome, codigo, descricao, cor, ordem, ativo, login, id, id_empresa).run();
   await audit(c, MOD, 'UPD', `setor:${id}`);
-  return c.json(ok({ id }));
+  logTenant(c, 'setores.update', { id_setor: id, nome });
+  return c.json(ok({ id, id_setor: id }));
 });
+
+// TOGGLE ativo/inativo
+app.patch('/terc/setores/:id/toggle', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const id = toInt(c.req.param('id'));
+  const cur = await c.env.DB.prepare('SELECT ativo FROM terc_setores WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  if (!cur) return fail('Setor não encontrado', 404);
+  const novo = cur.ativo ? 0 : 1;
+  const login = (c.get('login') as string) || 'system';
+  await c.env.DB.prepare(`UPDATE terc_setores SET ativo=?, dt_alteracao=datetime('now'), alterado_por=? WHERE id_setor=? AND id_empresa=?`).bind(novo, login, id, id_empresa).run();
+  await audit(c, MOD, 'UPD', `setor:${id}`, 'ativo', String(cur.ativo), String(novo));
+  logTenant(c, 'setores.toggle', { id_setor: id, ativo: novo });
+  return c.json(ok({ id, ativo: novo }));
+});
+
+// REORDENAR (body: { ordens: [{ id_setor, ordem }] })
+app.patch('/terc/setores/ordenar', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const b = await c.req.json().catch(() => ({}));
+  const ordens = Array.isArray(b?.ordens) ? b.ordens : [];
+  if (ordens.length === 0) return fail('Lista de ordens vazia.', 400);
+  const login = (c.get('login') as string) || 'system';
+  let n = 0;
+  for (const o of ordens) {
+    const idSet = toInt(o?.id_setor);
+    const ord = Number(o?.ordem);
+    if (!idSet || !Number.isFinite(ord)) continue;
+    const r = await c.env.DB.prepare(
+      `UPDATE terc_setores SET ordem=?, dt_alteracao=datetime('now'), alterado_por=? WHERE id_setor=? AND id_empresa=?`
+    ).bind(ord, login, idSet, id_empresa).run();
+    if (r.meta.changes > 0) n++;
+  }
+  logTenant(c, 'setores.reorder', { count: n });
+  return c.json(ok({ updated: n }));
+});
+
+// DELETE com soft delete em caso de vínculos
 app.delete('/terc/setores/:id', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const id = toInt(c.req.param('id'));
-  const uso = await c.env.DB.prepare('SELECT COUNT(*) AS c FROM terc_terceirizados WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
-  if (uso && uso.c > 0) return fail(`Setor possui ${uso.c} terceirizado(s) vinculado(s).`, 409);
+  const force = c.req.query('force') === '1';
+  const cur = await c.env.DB.prepare('SELECT * FROM terc_setores WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  if (!cur) return fail('Setor não encontrado', 404);
+
+  // Conta vínculos
+  const usoTerc = await c.env.DB.prepare('SELECT COUNT(*) AS c FROM terc_terceirizados WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  const usoServ = await c.env.DB.prepare('SELECT COUNT(*) AS c FROM terc_servicos WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  const usoRem  = await c.env.DB.prepare('SELECT COUNT(*) AS c FROM terc_remessas  WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).first<any>();
+  const tt = (Number(usoTerc?.c) || 0) + (Number(usoServ?.c) || 0) + (Number(usoRem?.c) || 0);
+
+  if (tt > 0 && !force) {
+    return fail(
+      `Setor possui ${Number(usoServ?.c) || 0} serviço(s), ${Number(usoTerc?.c) || 0} terceirizado(s) e ${Number(usoRem?.c) || 0} remessa(s) vinculados. Use ?force=1 para inativar (soft-delete).`,
+      409
+    );
+  }
+
+  if (tt > 0 && force) {
+    // Soft delete: inativa o setor mas preserva vínculos (não quebra histórico)
+    const login = (c.get('login') as string) || 'system';
+    await c.env.DB.prepare(`UPDATE terc_setores SET ativo=0, dt_alteracao=datetime('now'), alterado_por=? WHERE id_setor=? AND id_empresa=?`).bind(login, id, id_empresa).run();
+    await audit(c, MOD, 'UPD', `setor:${id}`, 'ativo', '1', '0');
+    logTenant(c, 'setores.softdelete', { id_setor: id, vinculos: tt });
+    return c.json(ok({ id, soft_deleted: true, vinculos: tt }));
+  }
+
+  // Hard delete (sem vínculos)
   await c.env.DB.prepare('DELETE FROM terc_setores WHERE id_setor=? AND id_empresa=?').bind(id, id_empresa).run();
   await audit(c, MOD, 'DEL', `setor:${id}`);
+  logTenant(c, 'setores.delete', { id_setor: id });
   return c.json(ok({ id, deleted: true }));
 });
 
@@ -169,26 +354,28 @@ async function contarVinculosServico(db: D1Database, id_empresa: number, id_serv
 app.get('/terc/servicos', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const q = c.req.query();
-  const where: string[] = ['id_empresa=?'];
+  const where: string[] = ['s.id_empresa=?'];
   const binds: any[] = [id_empresa];
   if (q.q) {
-    where.push('(LOWER(desc_servico) LIKE ? OR LOWER(COALESCE(descricao,\'\')) LIKE ? OR LOWER(COALESCE(categoria,\'\')) LIKE ?)');
+    where.push('(LOWER(s.desc_servico) LIKE ? OR LOWER(COALESCE(s.descricao,\'\')) LIKE ? OR LOWER(COALESCE(s.categoria,\'\')) LIKE ?)');
     const like = '%' + String(q.q).toLowerCase().trim() + '%';
     binds.push(like, like, like);
   }
-  if (q.ativo === '1') where.push('ativo=1');
-  if (q.ativo === '0') where.push('ativo=0');
-  if (q.categoria) { where.push('categoria=?'); binds.push(q.categoria); }
+  if (q.ativo === '1') where.push('s.ativo=1');
+  if (q.ativo === '0') where.push('s.ativo=0');
+  if (q.categoria) { where.push('s.categoria=?'); binds.push(q.categoria); }
+  // HOTFIX 0037: filtro por setor
+  if (q.id_setor) { where.push('s.id_setor=?'); binds.push(toInt(q.id_setor)); }
 
-  // Lista com contagem de vínculos via subconsulta (LEFT JOIN seria custoso)
   const rs = await c.env.DB.prepare(
-    `SELECT s.*,
-            (SELECT COUNT(*) FROM terc_precos      p WHERE p.id_empresa=s.id_empresa AND p.id_servico=s.id_servico)         AS qtd_precos,
-            (SELECT COUNT(*) FROM terc_produtos    pr WHERE pr.id_empresa=s.id_empresa AND pr.id_servico_padrao=s.id_servico) AS qtd_produtos,
-            (SELECT COUNT(*) FROM terc_remessa_itens r WHERE r.id_empresa=s.id_empresa AND r.id_servico=s.id_servico)        AS qtd_remessas
+    `SELECT s.*, st.nome_setor AS setor_nome, st.cor AS setor_cor,
+            (SELECT COUNT(*) FROM terc_precos      p  WHERE p.id_empresa=s.id_empresa  AND p.id_servico=s.id_servico)            AS qtd_precos,
+            (SELECT COUNT(*) FROM terc_produtos    pr WHERE pr.id_empresa=s.id_empresa AND pr.id_servico_padrao=s.id_servico)    AS qtd_produtos,
+            (SELECT COUNT(*) FROM terc_remessa_itens r WHERE r.id_empresa=s.id_empresa AND r.id_servico=s.id_servico)            AS qtd_remessas
        FROM terc_servicos s
+       LEFT JOIN terc_setores st ON st.id_setor=s.id_setor AND st.id_empresa=s.id_empresa
       WHERE ${where.join(' AND ')}
-      ORDER BY s.ativo DESC, s.categoria, s.desc_servico`
+      ORDER BY s.ativo DESC, COALESCE(st.ordem,9999), s.categoria, s.desc_servico`
   ).bind(...binds).all();
   return c.json(ok(rs.results));
 });
@@ -228,10 +415,19 @@ app.post('/terc/servicos', async (c) => {
   ).bind(id_empresa, nome).first();
   if (dup) return fail('Já existe um serviço com este nome.', 409);
 
+  // HOTFIX 0037: id_setor (FK opcional)
+  const id_setor = b.id_setor != null && b.id_setor !== '' ? toInt(b.id_setor) : null;
+  if (id_setor) {
+    const set: any = await c.env.DB.prepare(
+      `SELECT id_setor FROM terc_setores WHERE id_setor=? AND id_empresa=?`
+    ).bind(id_setor, id_empresa).first();
+    if (!set) return fail('Setor inválido para esta empresa.', 400);
+  }
+
   const r = await c.env.DB.prepare(
     `INSERT INTO terc_servicos
-       (desc_servico, descricao, categoria, cor, preco_padrao, tempo_padrao, observacoes, ativo, id_empresa, dt_criacao, dt_alteracao)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+       (desc_servico, descricao, categoria, cor, preco_padrao, tempo_padrao, observacoes, ativo, id_empresa, id_setor, dt_criacao, dt_alteracao)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
   ).bind(
     nome,
     b.descricao ? String(b.descricao).trim() : null,
@@ -241,7 +437,8 @@ app.post('/terc/servicos', async (c) => {
     b.tempo_padrao != null && b.tempo_padrao !== '' ? Number(b.tempo_padrao) : null,
     b.observacoes ? String(b.observacoes).trim() : null,
     b.ativo === 0 || b.ativo === false ? 0 : 1,
-    id_empresa
+    id_empresa,
+    id_setor
   ).run();
   await audit(c, MOD, 'INS', `servico:${r.meta.last_row_id}`, 'desc_servico', '', nome);
   return c.json(ok({ id: r.meta.last_row_id }));
@@ -262,10 +459,19 @@ app.put('/terc/servicos/:id', async (c) => {
   ).bind(id_empresa, nome, id).first();
   if (dup) return fail('Já existe outro serviço com este nome.', 409);
 
+  // HOTFIX 0037: id_setor (FK opcional)
+  const id_setor = b.id_setor != null && b.id_setor !== '' ? toInt(b.id_setor) : null;
+  if (id_setor) {
+    const set: any = await c.env.DB.prepare(
+      `SELECT id_setor FROM terc_setores WHERE id_setor=? AND id_empresa=?`
+    ).bind(id_setor, id_empresa).first();
+    if (!set) return fail('Setor inválido para esta empresa.', 400);
+  }
+
   await c.env.DB.prepare(
     `UPDATE terc_servicos
         SET desc_servico=?, descricao=?, categoria=?, cor=?, preco_padrao=?, tempo_padrao=?,
-            observacoes=?, ativo=?, dt_alteracao=datetime('now')
+            observacoes=?, ativo=?, id_setor=?, dt_alteracao=datetime('now')
       WHERE id_servico=? AND id_empresa=?`
   ).bind(
     nome,
@@ -276,6 +482,7 @@ app.put('/terc/servicos/:id', async (c) => {
     b.tempo_padrao != null && b.tempo_padrao !== '' ? Number(b.tempo_padrao) : null,
     b.observacoes ? String(b.observacoes).trim() : null,
     b.ativo === 0 || b.ativo === false ? 0 : 1,
+    id_setor,
     id, id_empresa
   ).run();
   await audit(c, MOD, 'UPD', `servico:${id}`);

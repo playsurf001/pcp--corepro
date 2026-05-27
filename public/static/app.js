@@ -424,6 +424,7 @@ const NAV = [
   { id: 'terc_precos',           label: 'Preços / Coleções', icon: 'fa-money-bill-wave',  group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'terc_grades_tamanho',   label: 'Grades de Tamanho', icon: 'fa-ruler-combined',   group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'cores',                 label: 'Cores',             icon: 'fa-palette',          group: 'Cadastros',     collapsible: true, tercOnly: true },
+  { id: 'terc_setores',          label: 'Setores',           icon: 'fa-sitemap',          group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'terc_terceirizados',    label: 'Terceirizados',     icon: 'fa-handshake',        group: 'Cadastros',     collapsible: true, tercOnly: true },
   { id: 'usuarios',              label: 'Usuários',          icon: 'fa-user-shield',      group: 'Cadastros',     collapsible: true, adminOnly: true },
 
@@ -1179,7 +1180,17 @@ const TERC = {
   async reloadProdutos() {
     try { const r = await api('get', '/terc/produtos', null, { silent: true }); this.produtos = r.data || []; } catch {}
   },
-  optSetores(sel) { return ['<option value="">—</option>'].concat(this.setores.map(s => `<option value="${s.id_setor}" ${sel == s.id_setor ? 'selected' : ''}>${s.nome_setor}</option>`)).join(''); },
+  async reloadSetores() {
+    try { const r = await api('get', '/terc/setores', null, { silent: true }); this.setores = r.data || []; } catch {}
+  },
+  async reloadServicos() {
+    try { const r = await api('get', '/terc/servicos', null, { silent: true }); this.servicos = r.data || []; } catch {}
+  },
+  optSetores(sel, includeEmpty = true) {
+    const ativos = this.setores.filter(s => s.ativo !== 0);
+    const opts = includeEmpty ? ['<option value="">—</option>'] : [];
+    return opts.concat(ativos.map(s => `<option value="${s.id_setor}" ${sel == s.id_setor ? 'selected' : ''}>${s.nome_setor}</option>`)).join('');
+  },
   optServicos(sel) { return ['<option value="">—</option>'].concat(this.servicos.map(s => `<option value="${s.id_servico}" ${sel == s.id_servico ? 'selected' : ''}>${s.desc_servico}</option>`)).join(''); },
   optColecoes(sel) { return ['<option value="">Todas</option>'].concat(this.colecoes.map(s => `<option value="${s.id_colecao}" ${sel == s.id_colecao ? 'selected' : ''}>${s.nome_colecao}</option>`)).join(''); },
   optTerc(sel, onlyAtivos = false) {
@@ -7479,6 +7490,458 @@ window.Cores = window.Cores || {
 };
 
 // =====================================================================
+// MÓDULO DE SETORES — Tela completa de cadastro (HOTFIX 0037 — 2026-05-27)
+// =====================================================================
+// Setores produtivos da terceirização (ex.: Estamparia, Aparador, Embalagem).
+// Vinculados a serviços (terc_servicos.id_setor) e terceirizados.
+//
+// Após a migration 0037, setores ganharam: codigo (slug), descricao, cor,
+// ordem, dt_alteracao, criado_por, alterado_por.
+//
+// Funcionalidades:
+//   - Tabela com busca, filtro por status, ordenação
+//   - Modal de cadastro/edição: nome, código (auto-slug), descrição, cor, ordem, status
+//   - Ações: editar, ativar/desativar, excluir
+//   - Validação de vínculos (serviços, terceirizados, remessas) antes de excluir
+//   - Soft-delete via ?force=1 quando há vínculos
+//   - Cache global TERC.setores invalidado após mutação
+//   - Multi-tenant: tudo escopado por id_empresa
+// =====================================================================
+ROUTES.terc_setores = async (main) => {
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (m) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[m]));
+  }
+  function isValidHex(s) {
+    let x = String(s || '').trim().toUpperCase().replace(/^#/, '');
+    if (/^[0-9A-F]{3}$/.test(x)) x = x.split('').map((ch) => ch + ch).join('');
+    return /^[0-9A-F]{6}$/.test(x) ? '#' + x : null;
+  }
+  function contrastingText(hex) {
+    const h = String(hex || '').replace('#', '');
+    if (h.length !== 6) return '#000';
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+    return yiq >= 140 ? '#0f172a' : '#ffffff';
+  }
+  function fmtData(s) {
+    if (!s) return '—';
+    try {
+      const d = new Date(String(s).replace(' ', 'T'));
+      if (isNaN(d)) return s;
+      return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+    } catch { return s; }
+  }
+  function slugify(s) {
+    return String(s || '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().trim()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+
+  const PALETA = [
+    '#2563EB', '#7C3AED', '#8B5CF6', '#EC4899', '#EF4444',
+    '#F97316', '#F59E0B', '#EAB308', '#10B981', '#14B8A6',
+    '#06B6D4', '#0EA5E9', '#3B82F6', '#6366F1', '#64748B',
+  ];
+
+  state.route = 'terc_setores';
+
+  let lista = [];
+  let filtro = { q: '', status: 'all', sort: 'ordem' };
+
+  async function loadList() {
+    try {
+      const qs = new URLSearchParams();
+      if (filtro.q) qs.set('q', filtro.q);
+      if (filtro.status === 'ativos') qs.set('ativo', '1');
+      if (filtro.status === 'inativos') qs.set('ativo', '0');
+      const r = await api('get', '/terc/setores' + (qs.toString() ? '?' + qs : ''), null, { silent: true });
+      lista = Array.isArray(r?.data) ? r.data : [];
+
+      const sk = filtro.sort;
+      lista.sort((a, b) => {
+        if (sk === 'nome') return String(a.nome_setor || '').localeCompare(String(b.nome_setor || ''), 'pt-BR');
+        if (sk === 'servicos') return Number(b.qtd_servicos || 0) - Number(a.qtd_servicos || 0);
+        if (sk === 'recent') return String(b.dt_alteracao || b.dt_criacao || '').localeCompare(String(a.dt_alteracao || a.dt_criacao || ''));
+        // default ordem (com ativos primeiro)
+        if ((b.ativo ? 1 : 0) !== (a.ativo ? 1 : 0)) return (b.ativo ? 1 : 0) - (a.ativo ? 1 : 0);
+        return Number(a.ordem || 9999) - Number(b.ordem || 9999);
+      });
+    } catch (e) {
+      lista = [];
+      toast('Erro ao carregar setores: ' + (e?.message || 'desconhecido'), 'error');
+    }
+    render();
+    // Atualiza cache global
+    if (window.TERC) {
+      try { window.TERC.setores = lista.slice(); } catch {}
+    }
+  }
+
+  function render() {
+    const totalAtivos = lista.filter((s) => s.ativo).length;
+    const totalInativos = lista.length - totalAtivos;
+    const semFiltro = !filtro.q && filtro.status === 'all';
+
+    main.innerHTML = `
+      <div class="page-header mb-4 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 class="page-title"><i class="fas fa-sitemap mr-2 text-indigo-500"></i>Setores</h1>
+          <p class="page-subtitle">Setores produtivos da terceirização. Organize serviços, terceirizados e remessas por área de atuação (ex.: Estamparia, Aparador, Embalagem).</p>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="st-novo" class="btn btn-primary"><i class="fas fa-plus mr-1"></i>Novo setor</button>
+          <button id="st-reload" class="btn btn-secondary" title="Recarregar"><i class="fas fa-rotate"></i></button>
+        </div>
+      </div>
+
+      <!-- Filtros -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <div class="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+            <div class="md:col-span-6">
+              <label class="text-xs text-slate-500 font-medium">Buscar</label>
+              <div class="relative">
+                <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                <input id="st-q" type="text" class="form-input pl-9"
+                  placeholder="Nome, código ou descrição..."
+                  value="${escHtml(filtro.q)}" />
+              </div>
+            </div>
+            <div class="md:col-span-3">
+              <label class="text-xs text-slate-500 font-medium">Status</label>
+              <select id="st-status" class="form-input">
+                <option value="all" ${filtro.status === 'all' ? 'selected' : ''}>Todos</option>
+                <option value="ativos" ${filtro.status === 'ativos' ? 'selected' : ''}>Ativos</option>
+                <option value="inativos" ${filtro.status === 'inativos' ? 'selected' : ''}>Inativos</option>
+              </select>
+            </div>
+            <div class="md:col-span-3">
+              <label class="text-xs text-slate-500 font-medium">Ordenar</label>
+              <select id="st-sort" class="form-input">
+                <option value="ordem" ${filtro.sort === 'ordem' ? 'selected' : ''}>Ordem manual</option>
+                <option value="nome" ${filtro.sort === 'nome' ? 'selected' : ''}>Nome (A→Z)</option>
+                <option value="servicos" ${filtro.sort === 'servicos' ? 'selected' : ''}>Mais serviços</option>
+                <option value="recent" ${filtro.sort === 'recent' ? 'selected' : ''}>Mais recente</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="text-xs text-slate-500 mb-3 flex items-center gap-3 flex-wrap">
+        <span><i class="fas fa-info-circle mr-1"></i><b>${lista.length}</b> setor${lista.length !== 1 ? 'es' : ''}</span>
+        <span class="text-emerald-600"><i class="fas fa-circle-check mr-1"></i><b>${totalAtivos}</b> ativo${totalAtivos !== 1 ? 's' : ''}</span>
+        <span class="text-slate-400"><i class="fas fa-circle-xmark mr-1"></i><b>${totalInativos}</b> inativo${totalInativos !== 1 ? 's' : ''}</span>
+        ${!semFiltro ? `<button id="st-clear" class="ml-auto text-indigo-600 hover:underline"><i class="fas fa-filter-circle-xmark mr-1"></i>Limpar filtros</button>` : ''}
+      </div>
+
+      ${lista.length === 0 ? `
+        <div class="card">
+          <div class="card-body text-center py-12 text-slate-500">
+            <i class="fas fa-sitemap text-5xl text-slate-300 mb-3"></i>
+            <p class="font-medium">${semFiltro ? 'Nenhum setor cadastrado.' : 'Nenhum setor encontrado com este filtro.'}</p>
+            <p class="text-sm mt-1">${semFiltro ? 'Clique em <b>Novo setor</b> para começar.' : 'Ajuste a busca ou clique em "Limpar filtros".'}</p>
+          </div>
+        </div>
+      ` : `
+        <div class="card overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="srv-table w-full text-sm">
+              <thead>
+                <tr>
+                  <th style="width:36px"></th>
+                  <th style="width:60px" class="text-center">Ordem</th>
+                  <th>Setor</th>
+                  <th class="hidden md:table-cell">Código</th>
+                  <th class="hidden lg:table-cell text-center">Serviços</th>
+                  <th class="hidden lg:table-cell text-center">Terceirizados</th>
+                  <th class="hidden xl:table-cell text-center">Remessas</th>
+                  <th class="hidden xl:table-cell">Criado em</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-right" style="width:140px">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${lista.map((s) => {
+                  const cor = s.cor || '#64748B';
+                  return `
+                    <tr class="srv-row ${s.ativo ? '' : 'is-inactive'}" data-id="${s.id_setor}">
+                      <td>
+                        <span class="srv-dot" style="background:${escHtml(cor)}" title="${escHtml(cor)}"></span>
+                      </td>
+                      <td class="text-center tabular-nums text-xs text-slate-500">${s.ordem ?? '—'}</td>
+                      <td>
+                        <div class="font-medium text-slate-800">${escHtml(s.nome_setor)}</div>
+                        ${s.descricao ? `<div class="text-xs text-slate-500 mt-0.5 line-clamp-1">${escHtml(s.descricao)}</div>` : ''}
+                      </td>
+                      <td class="hidden md:table-cell">
+                        ${s.codigo ? `<code class="text-xs px-1.5 py-0.5 bg-slate-100 rounded">${escHtml(s.codigo)}</code>` : '<span class="text-xs text-slate-400">—</span>'}
+                      </td>
+                      <td class="hidden lg:table-cell text-center">
+                        ${Number(s.qtd_servicos) > 0
+                          ? `<span class="srv-vinc-pill">${s.qtd_servicos}</span>`
+                          : '<span class="text-xs text-slate-400">0</span>'}
+                      </td>
+                      <td class="hidden lg:table-cell text-center">
+                        ${Number(s.qtd_terceirizados) > 0
+                          ? `<span class="srv-vinc-pill">${s.qtd_terceirizados}</span>`
+                          : '<span class="text-xs text-slate-400">0</span>'}
+                      </td>
+                      <td class="hidden xl:table-cell text-center">
+                        ${Number(s.qtd_remessas) > 0
+                          ? `<span class="srv-vinc-pill">${s.qtd_remessas}</span>`
+                          : '<span class="text-xs text-slate-400">0</span>'}
+                      </td>
+                      <td class="hidden xl:table-cell text-xs text-slate-500">${fmtData(s.dt_criacao)}</td>
+                      <td class="text-center">
+                        ${s.ativo
+                          ? '<span class="srv-status-on"><i class="fas fa-check"></i>Ativo</span>'
+                          : '<span class="srv-status-off"><i class="fas fa-pause"></i>Inativo</span>'}
+                      </td>
+                      <td class="text-right">
+                        <div class="srv-actions">
+                          <button class="btn-icon" data-act="edit" data-id="${s.id_setor}" title="Editar"><i class="fas fa-pen"></i></button>
+                          <button class="btn-icon" data-act="toggle" data-id="${s.id_setor}" title="${s.ativo ? 'Desativar' : 'Ativar'}">
+                            <i class="fas ${s.ativo ? 'fa-eye' : 'fa-eye-slash'}"></i>
+                          </button>
+                          <button class="btn-icon is-danger" data-act="del" data-id="${s.id_setor}" title="Excluir"><i class="fas fa-trash"></i></button>
+                        </div>
+                      </td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `}
+    `;
+
+    $('#st-novo').onclick = () => openSetorModal(null);
+    $('#st-reload').onclick = () => loadList();
+    let _qtmr = 0;
+    $('#st-q').oninput = (e) => {
+      clearTimeout(_qtmr);
+      const v = e.target.value;
+      _qtmr = setTimeout(() => { filtro.q = v; loadList(); }, 280);
+    };
+    $('#st-status').onchange = (e) => { filtro.status = e.target.value; loadList(); };
+    $('#st-sort').onchange = (e) => { filtro.sort = e.target.value; render(); };
+    const $clear = $('#st-clear');
+    if ($clear) $clear.onclick = () => {
+      filtro = { q: '', status: 'all', sort: 'ordem' };
+      loadList();
+    };
+
+    main.querySelectorAll('[data-act]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = Number(btn.dataset.id);
+        const act = btn.dataset.act;
+        const s = lista.find((x) => x.id_setor === id);
+        if (!s) return;
+        if (act === 'edit') openSetorModal(s);
+        else if (act === 'toggle') toggleAtivo(s);
+        else if (act === 'del') excluirSetor(s);
+      };
+    });
+  }
+
+  function openSetorModal(setor) {
+    const isEdit = !!setor;
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    m.innerHTML = `
+      <div class="modal-card" style="max-width:620px">
+        <div class="modal-header">
+          <h3><i class="fas fa-sitemap mr-2"></i>${isEdit ? 'Editar setor' : 'Novo setor'}</h3>
+          <button class="modal-close" type="button" aria-label="Fechar">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="md:col-span-2">
+              <label class="form-label">Nome do setor <span class="text-red-500">*</span></label>
+              <input id="stm-nome" type="text" class="form-input" maxlength="60"
+                value="${escHtml(setor?.nome_setor || '')}" placeholder="Ex: Estamparia" required />
+            </div>
+
+            <div>
+              <label class="form-label">Código (slug)</label>
+              <input id="stm-codigo" type="text" class="form-input" maxlength="40"
+                value="${escHtml(setor?.codigo || '')}" placeholder="auto" />
+              <p class="text-xs text-slate-500 mt-1">Identificador único do setor. Deixe vazio para gerar automaticamente.</p>
+            </div>
+
+            <div>
+              <label class="form-label">Ordem</label>
+              <input id="stm-ordem" type="number" min="0" step="1" class="form-input"
+                value="${setor?.ordem != null ? setor.ordem : ''}" placeholder="0" />
+              <p class="text-xs text-slate-500 mt-1">Posição na listagem (menor = primeiro).</p>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="form-label">Cor de identificação</label>
+              <div class="flex gap-2 items-center">
+                <input id="stm-cor" type="text" class="form-input flex-1" maxlength="7"
+                  value="${escHtml(setor?.cor || '#6366F1')}" placeholder="#6366F1" />
+                <input id="stm-cor-pick" type="color"
+                  value="${escHtml(setor?.cor || '#6366F1')}"
+                  style="height:38px;width:48px;border-radius:8px;border:1px solid var(--border-2,#cbd5e1);cursor:pointer" />
+              </div>
+              <div class="srv-paleta mt-2">
+                ${PALETA.map((c) => `<button type="button" class="srv-paleta-dot" data-cor="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+              </div>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="form-label">Descrição</label>
+              <textarea id="stm-desc" rows="2" class="form-input" maxlength="240"
+                placeholder="Breve descrição do setor (opcional)">${escHtml(setor?.descricao || '')}</textarea>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input id="stm-ativo" type="checkbox" ${(setor?.ativo ?? 1) ? 'checked' : ''} />
+                <span class="text-sm">Ativo (visível nos selects do sistema)</span>
+              </label>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="form-label">Pré-visualização</label>
+              <div id="stm-preview" class="srv-preview"></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-act="cancel" type="button">Cancelar</button>
+          <button class="btn btn-primary" data-act="save" type="button">
+            <i class="fas fa-save mr-1"></i>${isEdit ? 'Salvar alterações' : 'Cadastrar'}
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.querySelector('.modal-close').onclick = close;
+    m.querySelector('[data-act="cancel"]').onclick = close;
+    m.addEventListener('click', (e) => { if (e.target === m) close(); });
+
+    const $nome = m.querySelector('#stm-nome');
+    const $cod = m.querySelector('#stm-codigo');
+    const $cor = m.querySelector('#stm-cor');
+    const $corPick = m.querySelector('#stm-cor-pick');
+    const $prev = m.querySelector('#stm-preview');
+
+    let codigoEditadoManualmente = isEdit && setor?.codigo;
+    $cod.oninput = () => { codigoEditadoManualmente = true; };
+
+    function syncPreview() {
+      const cor = isValidHex($cor.value) || '#6366F1';
+      const nome = ($nome.value || '').trim() || 'Nome do setor';
+      const txt = contrastingText(cor);
+      $prev.innerHTML = `
+        <div class="srv-preview-card" style="background:${cor};color:${txt}">
+          <span class="srv-preview-dot" style="background:${txt}"></span>
+          <div class="srv-preview-text">
+            <div class="srv-preview-nome">${escHtml(nome)}</div>
+            ${$cod.value ? `<div class="srv-preview-cat"><code>${escHtml($cod.value)}</code></div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+    $nome.oninput = () => {
+      if (!codigoEditadoManualmente) $cod.value = slugify($nome.value);
+      syncPreview();
+    };
+    $cor.oninput = () => {
+      const v = isValidHex($cor.value);
+      if (v) $corPick.value = v;
+      syncPreview();
+    };
+    $corPick.oninput = () => { $cor.value = $corPick.value.toUpperCase(); syncPreview(); };
+    m.querySelectorAll('.srv-paleta-dot').forEach((d) => {
+      d.onclick = () => {
+        const c = d.dataset.cor;
+        $cor.value = c;
+        $corPick.value = c;
+        syncPreview();
+      };
+    });
+    syncPreview();
+    setTimeout(() => $nome.focus(), 60);
+
+    m.querySelector('[data-act="save"]').onclick = async () => {
+      const nome = ($nome.value || '').trim();
+      if (!nome) { toast('Informe o nome do setor', 'warning'); $nome.focus(); return; }
+      const cor = isValidHex($cor.value);
+      const ordemRaw = m.querySelector('#stm-ordem').value;
+      const payload = {
+        nome_setor: nome,
+        codigo: $cod.value.trim() || null,
+        descricao: m.querySelector('#stm-desc').value.trim() || null,
+        cor: cor || null,
+        ordem: ordemRaw !== '' ? Number(ordemRaw) : null,
+        ativo: m.querySelector('#stm-ativo').checked ? 1 : 0,
+      };
+      try {
+        if (isEdit) {
+          await api('put', '/terc/setores/' + setor.id_setor, payload, { silent: false });
+          toast('Setor atualizado!', 'success');
+        } else {
+          await api('post', '/terc/setores', payload, { silent: false });
+          toast('Setor cadastrado!', 'success');
+        }
+        close();
+        // Atualiza cache global ANTES de reload
+        try { await window.TERC?.reloadSetores?.(); } catch {}
+        loadList();
+      } catch {}
+    };
+  }
+
+  async function toggleAtivo(s) {
+    try {
+      const r = await api('patch', `/terc/setores/${s.id_setor}/toggle`, null, { silent: false });
+      toast(r?.data?.ativo ? 'Setor ativado' : 'Setor desativado', 'success');
+      try { await window.TERC?.reloadSetores?.(); } catch {}
+      loadList();
+    } catch {}
+  }
+
+  async function excluirSetor(s) {
+    const totVinc = (Number(s.qtd_servicos) || 0) + (Number(s.qtd_terceirizados) || 0) + (Number(s.qtd_remessas) || 0);
+    if (totVinc > 0) {
+      const detalhes = `${s.qtd_servicos || 0} serviço(s), ${s.qtd_terceirizados || 0} terceirizado(s), ${s.qtd_remessas || 0} remessa(s)`;
+      const msg = `O setor "${s.nome_setor}" está vinculado a:\n${detalhes}\n\n` +
+                  `Por segurança, não é possível EXCLUIR um setor vinculado.\n\n` +
+                  `Deseja DESATIVÁ-LO? (o setor some dos selects mas mantém o histórico)`;
+      if (!confirm(msg)) return;
+      try {
+        await api('delete', `/terc/setores/${s.id_setor}?force=1`, null, { silent: false });
+        toast('Setor desativado (mantido por vínculos)', 'success');
+        try { await window.TERC?.reloadSetores?.(); } catch {}
+        loadList();
+      } catch {}
+      return;
+    }
+    if (!confirm(`Excluir o setor "${s.nome_setor}"?\n\nEsta ação é irreversível.`)) return;
+    try {
+      await api('delete', `/terc/setores/${s.id_setor}`, null, { silent: false });
+      toast('Setor excluído', 'success');
+      try { await window.TERC?.reloadSetores?.(); } catch {}
+      loadList();
+    } catch {}
+  }
+
+  await loadList();
+};
+
+// =====================================================================
 // MÓDULO DE SERVIÇOS — Tela completa de cadastro (2026-05-26)
 // =====================================================================
 // Reutiliza os serviços já existentes em terc_servicos (preservados).
@@ -7803,6 +8266,16 @@ ROUTES.terc_servicos = async (main) => {
               </datalist>
             </div>
 
+            <div class="md:col-span-2">
+              <label class="form-label">
+                <i class="fas fa-sitemap mr-1 text-slate-400"></i>Setor (opcional)
+              </label>
+              <select id="sm-setor" class="form-input">
+                ${(window.TERC?.optSetores ? window.TERC.optSetores(srv?.id_setor) : '<option value="">—</option>')}
+              </select>
+              <p class="text-xs text-slate-500 mt-1">Agrupa serviços por setor produtivo (ex.: Estamparia, Aparador, Embalagem)</p>
+            </div>
+
             <div>
               <label class="form-label">Cor de identificação</label>
               <div class="flex gap-2 items-center">
@@ -7915,6 +8388,7 @@ ROUTES.terc_servicos = async (main) => {
       const nome = ($nome.value || '').trim();
       if (!nome) { toast('Informe o nome do serviço', 'warning'); $nome.focus(); return; }
       const cor = isValidHex($cor.value);
+      const _setorEl = m.querySelector('#sm-setor');
       const payload = {
         desc_servico: nome,
         descricao: m.querySelector('#sm-desc').value.trim() || null,
@@ -7924,6 +8398,7 @@ ROUTES.terc_servicos = async (main) => {
         tempo_padrao: m.querySelector('#sm-tempo').value !== '' ? Number(m.querySelector('#sm-tempo').value) : null,
         observacoes: m.querySelector('#sm-obs').value.trim() || null,
         ativo: m.querySelector('#sm-ativo').checked ? 1 : 0,
+        id_setor: _setorEl && _setorEl.value ? Number(_setorEl.value) : null,
       };
       try {
         if (isEdit) {
@@ -7983,6 +8458,8 @@ ROUTES.terc_servicos = async (main) => {
   }
 
   // Inicializa
+  // HOTFIX 0037: garante setores no cache para o select do modal
+  try { if (window.TERC && (!window.TERC.setores || !window.TERC.setores.length)) await window.TERC.reloadSetores?.(); } catch {}
   await loadList();
 };
 

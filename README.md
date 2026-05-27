@@ -1434,10 +1434,80 @@ O índice `ux_terc_produtos_ref_col` na `terc_produtos` é `UNIQUE (cod_ref, COA
 - `GET /api/terc/produtos` sem auth → **401 friendly** ✅
 - Home `/` → **HTTP 200**
 
+## 🆕 HOTFIX Módulo Setores (2026-05-27) — Migration 0037
+
+### 🎯 Objetivo
+Implementação completa do módulo de **Setores Produtivos** da terceirização (Estamparia, Aparador, Embalagem, etc.) com CRUD profissional, vinculação a serviços, contagem de vínculos e isolamento multi-tenant 100%.
+
+### 📦 Migration `0037_setores_module.sql` (16 cmds — LOCAL ✅ + REMOTE ✅)
+Extensão da tabela `terc_setores` via `ALTER TABLE ADD COLUMN` (evita FK violation no rebuild):
+- `codigo TEXT` (slug auto-gerado tenant-scoped)
+- `descricao TEXT`, `cor TEXT`, `ordem INTEGER DEFAULT 0`
+- `dt_alteracao TEXT`, `criado_por TEXT`, `alterado_por TEXT`
+- Backfill: `ordem = id_setor` inicial; `codigo` via slug NFD-normalizado
+- Backfill `id_empresa = 1` em registros antigos
+- Adicionado `id_setor INTEGER REFERENCES terc_setores(id_setor)` em `terc_servicos`
+- Índices multi-tenant:
+  - `ux_terc_setores_emp_codigo (id_empresa, codigo) WHERE codigo IS NOT NULL`
+  - `idx_terc_setores_emp_ativo (id_empresa, ativo)`
+  - `idx_terc_setores_emp_ordem (id_empresa, ordem)`
+  - `idx_terc_servicos_emp_setor (id_empresa, id_setor)`
+
+> ⚠️ **Limitação preservada:** O UNIQUE global em `nome_setor` (autoindex_terc_setores_1) permanece — remover exigiria rebuild com FK violation. Não impacta funcionamento: validação anti-duplicidade agora é tenant-scoped via `(id_empresa, LOWER(nome_setor))` checada no backend, e o índice UNIQUE composto em `codigo` provê garantia tenant-scoped a nível de DB.
+
+### 🔌 Backend (`src/routes/terceirizacao.ts`)
+**7 endpoints completos** para `/api/terc/setores`:
+| Método | Rota | Função |
+|---|---|---|
+| `GET` | `/terc/setores` | Lista com `?q=...&ativo=0|1` + contagens `qtd_servicos`, `qtd_terceirizados`, `qtd_remessas` |
+| `GET` | `/terc/setores/:id` | Detalhe + vínculos |
+| `POST` | `/terc/setores` | Cria; auto-slug; auto-ordem; anti-duplicate por `(id_empresa, LOWER(nome_setor))` e `(id_empresa, codigo)` |
+| `PUT` | `/terc/setores/:id` | Update full |
+| `PATCH` | `/terc/setores/:id/toggle` | Alterna `ativo` |
+| `PATCH` | `/terc/setores/ordenar` | Batch reorder via `{ ordens: [{id_setor, ordem}] }` |
+| `DELETE` | `/terc/setores/:id` | Hard delete sem vínculos; soft delete (`ativo=0`) via `?force=1` |
+
+**Endpoint `/terc/servicos` estendido**:
+- Filtro `?id_setor=N`
+- LEFT JOIN `terc_setores` adicionando `setor_nome`, `setor_cor` ao retorno
+- `ORDER BY s.ativo DESC, COALESCE(st.ordem,9999), s.categoria, s.desc_servico`
+- POST/PUT aceitam `id_setor` com validação tenant-scoped (rejeita setor de outra empresa)
+
+**Helper `_slugSetor()`**: NFD normalize → lowercase → `[^a-z0-9]+ → _` → trim.
+
+**Audit + logTenant** em todas as mutações.
+
+### 🎨 Frontend (`public/static/app.js`)
+- Novo item NAV `terc_setores` em Cadastros (entre Cores e Terceirizados, ícone `fa-sitemap`)
+- `ROUTES.terc_setores`: tabela com busca, filtro de status, ordenação (ordem/nome/serviços/recente), badge de vínculos, ações editar/toggle/excluir
+- `openSetorModal`: cadastro/edição com auto-slug, color picker + paleta sugerida, ordem manual, pré-visualização
+- Modal de Serviço estendido com select `id_setor` (carrega via `TERC.optSetores`)
+- Cache global `TERC.setores` + métodos `reloadSetores()` e `reloadServicos()`
+- `optSetores(sel)` filtra apenas setores ativos
+- Cache busting: `app.js?v=44` + `styles.css?v=44`
+
+### 🛡️ Multi-tenant validado (LOCAL)
+- ✅ E1 vê apenas seus 3 setores (Aparador, Embalagem, Estamparia)
+- ✅ GET/PUT/DELETE de setor de E4 retornam 404 quando chamados por E1
+- ✅ POST/PUT `/terc/servicos` rejeita `id_setor` pertencente a outra empresa (400 "Setor inválido para esta empresa")
+- ✅ Anti-duplicate por nome dentro do mesmo tenant
+- ✅ Slug `codigo` UNIQUE por `(id_empresa, codigo)` com partial index `WHERE codigo IS NOT NULL`
+
+### 📊 Não-regressão preservada (LOCAL ✅ + REMOTE ✅)
+- ✅ Os 3 setores E1 originais preservados (`id_setor` 1, 2, 3 com slugs `aparador`, `embalagem`, `estamparia`)
+- ✅ **177 remessas com `id_setor` em PROD preservadas** (validado via SQL `SELECT COUNT(*) FROM terc_remessas WHERE id_setor IS NOT NULL`)
+- ✅ Terceirizados com FK `id_setor` (26 em Aparador, 2 em Embalagem, 1 em Estamparia) intactos
+- ✅ Build sem erros: **288.62 kB** (+6.75 kB vs baseline 281.87 kB)
+- ✅ Deploy PROD: https://57541409.corepro-confeccao.pages.dev
+- ✅ HTML serve `v=44`; `app.js?v=44` HTTP 200
+- ✅ `/api/terc/setores` e `/api/terc/servicos` retornam 401 friendly sem auth
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
+- [x] ~~Módulo Setores~~ ✅ **Implementado HOTFIX 0037** (CRUD completo + multi-tenant + 177 remessas preservadas)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
+- [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)
 - [ ] Gráficos interativos adicionais no dashboard (já tem Chart.js carregado)
 - [ ] Mobile-first avançado para apontamento (PWA)
