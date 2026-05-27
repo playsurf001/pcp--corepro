@@ -4439,6 +4439,33 @@ textarea.field-invalid {
   cursor: help;
 }
 
+/* HOTFIX 0037: Chip de Setor em listagens (Remessas/Retornos) */
+.rem-setor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  background: rgba(124, 58, 237, 0.13);
+  color: #7C3AED;
+  border: 1px solid rgba(124, 58, 237, 0.28);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.rem-setor-chip > i {
+  font-size: 9px;
+  opacity: 0.85;
+}
+[data-theme="dark"] .rem-setor-chip {
+  background: rgba(167, 139, 250, 0.18);
+  color: #C4B5FD;
+  border-color: rgba(167, 139, 250, 0.34);
+}
+
 /* Status pill */
 .srv-status-on,
 .srv-status-off {

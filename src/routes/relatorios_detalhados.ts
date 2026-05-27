@@ -31,6 +31,7 @@ function buildWhere(q: any, prefix: string, id_empresa: number) {
   binds.push(id_empresa);
   if (q.id_terc)    { where.push(`${p}id_terc = ?`);    binds.push(Number(q.id_terc)); }
   if (q.id_servico) { where.push(`${p}id_servico = ?`); binds.push(Number(q.id_servico)); }
+  if (q.id_setor)   { where.push(`${p}id_setor = ?`);   binds.push(Number(q.id_setor)); } // HOTFIX 0037
   if (q.id_colecao) { where.push(`${p}id_colecao = ?`); binds.push(Number(q.id_colecao)); }
   if (q.cor)        { where.push(`UPPER(${p}cor) = UPPER(?)`); binds.push(q.cor); }
   if (q.cod_ref)    { where.push(`${p}cod_ref LIKE ?`); binds.push('%' + q.cod_ref + '%'); }
@@ -368,6 +369,40 @@ app.get('/relatorios-det/por-servico', async (c) => {
 });
 
 /* ============================================================
+ * 6b) RELATÓRIO POR SETOR (HOTFIX 0037)
+ * Inicia FROM terc_setores → filtro explícito st.id_empresa
+ * ============================================================ */
+app.get('/relatorios-det/por-setor', async (c) => {
+  try {
+    const id_empresa = getEmpresa(c);
+    const q = c.req.query();
+    const { ini, fim } = periodo(q);
+    const rows = await c.env.DB.prepare(
+      `SELECT st.id_setor, st.nome_setor, st.cor, st.codigo, st.ordem,
+              COUNT(DISTINCT r.id_remessa)        AS qtd_remessas,
+              COALESCE(SUM(r.qtd_total),0)        AS qtd_total,
+              COALESCE(SUM(rt.qtd_boa),0)         AS qtd_produzida,
+              COALESCE(SUM(rt.qtd_refugo),0)      AS qtd_faltas,
+              COALESCE(SUM(rt.qtd_conserto),0)    AS qtd_consertos,
+              COALESCE(SUM(r.valor_total),0)      AS valor_total,
+              COALESCE(SUM(r.valor_pago),0)       AS valor_pago,
+              COALESCE(AVG(r.prazo_dias),0)       AS prazo_medio,
+              COALESCE(AVG(r.efic_pct),0)         AS efic_media,
+              COUNT(DISTINCT r.id_terc)           AS qtd_terceirizados_periodo
+       FROM terc_setores st
+       LEFT JOIN terc_remessas r ON r.id_setor = st.id_setor AND r.dt_saida BETWEEN ? AND ? AND r.id_empresa = ?
+       LEFT JOIN terc_retornos rt ON rt.id_remessa = r.id_remessa
+       WHERE st.id_empresa = ?
+       GROUP BY st.id_setor
+       ORDER BY COALESCE(st.ordem,9999), st.nome_setor`
+    ).bind(ini, fim, id_empresa, id_empresa).all();
+    return c.json(ok({ periodo: { ini, fim }, rows: rows.results || [] }));
+  } catch (e: any) {
+    return fail('Erro por setor: ' + (e?.message || e), 500);
+  }
+});
+
+/* ============================================================
  * 7) RELATÓRIO POR PRODUTO
  * ============================================================ */
 app.get('/relatorios-det/por-produto', async (c) => {
@@ -606,10 +641,12 @@ app.get('/relatorios-det/historico', async (c) => {
 app.get('/relatorios-det/filtros', async (c) => {
   try {
     const id_empresa = getEmpresa(c);
-    const [tercs, servs, cols, cores, ops] = await Promise.all([
+    const [tercs, servs, cols, setores, cores, ops] = await Promise.all([
       c.env.DB.prepare(`SELECT id_terc AS id, nome_terc AS nome FROM terc_terceirizados WHERE ativo=1 AND id_empresa=? ORDER BY nome_terc`).bind(id_empresa).all(),
       c.env.DB.prepare(`SELECT id_servico AS id, desc_servico AS nome FROM terc_servicos WHERE ativo=1 AND id_empresa=? ORDER BY desc_servico`).bind(id_empresa).all(),
       c.env.DB.prepare(`SELECT id_colecao AS id, nome_colecao AS nome FROM terc_colecoes WHERE ativo=1 AND id_empresa=? ORDER BY nome_colecao`).bind(id_empresa).all(),
+      // HOTFIX 0037: lista de setores ativos
+      c.env.DB.prepare(`SELECT id_setor AS id, nome_setor AS nome, cor FROM terc_setores WHERE ativo=1 AND id_empresa=? ORDER BY COALESCE(ordem,9999), nome_setor`).bind(id_empresa).all(),
       c.env.DB.prepare(`SELECT DISTINCT cor FROM terc_remessas WHERE cor IS NOT NULL AND TRIM(cor)<>'' AND id_empresa=? ORDER BY cor`).bind(id_empresa).all(),
       c.env.DB.prepare(`SELECT DISTINCT num_op FROM terc_remessas WHERE num_op IS NOT NULL AND TRIM(num_op)<>'' AND id_empresa=? ORDER BY num_op DESC LIMIT 200`).bind(id_empresa).all(),
     ]);
@@ -617,6 +654,7 @@ app.get('/relatorios-det/filtros', async (c) => {
       terceirizados: tercs.results || [],
       servicos:      servs.results || [],
       colecoes:      cols.results || [],
+      setores:       setores.results || [], // HOTFIX 0037
       cores:         (cores.results as any[] || []).map(x => x.cor),
       ops:           (ops.results as any[] || []).map(x => x.num_op),
       status: ['AguardandoEnvio','Enviado','EmProducao','Atrasado','Concluido','Retornado','Pago','Cancelado','Parcial'],

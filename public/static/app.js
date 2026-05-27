@@ -2689,6 +2689,7 @@ ROUTES.terc_remessas = async (main) => {
     search:     '',
     id_terc:    savedFilters.id_terc || '',
     id_servico: savedFilters.id_servico || '',
+    id_setor:   savedFilters.id_setor || '',  // HOTFIX 0037
     status:     savedFilters.status || '',
     de:         savedFilters.de || deDefault,
     ate:        savedFilters.ate || hoje,
@@ -2743,6 +2744,10 @@ ROUTES.terc_remessas = async (main) => {
               <select id="f-serv">${TERC.optServicos()}</select>
             </div>
             <div class="filter-cell">
+              <label>Setor</label>
+              <select id="f-setor">${TERC.optSetores()}</select>
+            </div>
+            <div class="filter-cell">
               <label>Status</label>
               <select id="f-status">
                 <option value="">Todos</option>
@@ -2786,6 +2791,7 @@ ROUTES.terc_remessas = async (main) => {
   const $search  = $('#f-search');
   const $terc    = $('#f-terc');
   const $serv    = $('#f-serv');
+  const $setor   = $('#f-setor');   // HOTFIX 0037
   const $status  = $('#f-status');
   const $de      = $('#f-de');
   const $ate     = $('#f-ate');
@@ -2797,6 +2803,7 @@ ROUTES.terc_remessas = async (main) => {
   try {
     if (st.id_terc)    $terc.value = String(st.id_terc);
     if (st.id_servico) $serv.value = String(st.id_servico);
+    if (st.id_setor && $setor) $setor.value = String(st.id_setor); // HOTFIX 0037
     if (st.status)     $status.value = String(st.status);
   } catch {}
 
@@ -2833,7 +2840,10 @@ ROUTES.terc_remessas = async (main) => {
       <tr class="remessas-row">
         <td class="text-right font-mono tabular-nums">${r?.num_controle ?? '—'}</td>
         <td>${escapeHtml(r?.num_op || '—')}</td>
-        <td class="truncate" title="${escapeHtml(r?.nome_terc || '')}">${escapeHtml(r?.nome_terc || '—')}</td>
+        <td class="truncate" title="${escapeHtml(r?.nome_terc || '')}${r?.nome_setor ? ' · ' + escapeHtml(r.nome_setor) : ''}">
+          ${escapeHtml(r?.nome_terc || '—')}
+          ${r?.nome_setor ? `<span class="rem-setor-chip" title="Setor: ${escapeHtml(r.nome_setor)}"><i class="fas fa-sitemap"></i>${escapeHtml(r.nome_setor)}</span>` : ''}
+        </td>
         <td class="text-xs text-slate-500 truncate" title="${escapeHtml(r?.desc_servico || '')}">${escapeHtml(r?.desc_servico || '—')}</td>
         <td>
           <span class="font-mono text-xs">${escapeHtml(r?.cod_ref || '')}</span>
@@ -2941,8 +2951,8 @@ ROUTES.terc_remessas = async (main) => {
   function persistFilters() {
     try {
       sessionStorage.setItem('corepro:remessas:filtros', JSON.stringify({
-        id_terc: st.id_terc, id_servico: st.id_servico, status: st.status,
-        de: st.de, ate: st.ate
+        id_terc: st.id_terc, id_servico: st.id_servico, id_setor: st.id_setor,
+        status: st.status, de: st.de, ate: st.ate
       }));
     } catch {}
   }
@@ -2969,6 +2979,7 @@ ROUTES.terc_remessas = async (main) => {
     if (st.search)     p.set('search',     st.search);
     if (st.id_terc)    p.set('id_terc',    st.id_terc);
     if (st.id_servico) p.set('id_servico', st.id_servico);
+    if (st.id_setor)   p.set('id_setor',   st.id_setor);  // HOTFIX 0037
     if (st.status)     p.set('status',     st.status);
     if (st.de)         p.set('de',         st.de);
     if (st.ate)        p.set('ate',        st.ate);
@@ -3018,6 +3029,7 @@ ROUTES.terc_remessas = async (main) => {
   }
   bindChange($terc,   'id_terc');
   bindChange($serv,   'id_servico');
+  if ($setor) bindChange($setor, 'id_setor');  // HOTFIX 0037
   bindChange($status, 'status');
   bindChange($de,     'de');
   bindChange($ate,    'ate');
@@ -3026,6 +3038,7 @@ ROUTES.terc_remessas = async (main) => {
     st.search = '';     $search.value = '';
     st.id_terc = '';    try { $terc.value = ''; } catch {}
     st.id_servico = ''; try { $serv.value = ''; } catch {}
+    st.id_setor = '';   try { if ($setor) $setor.value = ''; } catch {}  // HOTFIX 0037
     st.status = '';     $status.value = '';
     st.de = deDefault;  $de.value = deDefault;
     st.ate = hoje;      $ate.value = hoje;
@@ -5555,6 +5568,7 @@ ROUTES.terc_retornos = async (main) => {
     de:        savedFilters.de  || deDefault,
     ate:       savedFilters.ate || hoje,
     id_terc:   savedFilters.id_terc || '',
+    id_setor:  savedFilters.id_setor || '',  // HOTFIX 0037
     search:    '',
     status_pag: savedFilters.status_pag || '',
     page:      1,
@@ -5595,6 +5609,10 @@ ROUTES.terc_retornos = async (main) => {
             <div class="filter-cell">
               <label>Terceirizado</label>
               <select id="f-terc">${TERC.optTerc()}</select>
+            </div>
+            <div class="filter-cell">
+              <label>Setor</label>
+              <select id="f-setor">${TERC.optSetores()}</select>
             </div>
             <div class="filter-cell">
               <label>De</label>
@@ -5645,14 +5663,18 @@ ROUTES.terc_retornos = async (main) => {
   const $pager  = $('#ret-pager');
   const $search = $('#f-search');
   const $terc   = $('#f-terc');
+  const $setor  = $('#f-setor');  // HOTFIX 0037
   const $de     = $('#f-de');
   const $ate    = $('#f-ate');
   const $pag    = $('#f-pag');
   const $pp     = $('#f-pp');
 
-  // Pré-popular id_terc com o salvo
+  // Pré-popular id_terc/id_setor com o salvo
   if (state.id_terc) {
     try { $terc.value = String(state.id_terc); } catch {}
+  }
+  if (state.id_setor && $setor) {
+    try { $setor.value = String(state.id_setor); } catch {}
   }
 
   // ----- Helpers de UI -----
@@ -5806,7 +5828,10 @@ ROUTES.terc_retornos = async (main) => {
       <tr class="retornos-row">
         <td class="whitespace-nowrap">${fmt.date(x.dt_retorno)}</td>
         <td class="text-right font-mono">${x.num_controle ?? '—'}</td>
-        <td class="truncate" title="${escapeHtml(x.nome_terc||'')}">${escapeHtml(x.nome_terc || '—')}</td>
+        <td class="truncate" title="${escapeHtml(x.nome_terc||'')}${x.nome_setor ? ' · ' + escapeHtml(x.nome_setor) : ''}">
+          ${escapeHtml(x.nome_terc || '—')}
+          ${x.nome_setor ? `<span class="rem-setor-chip" title="Setor: ${escapeHtml(x.nome_setor)}"><i class="fas fa-sitemap"></i>${escapeHtml(x.nome_setor)}</span>` : ''}
+        </td>
         <td>${refCorParts.join(' ') || '—'}</td>
         <td class="text-xs text-slate-600 truncate" title="${escapeHtml(x.desc_servico||'')}">${escapeHtml(x.desc_servico || '')}</td>
         <td class="text-right text-emerald-700 tabular-nums">${fmt.int(x.qtd_boa)}</td>
@@ -5901,7 +5926,7 @@ ROUTES.terc_retornos = async (main) => {
   // ----- Cache helpers -----
   function cacheKey() {
     return RET_CACHE_KEY + ':' + JSON.stringify({
-      de: state.de, ate: state.ate, id_terc: state.id_terc,
+      de: state.de, ate: state.ate, id_terc: state.id_terc, id_setor: state.id_setor,
       search: state.search, status_pag: state.status_pag,
       page: state.page, per_page: state.per_page
     });
@@ -5931,7 +5956,7 @@ ROUTES.terc_retornos = async (main) => {
   function persistFilters() {
     try {
       sessionStorage.setItem('corepro:retornos:filtros', JSON.stringify({
-        de: state.de, ate: state.ate, id_terc: state.id_terc,
+        de: state.de, ate: state.ate, id_terc: state.id_terc, id_setor: state.id_setor,
         status_pag: state.status_pag, per_page: state.per_page
       }));
     } catch {}
@@ -5965,6 +5990,7 @@ ROUTES.terc_retornos = async (main) => {
       page: String(state.page), per_page: String(state.per_page),
     });
     if (state.id_terc)    p.set('id_terc', state.id_terc);
+    if (state.id_setor)   p.set('id_setor', state.id_setor); // HOTFIX 0037
     if (state.search)     p.set('search', state.search);
     if (state.status_pag) p.set('status_pag', state.status_pag);
 
@@ -6028,6 +6054,7 @@ ROUTES.terc_retornos = async (main) => {
     });
   }
   bindFilterChange($terc, 'id_terc');
+  if ($setor) bindFilterChange($setor, 'id_setor'); // HOTFIX 0037
   bindFilterChange($de,   'de');
   bindFilterChange($ate,  'ate');
   bindFilterChange($pag,  'status_pag');
@@ -6042,6 +6069,7 @@ ROUTES.terc_retornos = async (main) => {
     state.de = deDefault; $de.value = deDefault;
     state.ate = hoje;     $ate.value = hoje;
     state.id_terc = '';   try { $terc.value = ''; } catch {}
+    state.id_setor = '';  try { if ($setor) $setor.value = ''; } catch {} // HOTFIX 0037
     state.status_pag = ''; $pag.value = '';
     state.search = '';     $search.value = '';
     state.page = 1;

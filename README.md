@@ -1502,10 +1502,76 @@ Extensão da tabela `terc_setores` via `ALTER TABLE ADD COLUMN` (evita FK violat
 - ✅ HTML serve `v=44`; `app.js?v=44` HTTP 200
 - ✅ `/api/terc/setores` e `/api/terc/servicos` retornam 401 friendly sem auth
 
+## 🆕 HOTFIX 0037 Pt.2 (2026-05-27) — Filtros por Setor em Remessas/Retornos/Dashboard/Relatórios
+
+### 🎯 Objetivo
+Tornar o **Setor** uma dimensão de **filtro e visualização** em todo o fluxo operacional (Remessas, Retornos, Dashboard e Relatórios Detalhados), aproveitando o cadastro implementado no HOTFIX 0037 Pt.1.
+
+### 🔌 Backend
+
+**`src/routes/terceirizacao.ts`**
+- `GET /terc/remessas`:
+  - Novo filtro `?id_setor=N` (`r.id_setor = ?`)
+  - Busca textual (`?q=`) agora cobre também `st.nome_setor` via LEFT JOIN existente
+- `GET /terc/retornos`:
+  - Novo filtro `?id_setor=N` aplicado ao `r.id_setor` da remessa-mãe
+  - `LEFT JOIN terc_setores st ON st.id_setor = r.id_setor AND st.id_empresa = r.id_empresa` em `kpiSql` e `rowsSql`
+  - Response retorna `nome_setor` e `setor_cor` por linha
+- `GET /terc/dashboard`:
+  - Novo agregador `por_setor` no payload: `[ { id_setor, nome_setor, cor, remessas, pecas, valor } ]` ordenado por `COALESCE(st.ordem, 9999)`
+
+**`src/routes/relatorios_detalhados.ts`**
+- `buildWhere()` aceita `id_setor` (propagado para todos os 15 endpoints `/relatorios-det/*`)
+- `GET /relatorios-det/filtros`: response inclui novo array `setores: [ { id, nome, cor } ]` (apenas setores ativos do tenant)
+- **Novo endpoint** `GET /relatorios-det/por-setor`:
+  - Agregação por setor com `qtd_remessas`, `pecas_enviadas`, `pecas_retornadas`, `pecas_perdidas`, `valor_total`
+  - JOINs tenant-scoped com `terc_remessas` e `terc_retornos`
+  - Ordenado por `COALESCE(st.ordem, 9999), nome_setor`
+
+### 🎨 Frontend (`public/static/app.js`)
+- `ROUTES.terc_remessas`:
+  - Novo `<select id="f-setor">` entre Serviço e Status (alimentado por `TERC.optSetores()` — apenas ativos)
+  - Filtro persistido em `sessionStorage` (chave `corepro:remessas:filtros`)
+  - Propagado em `URLSearchParams`, `bindFilterChange`, botão "limpar filtros"
+  - **Chip visual** `.rem-setor-chip` (purple + ícone `fa-sitemap`) na coluna Terceirizado
+- `ROUTES.terc_retornos`:
+  - Mesmo padrão: `<select id="f-setor">` entre Terceirizado e De
+  - `cacheKey` inclui `id_setor` (cancela request em flight via `AbortController` quando muda)
+  - Filtro persistido em `sessionStorage` (chave `corepro:retornos:filtros`)
+  - **Chip visual** `.rem-setor-chip` na coluna Terceirizado da tabela
+
+### 🎨 CSS (`public/static/styles.css`)
+Nova classe `.rem-setor-chip` com variante dark:
+- Light: `bg rgba(124,58,237,0.13)` · `color #7C3AED` · `border rgba(124,58,237,0.28)`
+- Dark: `bg rgba(167,139,250,0.18)` · `color #C4B5FD` · `border rgba(167,139,250,0.34)`
+- Estilo `pill` com `font-size 10px`, ícone `fa-sitemap` opaco a 85%
+
+### 🔁 Cache busting
+- `src/index.tsx`: `v=44` → **`v=45`** (styles.css + app.js)
+- Build: **291.09 kB** (+2.47 kB vs HOTFIX 0037 Pt.1 baseline 288.62 kB)
+
+### ✅ Testes (LOCAL — Empresa 1)
+| Caso | Resultado |
+|---|---|
+| `GET /terc/remessas?id_setor=1` (Aparador) | **2 remessas** ✅ |
+| `GET /terc/remessas?id_setor=2` (Embalagem — sem dados) | **0** ✅ (sem erro) |
+| `GET /terc/remessas?id_setor=999` (id inválido) | **0** ✅ (graceful, sem 500) |
+| `GET /terc/remessas` (sem filtro) | **5 totais; 2 com `nome_setor`** ✅ |
+| `GET /terc/retornos?id_setor=1` | **0 rows** (DB local sem retornos) ✅ |
+| `GET /relatorios-det/filtros` | retorna 3 setores ✅ |
+| `GET /relatorios-det/por-setor` | agregação OK ✅ |
+| `GET /terc/dashboard` | inclui `por_setor` (2 setores agregados) ✅ |
+
+### 📊 Não-regressão
+- Nenhum endpoint pré-existente foi quebrado: `id_setor` é sempre **opcional** no `where`
+- LEFT JOIN tenant-scoped (`AND st.id_empresa = r.id_empresa`) impede vazamento entre empresas
+- Filtros antigos (cliente, serviço, terceirizado, status, datas) continuam funcionando isoladamente ou combinados com o novo `id_setor`
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
-- [x] ~~Módulo Setores~~ ✅ **Implementado HOTFIX 0037** (CRUD completo + multi-tenant + 177 remessas preservadas)
+- [x] ~~Módulo Setores~~ ✅ **Implementado HOTFIX 0037 Pt.1** (CRUD completo + multi-tenant + 177 remessas preservadas)
+- [x] ~~Filtros por Setor em Remessas/Retornos/Dashboard/Relatórios~~ ✅ **Implementado HOTFIX 0037 Pt.2** (filtro + chip visual + agregações)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

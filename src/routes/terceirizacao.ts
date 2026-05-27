@@ -1771,6 +1771,7 @@ app.get('/terc/remessas', async (c) => {
   if (q.status_fin) { where.push('r.status_fin=?'); binds.push(q.status_fin); }
   if (q.id_terc) { where.push('r.id_terc=?'); binds.push(toInt(q.id_terc)); }
   if (q.id_servico) { where.push('r.id_servico=?'); binds.push(toInt(q.id_servico)); }
+  if (q.id_setor) { where.push('r.id_setor=?'); binds.push(toInt(q.id_setor)); } // HOTFIX 0037
   if (q.id_colecao) { where.push('r.id_colecao=?'); binds.push(toInt(q.id_colecao)); }
   if (q.de) { where.push('r.dt_saida>=?'); binds.push(q.de); }
   if (q.ate) { where.push('r.dt_saida<=?'); binds.push(q.ate); }
@@ -1785,7 +1786,7 @@ app.get('/terc/remessas', async (c) => {
     const terms = String(q.search).trim().split(/\s+/).filter(Boolean).slice(0, 8);
     const fields = [
       'r.num_controle', 'r.cod_ref', 'r.desc_ref', 'r.num_op', 'r.cor',
-      't.nome_terc', 'sv.desc_servico', 'co.nome_colecao'
+      't.nome_terc', 'sv.desc_servico', 'co.nome_colecao', 'st.nome_setor'
     ];
     for (const term of terms) {
       where.push('(' + fields.map(f => `${f} LIKE ?`).join(' OR ') + ')');
@@ -2565,16 +2566,18 @@ app.get('/terc/retornos', async (c) => {
   const offset = (page - 1) * perPage;
 
   // ---- Where dinâmico (compartilhado entre count/kpi e select), tenant-scoped
+  const idSetor = toInt(q.id_setor || 0); // HOTFIX 0037
   const where: string[] = ['rt.id_empresa = ?', 'rt.dt_retorno >= ?', 'rt.dt_retorno <= ?'];
   const binds: any[] = [id_empresa, de, ate];
   if (idTerc) { where.push('r.id_terc = ?'); binds.push(idTerc); }
+  if (idSetor) { where.push('r.id_setor = ?'); binds.push(idSetor); } // HOTFIX 0037
   if (search) {
     // 🔎 Busca inteligente multi-termo: cada termo (separado por espaço) é AND
     // através dos campos via OR — busca parcial, case-insensitive via LIKE.
     const terms = search.split(/\s+/).filter(Boolean).slice(0, 8);
     const fields = [
       'r.num_controle', 'r.cod_ref', 'r.desc_ref', 'r.cor',
-      't.nome_terc', 'r.num_op', 'sv.desc_servico'
+      't.nome_terc', 'r.num_op', 'sv.desc_servico', 'st.nome_setor'
     ];
     for (const term of terms) {
       where.push('(' + fields.map(f => `${f} LIKE ?`).join(' OR ') + ')');
@@ -2601,6 +2604,7 @@ app.get('/terc/retornos', async (c) => {
     JOIN terc_remessas r       ON r.id_remessa = rt.id_remessa AND r.id_empresa = rt.id_empresa
     LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc AND t.id_empresa = r.id_empresa
     LEFT JOIN terc_servicos sv ON sv.id_servico = r.id_servico AND sv.id_empresa = r.id_empresa
+    LEFT JOIN terc_setores st ON st.id_setor = r.id_setor AND st.id_empresa = r.id_empresa
     ${whereSql}`;
   const kpi = await c.env.DB.prepare(kpiSql).bind(...binds).first<any>() || {};
   const totalGeral = Number(kpi.qtd) || 0;
@@ -2616,11 +2620,13 @@ app.get('/terc/retornos', async (c) => {
       rt.dt_pagamento, rt.observacao,
       r.num_controle, r.cod_ref, r.cor, r.num_op,
       t.nome_terc,
-      sv.desc_servico
+      sv.desc_servico,
+      st.nome_setor, st.cor AS setor_cor
     FROM terc_retornos rt
     JOIN terc_remessas r       ON r.id_remessa = rt.id_remessa AND r.id_empresa = rt.id_empresa
     LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc AND t.id_empresa = r.id_empresa
     LEFT JOIN terc_servicos sv ON sv.id_servico = r.id_servico AND sv.id_empresa = r.id_empresa
+    LEFT JOIN terc_setores st ON st.id_setor = r.id_setor AND st.id_empresa = r.id_empresa
     ${whereSql}
     ORDER BY rt.dt_retorno DESC, rt.id_retorno DESC
     LIMIT ? OFFSET ?`;
@@ -3246,6 +3252,18 @@ app.get('/terc/dashboard', async (c) => {
     GROUP BY sv.id_servico
     ORDER BY pecas DESC`).bind(id_empresa, ini, fim).all()).results;
 
+  // HOTFIX 0037: agregação por setor da remessa
+  const porSetor = (await c.env.DB.prepare(`
+    SELECT st.id_setor, st.nome_setor, st.cor,
+      COUNT(r.id_remessa) AS remessas,
+      COALESCE(SUM(r.qtd_total),0) AS pecas,
+      COALESCE(SUM(r.valor_total),0) AS valor
+    FROM terc_remessas r
+    LEFT JOIN terc_setores st ON st.id_setor=r.id_setor AND st.id_empresa=r.id_empresa
+    WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
+    GROUP BY st.id_setor
+    ORDER BY COALESCE(st.ordem,9999), pecas DESC`).bind(id_empresa, ini, fim).all()).results;
+
   const producaoDiaria = (await c.env.DB.prepare(`
     SELECT date(rt.dt_retorno) AS dia,
       COALESCE(SUM(rt.qtd_boa),0) AS boa,
@@ -3308,6 +3326,7 @@ app.get('/terc/dashboard', async (c) => {
     kpis: { remessas: kpiRem, retornos: kpiRet },
     top_terceirizados: topTerc,
     por_servico: porServico,
+    por_setor: porSetor, // HOTFIX 0037
     producao_diaria: producaoDiaria,
     atrasadas,
     em_producao_agora: emProducaoAgora,
