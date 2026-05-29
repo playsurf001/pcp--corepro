@@ -1567,11 +1567,75 @@ Nova classe `.rem-setor-chip` com variante dark:
 - LEFT JOIN tenant-scoped (`AND st.id_empresa = r.id_empresa`) impede vazamento entre empresas
 - Filtros antigos (cliente, serviço, terceirizado, status, datas) continuam funcionando isoladamente ou combinados com o novo `id_setor`
 
+---
+
+## 🆕 HOTFIX 0038 Pt.1 (2026-05-28) — Módulo Backup & Restauração
+
+### 🎯 Objetivo
+Implementar **módulo completo de backup e restauração** com escopo multi-tenant estrito (cada empresa só vê os próprios) + visão global do Master, formato **NDJSON gzipado** (compatível com workerd), restore atômico via `D1.batch()` + `PRAGMA defer_foreign_keys`, e auditoria integral (quem/quando/IP/duração/tamanho).
+
+### 📦 Migration 0038 — Schema (3 novas tabelas, **sem FK** para permitir hard delete de companies)
+- **`backups`** — id_backup, id_empresa (NULL=global), tipo (manual/auto/pre_restore/global), escopo (tenant/global), nome_arquivo, schema_version=38, tamanho_bytes, total_registros, total_tabelas, **checksum_sha256**, storage_driver (`d1-inline` default), storage_path, **payload BLOB**, status (pending/ok/erro/restaurado), erro, duracao_ms, criado_por, criado_por_ip, dt_criacao, dt_restaurado, restaurado_por, observacao
+- **`backup_logs`** — id_log, id_backup, id_empresa, action (create/download/restore_start/restore_ok/restore_fail/delete), ator, ip, user_agent, detalhes (JSON), duracao_ms, status, erro, dt_log
+- **`backup_config`** — id_empresa PRIMARY KEY (0=sentinela global), max_backups (default 10), auto_enabled, auto_frequencia (diario/semanal/mensal), auto_hora_utc (default 3=00BRT), ultima_execucao, proxima_execucao
+- Inserts default: linha de config por company existente + linha id_empresa=0 (global)
+
+### 🔧 Backend
+- **`src/lib/backup_engine.ts`** (13.4 KB) — engine reaproveitável:
+  - `TENANT_TABLES` (24 tabelas: usuarios, cores, terc_*, auditoria, parametros)
+  - `GLOBAL_TABLES` (8 tabelas: companies, plans, subscriptions, payments, super_admins, …)
+  - `sha256Hex()` via **Web Crypto API** + `gzipCompress()`/`gzipDecompress()` via **CompressionStream** nativa
+  - `exportTenant()` / `exportGlobal()` — gera NDJSON: linha 1 `{_meta}`, linhas 2..N `{_table, rows}`, linha final `{_eof, checksum_data}`
+  - `parseAndValidate()` — verifica magic gzip, schema_version, checksum interno
+  - `restoreTenant()` — batch atômico: **`PRAGMA defer_foreign_keys = ON`** + DELETE (ordem reversa) + INSERT (id_empresa forçado ao alvo = cross-tenant protection)
+- **`src/routes/backup.ts`** (29 KB) — 15 endpoints:
+  - **Tenant (`/api/backup/*`)**: list, config GET/PUT, POST create, GET download, POST restore (senha + `confirma_texto=RESTAURAR` + snapshot pré-restore automático), DELETE, GET logs
+  - **Master (`/api/master/backup/*`)**: list (todos + filtros), POST global, POST tenant/:id, GET/DELETE/POST restore, GET logs com nome_empresa JOIN
+- **`normalizeBlob()`** helper (4 casos) — fix do D1 BLOB local retornando `Array<number>` (better-sqlite3 driver) em vez de Uint8Array
+
+### 🎨 Frontend
+- **NAV** item `Backup & Restauração` (ícone `fa-database`) em grupo **Configurações** (adminOnly)
+- **`ROUTES.backup`** (~400 linhas): header gradiente azul/roxo, botão "Gerar Backup Agora", barra de progresso animada, 4 stat cards (Total / Saudáveis / Disco / Último), tabela com badges `.bkp-pill` para tipo/status, ações (download/restore/delete), modal de restore com **confirmação tripla** (senha + texto "RESTAURAR" + warning), modal de configuração (max_backups/auto_enabled/frequência/hora UTC), seção colapsável com últimos 30 logs de auditoria
+- **CSS `.bkp-pill`** + `.bkp-act` + `.bkp-header` + `.bkp-progress` + `.bkp-warn-box` adicionados em styles.css (cor base via `var(--c)` inline)
+- Cache busting: `v=45` → `v=46`
+
+### 🧪 Validação LOCAL (8 cenários — todos passando)
+| # | Cenário | Resultado |
+|---|---------|-----------|
+| 1 | Tenant E1: POST /api/backup | ✅ Backup #1 — 208 reg / 24 tabs / 4959 B / 119 ms |
+| 2 | Download #1 | ✅ 4959 B, magic 1f8b, 26 linhas NDJSON, EOF + checksum OK |
+| 3 | Isolamento E3 | ✅ Vê só backup próprio; GET /backup/1 → 404; DELETE/restore → 404 |
+| 4 | Restore safety | ✅ Senha errada → 401; confirma_texto wrong → 400 |
+| 5 | Restore happy path | ✅ 24 DELETE + 208 INSERT + snapshot #4 / 133 ms / E1 íntegro / E3,E5 intocados |
+| 6 | Master list/global | ✅ Lista 4; backup global #5 — 269 reg / 32 tabs / 9094 B |
+| 7 | Master tenant E5 | ✅ Backup #6 — 21 reg |
+| 8 | Audit logs | ✅ 10 entries com ator/IP/UA/duração/status |
+
+### 🔒 Segurança
+- **Multi-tenant strict**: tenant endpoints exigem `id_empresa = backup.id_empresa` (404 cross-tenant)
+- **Restore exige senha** do usuário logado (rehash + comparação)
+- **Cross-tenant protection no payload**: `id_empresa` é sempre reescrito para o alvo durante INSERT
+- **Snapshot pré-restore automático** (tipo `pre_restore`) — rollback manual disponível
+- **Auditoria integral** em `backup_logs` (toda mutação registrada)
+- **Storage abstraction**: campo `storage_driver` permite migração futura para R2/S3 sem mudar schema
+
+### 📊 Métricas
+- Build: **315.01 kB** (+24 kB vs HOTFIX 0037 Pt.2 baseline 291.09 kB)
+- Migration: 12 commands aplicados (LOCAL + REMOTE)
+- Status: ✅ Concluído e em produção
+
+### 🔮 Próximos passos (fora do MVP)
+- Cron Triggers reais (config existe via `backup_config.auto_enabled` — falta wiring no `wrangler.jsonc` + handler `scheduled`)
+- Storage R2 (driver `r2://` quando payload > 4 MB ou retenção longa)
+- Notificação email/webhook em falha
+- Restore parcial (selecionar tabelas)
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
 - [x] ~~Módulo Setores~~ ✅ **Implementado HOTFIX 0037 Pt.1** (CRUD completo + multi-tenant + 177 remessas preservadas)
 - [x] ~~Filtros por Setor em Remessas/Retornos/Dashboard/Relatórios~~ ✅ **Implementado HOTFIX 0037 Pt.2** (filtro + chip visual + agregações)
+- [x] ~~Módulo Backup & Restauração~~ ✅ **Implementado HOTFIX 0038 Pt.1** (NDJSON gzipado + restore atômico + multi-tenant + auditoria + visão master)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

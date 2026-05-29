@@ -433,6 +433,7 @@ const NAV = [
   { id: 'minha_empresa',         label: 'Minha Empresa',     icon: 'fa-building',         group: 'Configurações', collapsible: true, ownerOnly: true },
   { id: 'minha_assinatura',      label: 'Assinatura & Plano',icon: 'fa-credit-card',      group: 'Configurações', collapsible: true, ownerOnly: true },
   { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Configurações', collapsible: true, adminOnly: true },
+  { id: 'backup',                label: 'Backup & Restauração', icon: 'fa-database',      group: 'Configurações', collapsible: true, adminOnly: true },
 ];
 
 /** Lista de grupos colapsáveis (precisa estar sincronizado com NAV) */
@@ -10278,6 +10279,487 @@ function renderTrialBanner(banner) {
   });
 }
 window.renderTrialBanner = renderTrialBanner;
+
+/* =================================================================
+ * HOTFIX 0038 — Backup & Restauração
+ * UI tenant-scoped. Acessível apenas a admin (adminOnly no NAV).
+ * Endpoints: /backup, /backup/config, /backup/:id/download, /backup/:id/restore
+ * ================================================================= */
+ROUTES.backup = async (main) => {
+  if (!isAdmin()) {
+    main.innerHTML = `
+      <div class="max-w-2xl mx-auto">
+        <div class="card p-8 text-center">
+          <i class="fas fa-lock text-5xl text-amber-500 mb-4"></i>
+          <div class="text-xl font-bold mb-2">Acesso restrito</div>
+          <div class="text-sm text-slate-500 mb-4">Apenas usuários <strong>admin</strong> podem acessar o módulo de Backup.</div>
+          <button class="btn btn-secondary" onclick="navigate('dashboard')">
+            <i class="fas fa-arrow-left mr-1"></i>Voltar
+          </button>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const fmtBytes = (n) => {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+  };
+  const fmtDt = (s) => {
+    if (!s) return '—';
+    try {
+      const d = s.includes('T') ? new Date(s) : new Date(s.replace(' ', 'T') + 'Z');
+      return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    } catch { return s; }
+  };
+  const tipoBadge = (tipo) => {
+    const map = {
+      manual:      { color: '#2563EB', icon: 'fa-hand-pointer',  label: 'Manual' },
+      auto:        { color: '#10B981', icon: 'fa-clock',         label: 'Auto' },
+      pre_restore: { color: '#F59E0B', icon: 'fa-life-ring',     label: 'Pré-Restore' },
+      global:      { color: '#7C3AED', icon: 'fa-globe',         label: 'Global' },
+    };
+    const t = map[tipo] || { color: '#64748B', icon: 'fa-file', label: tipo };
+    return `<span class="bkp-pill" style="--c:${t.color}"><i class="fas ${t.icon}"></i>${t.label}</span>`;
+  };
+  const statusBadge = (status) => {
+    const map = {
+      ok:          { color: '#10B981', icon: 'fa-check-circle',     label: 'OK' },
+      pending:     { color: '#F59E0B', icon: 'fa-spinner fa-spin',  label: 'Processando' },
+      erro:        { color: '#EF4444', icon: 'fa-exclamation-triangle', label: 'Erro' },
+      restaurado:  { color: '#7C3AED', icon: 'fa-rotate-left',      label: 'Restaurado' },
+    };
+    const s = map[status] || { color: '#64748B', icon: 'fa-circle', label: status };
+    return `<span class="bkp-pill" style="--c:${s.color}"><i class="fas ${s.icon}"></i>${s.label}</span>`;
+  };
+
+  main.innerHTML = `
+    <div class="max-w-7xl mx-auto space-y-5">
+      <!-- HEADER -->
+      <div class="card p-5" style="background:linear-gradient(135deg, rgba(37,99,235,0.08), rgba(124,58,237,0.08)); border:1px solid rgba(124,58,237,0.22)">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <div class="text-xl font-bold flex items-center gap-3">
+              <i class="fas fa-database text-2xl" style="color:#7C3AED"></i>
+              Backup & Restauração
+            </div>
+            <div class="text-xs text-slate-500 mt-1">Cópia de segurança dos dados desta empresa em arquivo <code>.ndjson.gz</code> com checksum SHA-256.</div>
+          </div>
+          <div class="flex gap-2">
+            <button class="btn btn-primary" id="bkp-gerar">
+              <i class="fas fa-bolt mr-2"></i>Gerar Backup Agora
+            </button>
+            <button class="btn btn-secondary" id="bkp-cfg-open">
+              <i class="fas fa-sliders-h mr-2"></i>Configurações
+            </button>
+          </div>
+        </div>
+        <div id="bkp-progress" class="hidden mt-4">
+          <div class="text-xs text-slate-400 mb-2 flex items-center gap-2">
+            <i class="fas fa-spinner fa-spin text-brand"></i>
+            <span id="bkp-progress-text">Gerando backup…</span>
+          </div>
+          <div style="height:6px;background:rgba(148,163,184,0.18);border-radius:99px;overflow:hidden">
+            <div id="bkp-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#2563EB,#7C3AED);transition:width .3s"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STATS -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="bkp-stats">
+        <!-- preenchido por JS -->
+      </div>
+
+      <!-- LISTA -->
+      <div class="card overflow-hidden">
+        <div class="px-4 py-3 border-b flex items-center justify-between flex-wrap gap-2" style="border-color:var(--card-border)">
+          <div class="font-semibold flex items-center gap-2">
+            <i class="fas fa-list-ul text-brand"></i>Histórico de Backups
+          </div>
+          <button class="btn btn-secondary btn-sm" id="bkp-reload">
+            <i class="fas fa-sync-alt mr-1"></i>Atualizar
+          </button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:60px">#</th>
+                <th>Arquivo</th>
+                <th style="width:120px">Tipo</th>
+                <th style="width:110px">Tamanho</th>
+                <th style="width:90px">Registros</th>
+                <th style="width:110px">Status</th>
+                <th style="width:170px">Criado</th>
+                <th style="width:120px">Por</th>
+                <th style="width:200px;text-align:right">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="bkp-tbody">
+              <tr><td colspan="9" class="text-center text-slate-400 py-8"><i class="fas fa-spinner fa-spin mr-2"></i>Carregando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <details class="card overflow-hidden">
+        <summary class="px-4 py-3 cursor-pointer font-semibold flex items-center gap-2" style="user-select:none">
+          <i class="fas fa-clipboard-list text-brand"></i>Logs de Auditoria (últimos 30)
+        </summary>
+        <div class="overflow-x-auto border-t" style="border-color:var(--card-border)">
+          <table class="data-table" id="bkp-logs-table">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Backup</th>
+                <th>Ação</th>
+                <th>Ator</th>
+                <th>IP</th>
+                <th>Status</th>
+                <th>Duração</th>
+              </tr>
+            </thead>
+            <tbody id="bkp-logs-tbody">
+              <tr><td colspan="7" class="text-center text-slate-400 py-6 text-xs">Carregando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  `;
+
+  // ===== HANDLERS =====
+
+  async function loadList() {
+    const tbody = $('#bkp-tbody');
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-slate-400 py-8"><i class="fas fa-spinner fa-spin mr-2"></i>Carregando…</td></tr>';
+    let items = [];
+    try {
+      const r = await api('get', '/backup');
+      items = r?.data || [];
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center text-red-500 py-8"><i class="fas fa-exclamation-triangle mr-2"></i>Falha ao carregar.</td></tr>`;
+      return;
+    }
+    renderStats(items);
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center text-slate-400 py-10">
+        <i class="fas fa-inbox text-3xl mb-2"></i>
+        <div class="text-sm">Nenhum backup gerado ainda.</div>
+        <div class="text-xs mt-1">Clique em <strong>Gerar Backup Agora</strong> para criar o primeiro.</div>
+      </td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map((b) => `
+      <tr>
+        <td class="text-xs text-slate-500">#${b.id_backup}</td>
+        <td class="text-xs">
+          <div class="font-mono" style="word-break:break-all">${escapeHtml(b.nome_arquivo || '')}</div>
+          ${b.observacao ? `<div class="text-slate-400 mt-1" style="font-size:10px">${escapeHtml(b.observacao)}</div>` : ''}
+        </td>
+        <td>${tipoBadge(b.tipo)}</td>
+        <td class="text-xs font-mono">${fmtBytes(b.tamanho_bytes)}</td>
+        <td class="text-xs">${Number(b.total_registros || 0).toLocaleString('pt-BR')} <span class="text-slate-400">· ${b.total_tabelas || 0} tab.</span></td>
+        <td>${statusBadge(b.status)}${b.erro ? `<div class="text-xs text-red-500 mt-1" title="${escapeHtml(b.erro)}">${escapeHtml(b.erro.slice(0, 50))}…</div>` : ''}</td>
+        <td class="text-xs text-slate-500">${fmtDt(b.dt_criacao)}<div class="text-slate-400" style="font-size:10px">${b.duracao_ms ? b.duracao_ms + 'ms' : ''}</div></td>
+        <td class="text-xs">${escapeHtml(b.criado_por || '—')}</td>
+        <td class="text-right">
+          <div class="flex gap-1 justify-end flex-wrap">
+            <button class="btn btn-sm btn-secondary" data-action="download" data-id="${b.id_backup}" data-arquivo="${escapeHtml(b.nome_arquivo)}" title="Baixar" ${b.status !== 'ok' && b.status !== 'restaurado' ? 'disabled' : ''}>
+              <i class="fas fa-download"></i>
+            </button>
+            <button class="btn btn-sm" data-action="restore" data-id="${b.id_backup}" data-arquivo="${escapeHtml(b.nome_arquivo)}" title="Restaurar" style="background:#F59E0B;color:#fff" ${b.status !== 'ok' && b.status !== 'restaurado' ? 'disabled' : ''}>
+              <i class="fas fa-undo-alt"></i>
+            </button>
+            <button class="btn btn-sm" data-action="delete" data-id="${b.id_backup}" data-arquivo="${escapeHtml(b.nome_arquivo)}" title="Excluir" style="background:#EF4444;color:#fff">
+              <i class="fas fa-trash"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+    // bind ações
+    tbody.querySelectorAll('button[data-action]').forEach((btn) => {
+      btn.onclick = () => {
+        const action = btn.getAttribute('data-action');
+        const id = btn.getAttribute('data-id');
+        const arquivo = btn.getAttribute('data-arquivo');
+        if (action === 'download') downloadBackup(id, arquivo);
+        else if (action === 'restore') openRestoreModal(id, arquivo);
+        else if (action === 'delete') deleteBackup(id, arquivo);
+      };
+    });
+  }
+
+  function renderStats(items) {
+    const total = items.length;
+    const okCount = items.filter((b) => b.status === 'ok' || b.status === 'restaurado').length;
+    const sumBytes = items.reduce((acc, b) => acc + Number(b.tamanho_bytes || 0), 0);
+    const last = items[0]?.dt_criacao;
+    $('#bkp-stats').innerHTML = `
+      <div class="card p-3" style="background:rgba(37,99,235,0.06);border-color:rgba(37,99,235,0.22)">
+        <div class="text-[10px] uppercase tracking-widest text-slate-400">Total Backups</div>
+        <div class="text-2xl font-bold mt-1">${total}</div>
+      </div>
+      <div class="card p-3" style="background:rgba(16,185,129,0.06);border-color:rgba(16,185,129,0.22)">
+        <div class="text-[10px] uppercase tracking-widest text-slate-400">Saudáveis</div>
+        <div class="text-2xl font-bold mt-1" style="color:#10B981">${okCount}</div>
+      </div>
+      <div class="card p-3" style="background:rgba(124,58,237,0.06);border-color:rgba(124,58,237,0.22)">
+        <div class="text-[10px] uppercase tracking-widest text-slate-400">Total em disco</div>
+        <div class="text-2xl font-bold mt-1">${fmtBytes(sumBytes)}</div>
+      </div>
+      <div class="card p-3" style="background:rgba(245,158,11,0.06);border-color:rgba(245,158,11,0.22)">
+        <div class="text-[10px] uppercase tracking-widest text-slate-400">Último Backup</div>
+        <div class="text-base font-bold mt-1">${last ? fmtDt(last) : '—'}</div>
+      </div>
+    `;
+  }
+
+  async function loadLogs() {
+    let items = [];
+    try { items = (await api('get', '/backup/logs?limit=30'))?.data || []; }
+    catch {}
+    const tbody = $('#bkp-logs-tbody');
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-slate-400 py-6 text-xs">Sem logs.</td></tr>';
+      return;
+    }
+    const actionMap = {
+      create: { c: '#2563EB', l: 'Criação' },
+      download: { c: '#10B981', l: 'Download' },
+      restore_start: { c: '#F59E0B', l: 'Restore inic.' },
+      restore_ok: { c: '#7C3AED', l: 'Restore OK' },
+      restore_fail: { c: '#EF4444', l: 'Restore falhou' },
+      delete: { c: '#EF4444', l: 'Exclusão' },
+    };
+    tbody.innerHTML = items.map((l) => {
+      const a = actionMap[l.action] || { c: '#64748B', l: l.action };
+      return `<tr>
+        <td class="text-xs text-slate-500">${fmtDt(l.dt_log)}</td>
+        <td class="text-xs">#${l.id_backup || '—'}</td>
+        <td><span class="bkp-pill" style="--c:${a.c}">${a.l}</span></td>
+        <td class="text-xs">${escapeHtml(l.ator || '—')}</td>
+        <td class="text-xs text-slate-500 font-mono">${escapeHtml(l.ip || '')}</td>
+        <td>${l.status === 'erro' ? '<span class="text-red-500"><i class="fas fa-times-circle"></i> erro</span>' : '<span class="text-emerald-500"><i class="fas fa-check"></i> ok</span>'}</td>
+        <td class="text-xs">${l.duracao_ms ? l.duracao_ms + 'ms' : '—'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function gerarBackup() {
+    const btn = $('#bkp-gerar');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Gerando…';
+    $('#bkp-progress').classList.remove('hidden');
+    $('#bkp-progress-text').textContent = 'Coletando dados das tabelas…';
+    $('#bkp-progress-bar').style.width = '30%';
+
+    try {
+      const r = await api('post', '/backup');
+      $('#bkp-progress-bar').style.width = '100%';
+      $('#bkp-progress-text').textContent = `Backup #${r.data.id_backup} gerado (${fmtBytes(r.data.tamanho_bytes)}, ${r.data.total_registros} registros)`;
+      toast(`Backup #${r.data.id_backup} gerado com sucesso!`, 'success');
+      if (r.retencao_removidos > 0) {
+        toast(`${r.retencao_removidos} backup(s) antigo(s) removido(s) pela retenção.`, 'info');
+      }
+      setTimeout(() => $('#bkp-progress').classList.add('hidden'), 1800);
+      await loadList();
+      await loadLogs();
+    } catch (e) {
+      $('#bkp-progress-text').innerHTML = '<span class="text-red-500">Falha ao gerar backup.</span>';
+      $('#bkp-progress-bar').style.background = '#EF4444';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-bolt mr-2"></i>Gerar Backup Agora';
+    }
+  }
+
+  async function downloadBackup(id, arquivo) {
+    const token = AUTH.getToken();
+    try {
+      const r = await axios.get(API + '/backup/' + id + '/download', {
+        headers: { Authorization: 'Bearer ' + token },
+        responseType: 'blob',
+      });
+      const blob = r.data;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = arquivo || ('backup_' + id + '.ndjson.gz');
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast('Download iniciado: ' + (arquivo || id), 'success');
+      loadLogs();
+    } catch (e) {
+      toast('Falha ao baixar backup.', 'error');
+    }
+  }
+
+  async function deleteBackup(id, arquivo) {
+    if (!confirm(`Excluir o backup #${id}?\n\n${arquivo}\n\nEsta ação NÃO pode ser desfeita.`)) return;
+    try {
+      await api('delete', '/backup/' + id);
+      toast('Backup excluído.', 'success');
+      await loadList(); await loadLogs();
+    } catch {}
+  }
+
+  function openRestoreModal(id, arquivo) {
+    const html = `
+      <div class="modal-backdrop">
+        <div class="modal-content" style="max-width:560px">
+          <div class="modal-header" style="background:linear-gradient(135deg,#F59E0B,#EF4444);color:#fff">
+            <div class="font-bold text-lg flex items-center gap-2">
+              <i class="fas fa-exclamation-triangle"></i>Restaurar Backup
+            </div>
+            <button class="modal-close" onclick="this.closest('.modal-backdrop').remove()" style="color:#fff">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="rounded-lg p-3 mb-4" style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3)">
+              <div class="font-bold text-red-600 dark:text-red-400 mb-2 flex items-center gap-2">
+                <i class="fas fa-exclamation-circle"></i>Atenção: ação destrutiva
+              </div>
+              <ul class="text-xs space-y-1 list-disc ml-5 text-slate-700 dark:text-slate-300">
+                <li>Esta ação <strong>substituirá todos os dados atuais</strong> da sua empresa pelos dados do backup.</li>
+                <li>Um <strong>snapshot automático</strong> da situação atual será criado antes do restore (você poderá voltar).</li>
+                <li>Outras empresas <strong>não serão afetadas</strong>.</li>
+                <li>A operação é <strong>atômica</strong>: se falhar, o estado é revertido.</li>
+              </ul>
+            </div>
+            <div class="text-xs text-slate-500 mb-2">Arquivo: <span class="font-mono">${escapeHtml(arquivo)}</span></div>
+
+            <label class="block text-xs font-semibold mt-3 mb-1">Sua senha</label>
+            <input type="password" id="rst-senha" class="input w-full" placeholder="Digite a senha para confirmar" autocomplete="current-password">
+
+            <label class="block text-xs font-semibold mt-3 mb-1">Confirme digitando <code>RESTAURAR</code></label>
+            <input type="text" id="rst-confirma" class="input w-full" placeholder="RESTAURAR" autocomplete="off" style="text-transform:uppercase;letter-spacing:.1em">
+
+            <div id="rst-feedback" class="text-xs mt-3 hidden"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancelar</button>
+            <button class="btn" id="rst-confirmar" style="background:#EF4444;color:#fff" disabled>
+              <i class="fas fa-undo-alt mr-1"></i>Restaurar Agora
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    document.body.appendChild(wrapper.firstElementChild);
+
+    const $senha = document.getElementById('rst-senha');
+    const $conf = document.getElementById('rst-confirma');
+    const $btn = document.getElementById('rst-confirmar');
+    const $fb = document.getElementById('rst-feedback');
+
+    const check = () => {
+      $btn.disabled = !( $senha.value.length >= 3 && $conf.value.trim().toUpperCase() === 'RESTAURAR' );
+    };
+    $senha.oninput = check;
+    $conf.oninput = check;
+
+    $btn.onclick = async () => {
+      $btn.disabled = true;
+      $btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Restaurando…';
+      $fb.classList.remove('hidden');
+      $fb.className = 'text-xs mt-3 text-amber-600';
+      $fb.innerHTML = '<i class="fas fa-clock mr-1"></i>Criando snapshot de segurança e aplicando dados…';
+      try {
+        const r = await api('post', '/backup/' + id + '/restore', {
+          senha: $senha.value,
+          confirma_texto: $conf.value.trim().toUpperCase(),
+        });
+        $fb.className = 'text-xs mt-3 text-emerald-600';
+        $fb.innerHTML = `<i class="fas fa-check-circle mr-1"></i>Sucesso! ${r.data.inseridas} registros restaurados em ${r.data.duracao_ms}ms. Snapshot reverso: #${r.data.snapshot_id || '—'}.`;
+        toast('Restauração concluída. Recarregando…', 'success');
+        setTimeout(() => location.reload(), 2200);
+      } catch (e) {
+        $fb.className = 'text-xs mt-3 text-red-500';
+        $fb.innerHTML = '<i class="fas fa-times-circle mr-1"></i>' + (e?.response?.data?.error || e.message || 'Falha.');
+        $btn.disabled = false;
+        $btn.innerHTML = '<i class="fas fa-undo-alt mr-1"></i>Tentar de novo';
+      }
+    };
+    $senha.focus();
+  }
+
+  async function openConfigModal() {
+    let cfg = {};
+    try { cfg = (await api('get', '/backup/config'))?.data || {}; } catch {}
+    const html = `
+      <div class="modal-backdrop">
+        <div class="modal-content" style="max-width:520px">
+          <div class="modal-header">
+            <div class="font-bold text-lg flex items-center gap-2"><i class="fas fa-sliders-h text-brand"></i>Configurações de Backup</div>
+            <button class="modal-close" onclick="this.closest('.modal-backdrop').remove()"><i class="fas fa-times"></i></button>
+          </div>
+          <div class="modal-body">
+            <label class="block text-xs font-semibold mb-1">Retenção (máximo de backups mantidos)</label>
+            <input type="number" id="cfg-max" class="input w-full" min="1" max="50" value="${cfg.max_backups || 10}">
+            <div class="text-[11px] text-slate-400 mt-1">Backups mais antigos são automaticamente removidos quando este limite é ultrapassado.</div>
+
+            <div class="mt-5 pt-4 border-t" style="border-color:var(--card-border)">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="cfg-auto" ${cfg.auto_enabled ? 'checked' : ''} class="w-4 h-4">
+                <span class="font-semibold text-sm">Habilitar backup automático</span>
+              </label>
+              <div class="text-[11px] text-slate-400 mt-1 ml-6">
+                <i class="fas fa-info-circle"></i> Backup automático requer ativação do <strong>Cron Trigger</strong> no Dashboard Cloudflare.
+                Enquanto não estiver ativo, esta configuração fica salva mas não dispara automaticamente.
+              </div>
+
+              <label class="block text-xs font-semibold mt-3 mb-1">Frequência</label>
+              <select id="cfg-freq" class="input w-full">
+                <option value="diario" ${cfg.auto_frequencia === 'diario' ? 'selected' : ''}>Diário</option>
+                <option value="semanal" ${cfg.auto_frequencia === 'semanal' ? 'selected' : ''}>Semanal</option>
+                <option value="mensal" ${cfg.auto_frequencia === 'mensal' ? 'selected' : ''}>Mensal</option>
+              </select>
+
+              <label class="block text-xs font-semibold mt-3 mb-1">Horário (UTC)</label>
+              <input type="number" id="cfg-hora" class="input w-full" min="0" max="23" value="${cfg.auto_hora_utc ?? 3}">
+              <div class="text-[11px] text-slate-400 mt-1">UTC. Padrão: 3 (00:00 BRT). Ex.: 12 = 09:00 BRT.</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancelar</button>
+            <button class="btn btn-primary" id="cfg-salvar"><i class="fas fa-save mr-1"></i>Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    document.body.appendChild(wrapper.firstElementChild);
+
+    document.getElementById('cfg-salvar').onclick = async () => {
+      try {
+        await api('put', '/backup/config', {
+          max_backups: Number(document.getElementById('cfg-max').value) || 10,
+          auto_enabled: document.getElementById('cfg-auto').checked,
+          auto_frequencia: document.getElementById('cfg-freq').value,
+          auto_hora_utc: Number(document.getElementById('cfg-hora').value) || 3,
+        });
+        toast('Configuração salva.', 'success');
+        document.querySelector('.modal-backdrop')?.remove();
+      } catch {}
+    };
+  }
+
+  // bind
+  $('#bkp-gerar').onclick = gerarBackup;
+  $('#bkp-reload').onclick = () => { loadList(); loadLogs(); };
+  $('#bkp-cfg-open').onclick = openConfigModal;
+
+  await loadList();
+  await loadLogs();
+};
 
 (async function init() {
   // Recupera mensagem de logout vinda do hard reload (se houver)

@@ -6814,3 +6814,117 @@ body:has(.modal-backdrop) .modal {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ============================================================
+   HOTFIX 0038 — Backup & Restauração
+   Pills/badges coloridos para tipo, status e ações.
+   Cor base é definida inline via style="--c: #hex" no JS.
+   ============================================================ */
+.bkp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  background: color-mix(in srgb, var(--c, #6366f1) 14%, transparent);
+  color: var(--c, #6366f1);
+  border: 1px solid color-mix(in srgb, var(--c, #6366f1) 32%, transparent);
+  white-space: nowrap;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.bkp-pill > i {
+  font-size: 10px;
+  opacity: 0.9;
+}
+[data-theme="dark"] .bkp-pill {
+  background: color-mix(in srgb, var(--c, #818cf8) 18%, transparent);
+  color: color-mix(in srgb, var(--c, #818cf8) 85%, white);
+  border-color: color-mix(in srgb, var(--c, #818cf8) 40%, transparent);
+}
+
+/* Ações inline na tabela de backups (download/restore/delete) */
+.bkp-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--c, #6366f1) 28%, transparent);
+  background: color-mix(in srgb, var(--c, #6366f1) 10%, transparent);
+  color: var(--c, #6366f1);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.bkp-act:hover {
+  background: color-mix(in srgb, var(--c, #6366f1) 22%, transparent);
+  transform: translateY(-1px);
+}
+.bkp-act:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+.bkp-act + .bkp-act { margin-left: 4px; }
+
+/* Header gradiente do módulo */
+.bkp-header {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, #3b82f6 20%, transparent),
+    color-mix(in srgb, #8b5cf6 22%, transparent));
+  border: 1px solid color-mix(in srgb, #6366f1 30%, transparent);
+  border-radius: 14px;
+  padding: 20px 22px;
+}
+[data-theme="dark"] .bkp-header {
+  background: linear-gradient(135deg,
+    rgba(59, 130, 246, 0.16),
+    rgba(139, 92, 246, 0.18));
+  border-color: rgba(129, 140, 248, 0.35);
+}
+
+/* Barra de progresso animada */
+.bkp-progress {
+  width: 100%;
+  height: 6px;
+  background: rgba(99, 102, 241, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.bkp-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899, #8b5cf6, #3b82f6);
+  background-size: 200% 100%;
+  animation: bkpProgressShimmer 1.6s linear infinite;
+}
+@keyframes bkpProgressShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Modal de restore — destaque do campo "RESTAURAR" */
+.bkp-confirm-input {
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 700;
+  text-align: center;
+}
+.bkp-warn-box {
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+  color: #b91c1c;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+[data-theme="dark"] .bkp-warn-box {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
+}
