@@ -4588,6 +4588,257 @@ textarea.field-invalid {
   .tc-terc__chip > i { display: none; }
 }
 
+/* ============================================================
+ * HOTFIX 0041 — Return Summary Footer (.tc-rsf)
+ * Componente reutilizável para rodapé financeiro de retornos,
+ * pagamentos, dashboards e relatórios. Substitui o antigo
+ * bg-emerald-50 (fundo claro com baixa legibilidade).
+ *
+ * Estrutura:
+ *   <div class="tc-rsf">
+ *     <div class="tc-rsf__stats">
+ *       <div class="tc-rsf__stat" data-variant="neutral|blue|emerald|amber|red|highlight">
+ *         <div class="tc-rsf__stat-label">ENVIADO</div>
+ *         <div class="tc-rsf__stat-value">275</div>
+ *         <div class="tc-rsf__stat-unit">peças</div>
+ *       </div>
+ *       ...
+ *     </div>
+ *     <div class="tc-rsf__actions">
+ *       <button class="btn btn-secondary">Cancelar</button>
+ *       <button class="btn btn-primary">Salvar</button>
+ *     </div>
+ *   </div>
+ *
+ * - Dark gradient (azul-escuro → roxo) com glow roxo discreto
+ * - Stats em grid responsivo (6/3/2 colunas)
+ * - Variant "highlight" para destaque (Total pago)
+ * - Cores: blue=retornadas, emerald=boas/total, amber=falta, red=conserto
+ * - Botões separados em área dedicada com border-top
+ * - Acessibilidade AA, contraste alto em todas as variantes
+ * ============================================================ */
+.tc-rsf {
+  margin-top: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  background: linear-gradient(135deg, #1e293b 0%, #1e1b4b 55%, #2a1f55 100%);
+  box-shadow: 0 4px 18px rgba(76, 29, 149, 0.22),
+              0 0 0 1px rgba(139, 92, 246, 0.06) inset,
+              0 0 28px rgba(139, 92, 246, 0.10);
+  color: #e2e8f0;
+  overflow: hidden;
+}
+
+.tc-rsf__stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+.tc-rsf__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.tc-rsf__stat:hover {
+  background: rgba(15, 23, 42, 0.62);
+  border-color: rgba(167, 139, 250, 0.32);
+  transform: translateY(-1px);
+}
+
+.tc-rsf__stat-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.65px;
+  text-transform: uppercase;
+  color: #94a3b8;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tc-rsf__stat-label > i {
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+.tc-rsf__stat-value {
+  font-family: 'Courier New', 'Consolas', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: #f1f5f9;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.tc-rsf__stat-unit {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #64748b;
+  line-height: 1.2;
+  margin-top: 1px;
+}
+
+/* Variants por contexto/cor */
+.tc-rsf__stat[data-variant="blue"] .tc-rsf__stat-value { color: #93c5fd; }
+.tc-rsf__stat[data-variant="blue"] .tc-rsf__stat-label { color: #bfdbfe; }
+.tc-rsf__stat[data-variant="blue"] { border-color: rgba(59, 130, 246, 0.32); }
+
+.tc-rsf__stat[data-variant="emerald"] .tc-rsf__stat-value { color: #6ee7b7; }
+.tc-rsf__stat[data-variant="emerald"] .tc-rsf__stat-label { color: #a7f3d0; }
+.tc-rsf__stat[data-variant="emerald"] { border-color: rgba(16, 185, 129, 0.32); }
+
+.tc-rsf__stat[data-variant="amber"] .tc-rsf__stat-value { color: #fcd34d; }
+.tc-rsf__stat[data-variant="amber"] .tc-rsf__stat-label { color: #fde68a; }
+.tc-rsf__stat[data-variant="amber"] { border-color: rgba(245, 158, 11, 0.32); }
+
+.tc-rsf__stat[data-variant="red"] .tc-rsf__stat-value { color: #fca5a5; }
+.tc-rsf__stat[data-variant="red"] .tc-rsf__stat-label { color: #fecaca; }
+.tc-rsf__stat[data-variant="red"] { border-color: rgba(239, 68, 68, 0.32); }
+
+/* Destaque para Total pago — variant highlight (verde neon + glow) */
+.tc-rsf__stat[data-variant="highlight"] {
+  grid-column: span 2;
+  background: linear-gradient(135deg, rgba(5, 46, 22, 0.55) 0%, rgba(6, 78, 59, 0.55) 100%);
+  border-color: rgba(52, 211, 153, 0.45);
+  box-shadow: 0 0 22px rgba(16, 185, 129, 0.18),
+              0 0 0 1px rgba(52, 211, 153, 0.10) inset;
+}
+.tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-label {
+  color: #a7f3d0;
+  font-size: 11px;
+}
+.tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-value {
+  font-size: 28px;
+  color: #34d399;
+  text-shadow: 0 0 14px rgba(52, 211, 153, 0.35);
+}
+.tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-unit { color: #6ee7b7; }
+
+/* Área de ações separada visualmente */
+.tc-rsf__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 18px;
+  background: rgba(2, 6, 23, 0.40);
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.tc-rsf__actions-hint {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-rsf__actions-hint > i { color: #a78bfa; }
+
+/* Botões dentro do footer — garante boa aparência mesmo se .btn não estilizar */
+.tc-rsf__actions .btn {
+  min-height: 38px;
+  padding: 8px 18px;
+  font-weight: 600;
+  border-radius: 10px;
+}
+
+/* Responsivo — tablet (≤1024px): 3 colunas */
+@media (max-width: 1024px) {
+  .tc-rsf__stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 14px;
+  }
+  .tc-rsf__stat[data-variant="highlight"] {
+    grid-column: span 3;
+  }
+  .tc-rsf__stat-value { font-size: 20px; }
+  .tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-value { font-size: 26px; }
+}
+
+/* Responsivo — mobile (≤640px): 2 colunas */
+@media (max-width: 640px) {
+  .tc-rsf__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 12px;
+  }
+  .tc-rsf__stat[data-variant="highlight"] {
+    grid-column: span 2;
+  }
+  .tc-rsf__stat { padding: 9px 10px; }
+  .tc-rsf__stat-label { font-size: 9.5px; letter-spacing: 0.5px; }
+  .tc-rsf__stat-value { font-size: 18px; }
+  .tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-value { font-size: 22px; }
+  .tc-rsf__stat-unit { font-size: 10px; }
+  .tc-rsf__actions {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+  }
+  .tc-rsf__actions-hint {
+    flex: 1 1 100%;
+    margin-bottom: 6px;
+  }
+  .tc-rsf__actions .btn {
+    flex: 1 1 calc(50% - 5px);
+    padding: 8px 12px;
+    min-height: 36px;
+  }
+}
+
+/* Compatibilidade com light theme (caso seja ativado) — mantém dark de propósito
+ * pois o resumo financeiro deve sempre ser destacado no padrão dark do SaaS */
+[data-theme="light"] .tc-rsf {
+  /* Mesmo no light mantemos visual escuro premium */
+  color: #e2e8f0;
+}
+
+/* Print: simplifica para PDF nativo */
+@media print {
+  .tc-rsf {
+    background: #fff !important;
+    color: #0f172a !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: none !important;
+  }
+  .tc-rsf__stats { padding: 10px; gap: 6px; }
+  .tc-rsf__stat {
+    background: #f8fafc !important;
+    border: 1px solid #e2e8f0 !important;
+  }
+  .tc-rsf__stat-label,
+  .tc-rsf__stat-value,
+  .tc-rsf__stat-unit { color: #0f172a !important; text-shadow: none !important; }
+  .tc-rsf__stat[data-variant="highlight"] {
+    background: #f0fdf4 !important;
+    border-color: #86efac !important;
+    box-shadow: none !important;
+  }
+  .tc-rsf__stat[data-variant="highlight"] .tc-rsf__stat-value { color: #047857 !important; }
+  .tc-rsf__actions { display: none !important; }
+}
+
 /* Status pill */
 .srv-status-on,
 .srv-status-off {

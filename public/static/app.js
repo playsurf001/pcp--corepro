@@ -5071,27 +5071,51 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
     </div>
     <div id="ret-items-wrap" class="space-y-3"></div>
 
-    <div class="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded">
-      <div class="flex items-center justify-between gap-3 flex-wrap">
-        <div class="text-sm space-y-1">
-          <div class="flex flex-wrap gap-x-4 gap-y-1">
-            <span><b>Enviado:</b> <span id="tg-env" class="font-mono">0</span> pç</span>
-            <span><b>Quantidade retornada:</b> <span id="tg-qtd" class="font-mono text-blue-700">0</span> pç</span>
-            <span><b>Boas:</b> <span id="tg-boa" class="font-mono">0</span></span>
-            <span><b>Falta:</b> <span id="tg-ref" class="font-mono text-amber-700">0</span></span>
-            <span><b>Conserto:</b> <span id="tg-con" class="font-mono text-orange-700">0</span></span>
-          </div>
-          <div class="text-base font-semibold text-emerald-800">
-            <i class="fas fa-money-bill-wave mr-1"></i>Total pago: R$ <span id="tg-val">0,00</span>
-            <span class="text-xs text-slate-500 font-normal ml-1">(boas × preço unitário)</span>
-          </div>
+    <!-- HOTFIX 0041 — Return Summary Footer (.tc-rsf) — dark grid + variants + ações separadas -->
+    <div class="tc-rsf" role="region" aria-label="Resumo financeiro do retorno">
+      <div class="tc-rsf__stats">
+        <div class="tc-rsf__stat" data-variant="neutral">
+          <div class="tc-rsf__stat-label"><i class="fas fa-paper-plane"></i>Enviado</div>
+          <div class="tc-rsf__stat-value"><span id="tg-env">0</span></div>
+          <div class="tc-rsf__stat-unit">peças</div>
         </div>
-        <div class="flex gap-2">
-          <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
-          <button id="m-save" class="btn btn-primary">
-            <i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}
-          </button>
+        <div class="tc-rsf__stat" data-variant="blue">
+          <div class="tc-rsf__stat-label"><i class="fas fa-rotate-left"></i>Retornadas</div>
+          <div class="tc-rsf__stat-value"><span id="tg-qtd">0</span></div>
+          <div class="tc-rsf__stat-unit">peças</div>
         </div>
+        <div class="tc-rsf__stat" data-variant="emerald">
+          <div class="tc-rsf__stat-label"><i class="fas fa-circle-check"></i>Boas</div>
+          <div class="tc-rsf__stat-value"><span id="tg-boa">0</span></div>
+          <div class="tc-rsf__stat-unit">peças</div>
+        </div>
+        <div class="tc-rsf__stat" data-variant="amber">
+          <div class="tc-rsf__stat-label"><i class="fas fa-triangle-exclamation"></i>Falta</div>
+          <div class="tc-rsf__stat-value"><span id="tg-ref">0</span></div>
+          <div class="tc-rsf__stat-unit">peças</div>
+        </div>
+        <div class="tc-rsf__stat" data-variant="red">
+          <div class="tc-rsf__stat-label"><i class="fas fa-screwdriver-wrench"></i>Conserto</div>
+          <div class="tc-rsf__stat-value"><span id="tg-con">0</span></div>
+          <div class="tc-rsf__stat-unit">peças</div>
+        </div>
+        <div class="tc-rsf__stat" data-variant="highlight">
+          <div class="tc-rsf__stat-label"><i class="fas fa-money-bill-wave"></i>Total pago</div>
+          <div class="tc-rsf__stat-value">R$ <span id="tg-val">0,00</span></div>
+          <div class="tc-rsf__stat-unit">boas × preço unitário</div>
+        </div>
+      </div>
+      <div class="tc-rsf__actions">
+        <div class="tc-rsf__actions-hint">
+          <i class="fas fa-circle-info"></i>
+          <span>Confira os totais antes de ${editing ? 'salvar' : 'registrar'}.</span>
+        </div>
+        <button id="m-cancel" class="btn btn-secondary" type="button">
+          <i class="fas fa-xmark mr-1"></i>Cancelar
+        </button>
+        <button id="m-save" class="btn btn-primary" type="button">
+          <i class="fas fa-save mr-1"></i>${editing ? 'Salvar alterações' : 'Registrar retorno'}
+        </button>
       </div>
     </div>
   `;

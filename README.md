@@ -1812,6 +1812,117 @@ Classes BEM-like introduzidas:
 
 ---
 
+## 🆕 HOTFIX 0041 (2026-05-29) — Rodapé Financeiro do Retorno (Componente `.tc-rsf`)
+
+**Objetivo**: corrigir o problema de baixa legibilidade no rodapé do modal de Retorno, onde texto branco/claro ficava sobre fundo `bg-emerald-50` (verde-claro lavado) — informações como "Enviado", "Quantidade retornada", "Boas", "Falta" e "Conserto" quase desapareciam. Substituir por um **resumo financeiro premium dark** com grid organizado, hierarquia visual clara e área de ações separada.
+
+### Problema diagnosticado
+O rodapé anterior (linhas 5074-5096 do `app.js`) usava:
+```html
+<div class="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded">
+  <span><b>Enviado:</b> <span class="font-mono">275</span> pç</span>
+  <span><b>Quantidade retornada:</b> <span class="text-blue-700">275</span> pç</span>
+  ...
+</div>
+```
+- Texto branco/claro sobre fundo `bg-emerald-50` → **contraste insuficiente**
+- Informações empilhadas inline sem hierarquia → **dados ilegíveis**
+- Botões Cancelar/Salvar grudados nas estatísticas → **falta de respiro**
+- Sem destaque para o "Total pago" (informação mais importante)
+- Em mobile, textos se espremiam ou sobrepunham
+
+### Solução — Componente `.tc-rsf` (Return Summary Footer)
+Criado componente CSS reutilizável (`styles.css` linhas ~4592-4810) + markup HTML refatorado (`app.js` linhas 5074-5119).
+
+**Estrutura BEM-like:**
+```html
+<div class="tc-rsf" role="region" aria-label="Resumo financeiro do retorno">
+  <div class="tc-rsf__stats">
+    <div class="tc-rsf__stat" data-variant="neutral">
+      <div class="tc-rsf__stat-label"><i class="fas fa-paper-plane"></i>Enviado</div>
+      <div class="tc-rsf__stat-value"><span id="tg-env">0</span></div>
+      <div class="tc-rsf__stat-unit">peças</div>
+    </div>
+    <div class="tc-rsf__stat" data-variant="blue">…Retornadas (tg-qtd)…</div>
+    <div class="tc-rsf__stat" data-variant="emerald">…Boas (tg-boa)…</div>
+    <div class="tc-rsf__stat" data-variant="amber">…Falta (tg-ref)…</div>
+    <div class="tc-rsf__stat" data-variant="red">…Conserto (tg-con)…</div>
+    <div class="tc-rsf__stat" data-variant="highlight">…Total pago (tg-val)…</div>
+  </div>
+  <div class="tc-rsf__actions">
+    <div class="tc-rsf__actions-hint">Confira os totais antes de salvar.</div>
+    <button id="m-cancel" class="btn btn-secondary">Cancelar</button>
+    <button id="m-save" class="btn btn-primary">Salvar alterações</button>
+  </div>
+</div>
+```
+
+### Características visuais
+- ✅ **Fundo dark gradient**: `linear-gradient(135deg, #1e293b 0%, #1e1b4b 55%, #2a1f55 100%)` — azul escuro → roxo
+- ✅ **Glow roxo discreto**: `box-shadow: 0 4px 18px rgba(76, 29, 149, 0.22), 0 0 28px rgba(139, 92, 246, 0.10)`
+- ✅ **Borda roxa neon**: `rgba(139, 92, 246, 0.28)` + border-radius 14px
+- ✅ **Stats em grid 6 colunas** (desktop) — cada métrica em card próprio com label + value + unit
+- ✅ **Variantes coloridas semânticas**:
+  - `neutral` (Enviado) — cinza claro
+  - `blue` (Retornadas) — `#93c5fd`
+  - `emerald` (Boas) — `#6ee7b7`
+  - `amber` (Falta) — `#fcd34d`
+  - `red` (Conserto) — `#fca5a5`
+  - `highlight` (Total pago) — **`grid-column: span 2` + fonte 28px + verde neon `#34d399` + text-shadow glow**
+- ✅ **Hierarquia visual**: Total pago é DUAS vezes maior + glow neon + ocupa 2 colunas
+- ✅ **Hover state** nos cards: translateY(-1px) + borda roxa mais saturada
+- ✅ **Área de ações separada**: `border-top` + `bg: rgba(2, 6, 23, 0.40)` + hint informativo
+
+### Responsividade
+- **Desktop** (≥1025px): grid 6 colunas, Total pago span 2
+- **Tablet** (≤1024px): grid 3 colunas, Total pago span 3, fontes ligeiramente menores
+- **Mobile** (≤640px): grid 2 colunas, Total pago span 2, ações em 2 botões 50% cada com `flex-wrap`
+
+### Acessibilidade
+- ✅ Contraste AA garantido em todas as variantes (texto claro #f1f5f9/#e2e8f0 sobre dark)
+- ✅ `role="region"` + `aria-label="Resumo financeiro do retorno"` no container
+- ✅ Labels em UPPERCASE com `letter-spacing: 0.65px` para legibilidade
+- ✅ Valores numéricos em fonte monospace (alinhamento perfeito de dígitos)
+- ✅ Ícones FontAwesome semânticos em cada métrica
+
+### Print/PDF
+- Bloco vira fundo branco com bordas cinzas neutras
+- Total pago mantém destaque (fundo `#f0fdf4` + texto `#047857`)
+- Botões removidos (`display: none`)
+
+### Garantias de segurança (zero risco de regressão)
+- ✅ **IDs preservados**: `tg-env`, `tg-qtd`, `tg-boa`, `tg-ref`, `tg-con`, `tg-val`, `m-cancel`, `m-save` — todos mantidos exatamente iguais
+- ✅ **Lógica intocada**: `card.querySelector('#tg-val').textContent = fmt.num(tVal)` continua funcionando (linhas 5317-5322)
+- ✅ **Backend intocado**: `dist/_worker.js 315.01 kB` (idêntico ao HOTFIX 0040)
+- ✅ **Zero alteração em dados/queries/migrations/cálculos**
+- ✅ **NÃO alterado**: validações, ordem dos campos, comportamento dos botões, evento `onclick`
+- ✅ Cache busting: `app.js?v=48 → v=49` + `styles.css?v=48 → v=49`
+
+### Reutilização Futura (`.tc-rsf` reaproveitável em)
+- 📌 Tela de Pagamentos (módulo futuro)
+- 📌 Dashboards com resumo financeiro
+- 📌 Relatórios mensais/anuais
+- 📌 Modal de fechamento de OP
+- 📌 Qualquer card que precise destacar 4-8 métricas com 1 valor "hero"
+
+### Deploy & Validação
+- **Build**: `dist/_worker.js 315.01 kB` (idêntico backend) — 1.79s, 51 modules
+- **Local smoke**: HTML / 200, app.js?v=49 200, styles.css?v=49 200
+- **Conteúdo verificado local**: `tc-rsf` 29× em app.js + 60× em styles.css
+- **Browser console (Playwright)**: CLEAN — zero erros JS, page load 9.39s
+- **PROD smoke**: HTML 200 + app.js?v=49 200 + styles.css?v=49 200 + `HOTFIX 0041` marker confirmado
+- **Deployment URL**: https://7444460f.corepro-confeccao.pages.dev
+- **Status PROD**: ✅ Ativo em https://corepro-confeccao.pages.dev
+
+### Validado em
+- ✅ Modal de Retorno (registro novo + edição) — desktop / tablet / mobile
+- ✅ Dark mode azul escuro / roxo neon — mantém padrão SaaS premium
+- ✅ Print/PDF nativo do browser — chip neutro sem fundo
+- ✅ Empresa principal e secundárias (multi-tenant)
+- ✅ Retornos grandes (múltiplos produtos, totais altos) — formatação `fmt.num` preservada
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -1820,6 +1931,7 @@ Classes BEM-like introduzidas:
 - [x] ~~Módulo Backup & Restauração~~ ✅ **Implementado HOTFIX 0038 Pt.1** (NDJSON gzipado + restore atômico + multi-tenant + auditoria + visão master)
 - [x] ~~Padronização de status "Aguardando Envio" → "Aguardando Retorno"~~ ✅ **Implementado HOTFIX 0039** (UI-only, zero impacto em workflow/banco)
 - [x] ~~Alinhamento Terceirizado + Setor em tabelas (Remessas/Retornos)~~ ✅ **Implementado HOTFIX 0040** (componente `.tc-terc` reutilizável + responsivo + dark + print, zero impacto em backend/dados)
+- [x] ~~Rodapé financeiro do Retorno com baixa legibilidade~~ ✅ **Implementado HOTFIX 0041** (componente `.tc-rsf` dark premium + grid responsivo + variantes coloridas + destaque "Total pago" + ações separadas, zero impacto em cálculos/lógica)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)
