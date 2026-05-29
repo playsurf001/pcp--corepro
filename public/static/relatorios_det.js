@@ -42,6 +42,38 @@
   const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const debounce = (fn, ms=250) => { let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; };
 
+  /* ------------------------------------------------------------
+   * HOTFIX 0039 — Tradução de status para exibição.
+   * O token interno permanece inalterado (compatibilidade com API/DB).
+   * Apenas o label visível para o usuário é traduzido.
+   * Reusa o map global de TERC.STATUS_LABEL quando disponível.
+   * ------------------------------------------------------------ */
+  const STATUS_LABEL_FALLBACK = {
+    'AguardandoEnvio':  'Aguardando Retorno',
+    'aguardando_envio': 'Aguardando Retorno',
+    'AGUARDANDOENVIO':  'Aguardando Retorno',
+    'Aguardando envio': 'Aguardando Retorno',
+    'Aguardando Envio': 'Aguardando Retorno',
+    'Enviado':          'Enviado',
+    'EmProducao':       'Em produção',
+    'Parcial':          'Parcial',
+    'Atrasado':         'Atrasado',
+    'Concluido':        'Concluído',
+    'Retornado':        'Retornado',
+    'Pago':             'Pago',
+    'Cancelado':        'Cancelado',
+    'Aberta':           'Aguardando Retorno',
+    'Concluida':        'Concluído',
+    'Cancelada':        'Cancelado',
+    'Atrasada':         'Atrasado',
+  };
+  const statusLabel = s => {
+    if (s == null || s === '') return '';
+    const map = (window.TERC && window.TERC.STATUS_LABEL) ? window.TERC.STATUS_LABEL : STATUS_LABEL_FALLBACK;
+    return map[String(s)] || String(s);
+  };
+  const statusSlug = s => statusLabel(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'-');
+
   function defaultPeriodo() {
     const hoje = new Date();
     const ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
@@ -240,7 +272,7 @@
             <label>Status</label>
             <select id="rd2_status">
               <option value="">Todos</option>
-              ${(filtros?.status||[]).map(s=>`<option value="${s}" ${f.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+              ${(filtros?.status||[]).map(s=>`<option value="${esc(s)}" ${f.status===s?'selected':''}>${esc(statusLabel(s))}</option>`).join('')}
             </select>
           </div>
           <div class="rd2-filterbar__actions">
@@ -538,7 +570,7 @@
     { key:'qtd_conserto', label:'Cons.',        sortable:true, right:true, fmt: v=>`<span class="rd2-num rd2-num--amber">${fmtInt(v)}</span>` },
     { key:'preco_unit',   label:'V.Unit',       sortable:true, right:true, fmt: v=>fmtMoney(v) },
     { key:'valor_total',  label:'V.Total',      sortable:true, right:true, fmt: v=>`<b>${fmtMoney(v)}</b>` },
-    { key:'status',       label:'Status',       sortable:true, fmt: v=>`<span class="rd2-badge rd2-badge--${(v||'').toLowerCase().replace(/\s+/g,'-')}">${esc(v||'-')}</span>` },
+    { key:'status',       label:'Status',       sortable:true, fmt: v=>`<span class="rd2-badge rd2-badge--${statusSlug(v) || 'none'}">${esc(statusLabel(v) || '-')}</span>` },
     { key:'dt_saida',     label:'Saída',        sortable:true, fmt: v=>fmtDate(v) },
   ];
 
@@ -589,7 +621,8 @@
         String(r.cor||'').toLowerCase().includes(q) ||
         String(r.desc_servico||'').toLowerCase().includes(q) ||
         String(r.nome_terc||'').toLowerCase().includes(q) ||
-        String(r.status||'').toLowerCase().includes(q)
+        String(r.status||'').toLowerCase().includes(q) ||
+        statusLabel(r.status).toLowerCase().includes(q)
       );
     }
     const k = RD.table.sortKey, dir = RD.table.sortDir === 'asc' ? 1 : -1;
@@ -730,6 +763,8 @@
     const data = rows.map(r => TABLE_COLS.map(c => {
       const raw = r[c.key];
       if (typeof raw === 'number') return raw;
+      // HOTFIX 0039: traduzir o status para o label legível no Excel
+      if (c.key === 'status') return statusLabel(raw) || '';
       return raw ?? '';
     }));
     const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
@@ -801,7 +836,7 @@
       ['Coleção',      f.id_colecao ? '#'+f.id_colecao : 'Todas'],
       ['Produto',      f.cod_ref || '—'],
       ['Cor',          f.cor || '—'],
-      ['Status',       f.status || 'Todos'],
+      ['Status',       f.status ? statusLabel(f.status) : 'Todos'],
     ];
     if (window.jspdf && doc.autoTable) {
       doc.autoTable({
@@ -904,7 +939,7 @@
       const body = rows.slice(0, 1000).map(r => [
         r.num_op||'', r.cod_ref||'', r.cor||'', r.desc_servico||'', r.nome_terc||'',
         fmtInt(r.qtd_total), fmtInt(r.qtd_boa), fmtInt(r.qtd_refugo), fmtInt(r.qtd_conserto),
-        fmtMoney(r.preco_unit), fmtMoney(r.valor_total), r.status||'', fmtDate(r.dt_saida)
+        fmtMoney(r.preco_unit), fmtMoney(r.valor_total), statusLabel(r.status)||'', fmtDate(r.dt_saida)
       ]);
       doc.autoTable({
         startY: 70,

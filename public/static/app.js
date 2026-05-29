@@ -1223,17 +1223,62 @@ const TERC = {
     return list.find(p => !p.id_colecao) || list[0];
   },
   fmtBRL(v) { return 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+  /* ============================================================
+   * HOTFIX 0039 — Tradução centralizada de status de remessas/retornos.
+   *
+   * IMPORTANTE: o token interno NÃO muda (continua 'AguardandoEnvio' no
+   * banco, queries, APIs, CHECK constraint e workflow). Apenas a EXIBIÇÃO
+   * é traduzida para "Aguardando Retorno" conforme padronização solicitada.
+   * Isso garante zero quebra de compatibilidade com dados históricos.
+   *
+   * Aceita tanto o token canônico (`AguardandoEnvio`) quanto variações
+   * legadas/normalizadas (`aguardando_envio`, `AGUARDANDOENVIO`, `Aguardando envio`).
+   * ============================================================ */
+  STATUS_LABEL: {
+    'AguardandoEnvio':  'Aguardando Retorno',
+    'aguardando_envio': 'Aguardando Retorno',
+    'AGUARDANDOENVIO':  'Aguardando Retorno',
+    'Aguardando envio': 'Aguardando Retorno',
+    'Aguardando Envio': 'Aguardando Retorno',
+    'Enviado':          'Enviado',
+    'EmProducao':       'Em produção',
+    'Parcial':          'Parcial',
+    'Atrasado':         'Atrasado',
+    'Concluido':        'Concluído',
+    'Retornado':        'Retornado',
+    'Pago':             'Pago',
+    'Cancelado':        'Cancelado',
+    // Compat legado (terc V1)
+    'Aberta':           'Aguardando Retorno',
+    'Concluida':        'Concluído',
+    'Cancelada':        'Cancelado',
+    'Atrasada':         'Atrasado',
+  },
+  statusLabel(s) {
+    if (s == null || s === '') return '—';
+    return this.STATUS_LABEL[String(s)] || String(s);
+  },
   statusBadge(s, atrasada = 0) {
-    if (atrasada && !['Concluida', 'Cancelada'].includes(s)) return '<span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700"><i class="fas fa-triangle-exclamation mr-1"></i>Atrasada</span>';
+    if (atrasada && !['Concluida', 'Cancelada', 'Concluido', 'Cancelado', 'Pago', 'Retornado'].includes(s)) return '<span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700"><i class="fas fa-triangle-exclamation mr-1"></i>Atrasada</span>';
     const map = {
-      'Aberta': 'bg-blue-100 text-blue-700',
-      'EmProducao': 'bg-indigo-100 text-indigo-700',
-      'Parcial': 'bg-amber-100 text-amber-700',
-      'Concluida': 'bg-emerald-100 text-emerald-700',
-      'Atrasada': 'bg-red-100 text-red-700',
-      'Cancelada': 'bg-slate-200 text-slate-600',
+      // Tokens canônicos V2 (terc)
+      'AguardandoEnvio':  'bg-blue-100 text-blue-700',
+      'Enviado':          'bg-cyan-100 text-cyan-700',
+      'EmProducao':       'bg-indigo-100 text-indigo-700',
+      'Parcial':          'bg-amber-100 text-amber-700',
+      'Atrasado':         'bg-red-100 text-red-700',
+      'Concluido':        'bg-emerald-100 text-emerald-700',
+      'Retornado':        'bg-emerald-100 text-emerald-700',
+      'Pago':             'bg-green-100 text-green-700',
+      'Cancelado':        'bg-slate-200 text-slate-600',
+      // Compat legado
+      'Aberta':           'bg-blue-100 text-blue-700',
+      'Concluida':        'bg-emerald-100 text-emerald-700',
+      'Atrasada':         'bg-red-100 text-red-700',
+      'Cancelada':        'bg-slate-200 text-slate-600',
     };
-    return `<span class="px-2 py-0.5 rounded text-xs ${map[s] || 'bg-slate-100 text-slate-700'}">${s}</span>`;
+    const label = this.statusLabel(s);
+    return `<span class="px-2 py-0.5 rounded text-xs ${map[s] || 'bg-slate-100 text-slate-700'}">${label}</span>`;
   },
   // Cache de parâmetros da empresa para impressão
   empresa: null,
@@ -2752,14 +2797,15 @@ ROUTES.terc_remessas = async (main) => {
               <label>Status</label>
               <select id="f-status">
                 <option value="">Todos</option>
-                <option value="Aberta">Aberta</option>
-                <option value="AguardandoEnvio">Aguardando envio</option>
+                <option value="AguardandoEnvio">Aguardando Retorno</option>
                 <option value="Enviado">Enviado</option>
                 <option value="EmProducao">Em produção</option>
                 <option value="Parcial">Parcial</option>
-                <option value="Concluida">Concluída</option>
-                <option value="Atrasado">Atrasada</option>
-                <option value="Cancelada">Cancelada</option>
+                <option value="Atrasado">Atrasado</option>
+                <option value="Concluido">Concluído</option>
+                <option value="Retornado">Retornado</option>
+                <option value="Pago">Pago</option>
+                <option value="Cancelado">Cancelado</option>
               </select>
             </div>
             <div class="filter-cell">
@@ -3522,11 +3568,13 @@ async function TERC_openRemModal(id, onSave) {
           <input type="number" min="0" id="m-pz" value="${r.prazo_dias || 0}" /></div>
         <div><label>Status</label>
           <select id="m-status">
-            <option value="AguardandoEnvio" ${r.status === 'AguardandoEnvio' ? 'selected' : ''}>Aguardando envio</option>
+            <option value="AguardandoEnvio" ${r.status === 'AguardandoEnvio' ? 'selected' : ''}>Aguardando Retorno</option>
             <option value="Enviado" ${r.status === 'Enviado' ? 'selected' : ''}>Enviado</option>
             <option value="EmProducao" ${r.status === 'EmProducao' ? 'selected' : ''}>Em produção</option>
             <option value="Parcial" ${r.status === 'Parcial' ? 'selected' : ''}>Parcial</option>
             <option value="Concluido" ${r.status === 'Concluido' ? 'selected' : ''}>Concluído</option>
+            <option value="Retornado" ${r.status === 'Retornado' ? 'selected' : ''}>Retornado</option>
+            <option value="Pago" ${r.status === 'Pago' ? 'selected' : ''}>Pago</option>
             <option value="Cancelado" ${r.status === 'Cancelado' ? 'selected' : ''}>Cancelado</option>
           </select>
         </div>
@@ -4972,7 +5020,7 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       <div><b>Terceirizado:</b> ${rem.nome_terc || '—'}</div>
       <div><b>Itens:</b> ${state.items.length}</div>
       <div><b>Total enviado:</b> ${fmt.int(rem.qtd_total)}</div>
-      <div><b>Status:</b> ${rem.status || '—'}</div>
+      <div><b>Status:</b> ${TERC.statusLabel(rem.status)}</div>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
@@ -5794,7 +5842,7 @@ ROUTES.terc_retornos = async (main) => {
           <td class="text-right">${fmt.int(x.qtd_total)}</td>
           <td class="text-right">${TERC.fmtBRL(fmt.safeNum(x.valor_total))}</td>
           <td>${fmt.date(x.dt_recebimento)}</td>
-          <td><span class="badge">${escapeHtml(x.status)}</span></td>
+          <td>${TERC.statusBadge(x.status)}</td>
         </tr>`).join('');
       const extra = lista.length > 50 ? `<div class="text-xs text-slate-500 mt-2">+ ${lista.length - 50} outras remessas…</div>` : '';
       const html = `

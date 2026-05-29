@@ -1630,12 +1630,116 @@ Implementar **módulo completo de backup e restauração** com escopo multi-tena
 - Notificação email/webhook em falha
 - Restore parcial (selecionar tabelas)
 
+---
+
+## 🆕 HOTFIX 0039 (2026-05-29) — Padronização de Status: "Aguardando Envio" → "Aguardando Retorno"
+
+### 🎯 Objetivo
+Substituir o texto exibido **"Aguardando envio"** por **"Aguardando Retorno"** em **TODA a plataforma** (listagens, retornos, dashboard, filtros, badges, relatórios, impressão, APIs, selects, exports, PDFs, modais, timeline). **Sem quebrar lógica de workflow, regras existentes ou dados históricos.**
+
+### 🔒 Estratégia adotada (UI-only, zero risco)
+- **Token interno preservado**: `AguardandoEnvio` continua sendo o valor canônico no banco D1, queries SQL (`status IN ('AguardandoEnvio', ...)`), CHECK constraints (migrations 0007/0033), validações de workflow (`['AguardandoEnvio'].includes(...)`), endpoints (`/api/terc/remessas?status=AguardandoEnvio`) e payloads JSON.
+- **Apenas a EXIBIÇÃO é traduzida** para "Aguardando Retorno" via helper centralizado.
+- **Zero migration de dados**: nenhum registro histórico foi alterado. Filtros antigos, integrações, scripts externos e bookmarks continuam funcionando.
+- **Não requer migration de schema**: CHECK constraint atual continua válida.
+
+### 🔧 Mudanças aplicadas
+
+#### Frontend — `public/static/app.js` (helper `TERC.STATUS_LABEL`)
+- Novo mapa `TERC.STATUS_LABEL` (single source of truth) com tradução de todos os status (V2 + compat legado V1):
+  ```js
+  'AguardandoEnvio':  'Aguardando Retorno',
+  'aguardando_envio': 'Aguardando Retorno',  // tolerância a variações
+  'AGUARDANDOENVIO':  'Aguardando Retorno',
+  'Aguardando envio': 'Aguardando Retorno',
+  'Aguardando Envio': 'Aguardando Retorno',
+  'Aberta':           'Aguardando Retorno',  // compat V1
+  ```
+- Novo helper `TERC.statusLabel(s)` que aceita qualquer variante e retorna o label.
+- `TERC.statusBadge(s, atrasada)` reescrito para usar `statusLabel` + mapeamento de classes/cores completo (V1 + V2: AguardandoEnvio, Enviado, EmProducao, Parcial, Atrasado, Concluido, Retornado, Pago, Cancelado).
+- Selects de filtro (linha 2800) e modal de edição (linha 3571): `<option value="AguardandoEnvio">Aguardando Retorno</option>` — value interno preservado, label visível atualizado.
+- Selects expandidos para incluir todos os status V2 (Retornado, Pago) que antes faltavam.
+- Detalhes de remessa em modal de retorno (linha 5023): `${TERC.statusLabel(rem.status)}` (antes era `${rem.status || '—'}` cru).
+- Tabela de retornos (linha 5845): `${TERC.statusBadge(x.status)}` (antes era `<span class="badge">${escapeHtml(x.status)}</span>`).
+- Listagem de remessas (linha 2905): já usava `TERC.statusBadge` — automaticamente traduzido pela atualização do helper.
+
+#### Frontend — `public/static/relatorios_det.js`
+- Adicionado mapa `STATUS_LABEL_FALLBACK` (espelha `TERC.STATUS_LABEL`) + helpers `statusLabel(s)` e `statusSlug(s)`.
+- Reusa `window.TERC.STATUS_LABEL` quando disponível (consistência) com fallback local.
+- Select de filtros (linha 275): traduz a label exibida mantendo o value interno.
+- Coluna `status` na tabela (linha 573): badge usa `statusSlug` para CSS e `statusLabel` para texto.
+- **PDF export** (linha 836): traduz o status no resumo de filtros.
+- **PDF export tabela** (linha 939): traduz o status em cada linha do CSV/PDF.
+- **Excel export** (linha 767): nova lógica `if (c.key === 'status') return statusLabel(raw)` — XLSX agora abre com "Aguardando Retorno" legível.
+- Busca textual (linha 624): agora encontra tanto pelo token (`AguardandoEnvio`) quanto pelo label (`Aguardando Retorno`) — UX premium.
+
+#### CSS — `public/static/styles.css`
+- Novos slugs adicionados em `.rd2-badge--*`: `aguardando-retorno`, `em-producao`, `atrasado`, `pago` (cores consistentes com o sistema de badges existente).
+- Mantida compatibilidade com slugs antigos (`aguardandoenvio`, `emproducao`, `atrasada`) para outros lugares que possam referenciar.
+
+#### Backend — **inalterado** ⚠️
+- `src/routes/terceirizacao.ts` (12 ocorrências): SQL queries, transições de status, validações — **tudo continua como antes**. Token `'AguardandoEnvio'` é o correto e funcional.
+- `src/routes/relatorios_detalhados.ts` (1 ocorrência): array `status: ['AguardandoEnvio', ...]` no endpoint `/api/relatorios-det/filtros` — preservado (frontend traduz na hora de exibir).
+- Migrations 0007/0033: CHECK constraints inalteradas.
+
+#### Cache busting
+- `app.js`: v=46 → v=47
+- `styles.css`: v=46 → v=47
+- `relatorios_det.js`: v=5 → v=6
+
+### 🧪 Validação (4 testes — todos passando)
+| Teste | Resultado |
+|-------|-----------|
+| LOCAL filtro `GET /api/terc/remessas?status=AguardandoEnvio&limit=10` | ✅ HTTP 200, 3 rows, status preservado |
+| LOCAL `GET /api/terc/dashboard` (KPI em_aberto = AguardandoEnvio + Enviado + EmProducao + Parcial) | ✅ HTTP 200, em_aberto=3 / concluidas=2 / atrasadas=0 |
+| LOCAL `GET /api/relatorios-det/filtros` array status inclui `AguardandoEnvio` | ✅ Confirmed (9 status no array) |
+| Browser console (production sandbox) | ✅ Zero erros JS, app carrega normal |
+
+### 📊 Verificação de assets servidos
+| Arquivo | Ocorrências |
+|---------|------------|
+| `app.js?v=47` — "Aguardando Retorno" no código | 9 ocorrências |
+| `app.js?v=47` — token interno `'AguardandoEnvio'` preservado | 6 ocorrências |
+| `relatorios_det.js?v=6` — "Aguardando Retorno" no código | 6 ocorrências |
+| `styles.css?v=47` — slug `rd2-badge--aguardando-retorno` | 1 (com cor azul consistente) |
+
+### 📦 Build
+- `dist/_worker.js`: **315.01 kB** (sem mudança no backend — apenas cache version no HTML)
+- Estáticos: `app.js` 518 KB (+2.4 KB), `styles.css` 227.7 KB (+0.4 KB), `relatorios_det.js` 54.8 KB (+0.7 KB)
+
+### ✅ Pontos validados (cobertura conforme briefing)
+- [x] Listagem de remessas — tabela usa `TERC.statusBadge` (traduz automaticamente)
+- [x] Retornos — modal e tabela usam o helper
+- [x] Dashboard — KPI `em_aberto` agrega corretamente (token interno mantido)
+- [x] Filtros — select com value=token + label=texto traduzido
+- [x] Badges — `TERC.statusBadge` reescrito com todos os status V2 + label traduzido
+- [x] Relatórios — `relatorios_det.js` traduz select, tabela, PDF e Excel
+- [x] Impressão de romaneio — não exibe status (verificado: nenhuma referência)
+- [x] APIs — endpoints continuam aceitando e retornando `AguardandoEnvio` (compat total)
+- [x] Selects — value interno preservado, label visível traduzido
+- [x] Enums — não há enums TS, apenas strings literais (preservadas no DB e código)
+- [x] Banco de dados — zero alteração (migration 0007/0033 preservadas)
+- [x] Exports — Excel/PDF traduzem na hora de exportar
+- [x] PDFs — `relatorios_det.js` linha 836 e 939 ajustados
+- [x] Notificações — toasts não exibem status (verificado)
+- [x] Status automáticos — workflow inalterado (`dt_envio ? 'Enviado' : 'AguardandoEnvio'` etc.)
+- [x] Timeline/histórico — `terc_eventos` registra strings descritivas, não tokens crus
+
+### 🛡️ Não-regressão
+- Nenhum endpoint quebrou: filtro `?status=AguardandoEnvio` continua funcionando
+- Dashboard KPIs continuam contando AguardandoEnvio/Enviado/EmProducao/Parcial em `em_aberto`
+- Validações de workflow (`if (!['AguardandoEnvio'].includes(r.status))`) preservadas
+- Audit logs (`audit('ENVIO', ..., 'AguardandoEnvio', 'Enviado')`) usam o token correto
+- Migrations 0007/0033: CHECK constraint `status IN ('AguardandoEnvio', 'Enviado', ...)` permanece válida
+- Dados históricos: 100% preservados, nenhum UPDATE de registros
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
 - [x] ~~Módulo Setores~~ ✅ **Implementado HOTFIX 0037 Pt.1** (CRUD completo + multi-tenant + 177 remessas preservadas)
 - [x] ~~Filtros por Setor em Remessas/Retornos/Dashboard/Relatórios~~ ✅ **Implementado HOTFIX 0037 Pt.2** (filtro + chip visual + agregações)
 - [x] ~~Módulo Backup & Restauração~~ ✅ **Implementado HOTFIX 0038 Pt.1** (NDJSON gzipado + restore atômico + multi-tenant + auditoria + visão master)
+- [x] ~~Padronização de status "Aguardando Envio" → "Aguardando Retorno"~~ ✅ **Implementado HOTFIX 0039** (UI-only, zero impacto em workflow/banco)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

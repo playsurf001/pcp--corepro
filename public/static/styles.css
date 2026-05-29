@@ -3769,11 +3769,16 @@ textarea.field-invalid {
   background: rgba(99,102,241,.15); color: #A5B4FC;
 }
 .rd2-badge--aberta, .rd2-badge--aberto { background: rgba(14,165,233,.15); color: #38BDF8; }
+/* HOTFIX 0039 — "Aguardando Retorno" (label) gera slug "aguardando-retorno" */
+.rd2-badge--aguardando-retorno, .rd2-badge--aguardandoenvio { background: rgba(59,130,246,.15); color: #60A5FA; }
 .rd2-badge--enviada, .rd2-badge--enviado { background: rgba(99,102,241,.15); color: #A5B4FC; }
+.rd2-badge--em-producao, .rd2-badge--emproducao { background: rgba(129,140,248,.18); color: #C7D2FE; }
 .rd2-badge--retornada, .rd2-badge--retornado { background: rgba(16,185,129,.15); color: #34D399; }
 .rd2-badge--parcial { background: rgba(245,158,11,.15); color: #FBBF24; }
+.rd2-badge--atrasado, .rd2-badge--atrasada { background: rgba(244,63,94,.18); color: #FB7185; }
 .rd2-badge--cancelada, .rd2-badge--cancelado { background: rgba(244,63,94,.15); color: #FB7185; }
 .rd2-badge--concluida, .rd2-badge--concluido { background: rgba(16,185,129,.15); color: #34D399; }
+.rd2-badge--pago { background: rgba(34,197,94,.18); color: #4ADE80; }
 
 .rd2-tbl-sk { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
 .rd2-tbl-sk__row { display: flex; gap: 8px; }
