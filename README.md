@@ -1733,6 +1733,85 @@ Substituir o texto exibido **"Aguardando envio"** por **"Aguardando Retorno"** e
 - Migrations 0007/0033: CHECK constraint `status IN ('AguardandoEnvio', 'Enviado', ...)` permanece válida
 - Dados históricos: 100% preservados, nenhum UPDATE de registros
 
+## 🆕 HOTFIX 0040 (2026-05-29) — Alinhamento Terceirizado + Setor (Componente `.tc-terc`)
+
+**Objetivo**: corrigir o alinhamento, organização e responsividade do badge de setor (`nome_setor`) exibido ao lado do nome do terceirizado (`nome_terc`) nas tabelas de **Remessas** e **Retornos**, eliminando o "salto" visual entre linhas com/sem setor e impedindo que o chip invada a coluna adjacente em telas menores.
+
+### Diagnóstico
+O HTML anterior renderizava nome + chip como **texto inline** dentro de uma `<td class="truncate">`:
+- `class="truncate"` (white-space:nowrap + overflow:hidden + text-overflow:ellipsis) entrava em conflito com o `inline-flex` do chip → "salto" visual ao trocar de linha
+- Texto puro e `<span>` tinham **baselines diferentes** → efeito "tremendo"
+- Sem container flex, **alturas variavam** (linhas com setor ficavam ~4px mais altas que linhas sem setor)
+- Em mobile, o chip invadia a coluna adjacente (Produto/Coleção)
+
+### Solução — Componentização em Hono+JS (puro, sem framework)
+Criado helper centralizado `TERC.tercWithSetor(nome, setor, opts)` em `app.js` (~linha 1283, após `statusBadge()`):
+
+```js
+tercWithSetor(nome, setor, opts) {
+  // <div class="tc-terc" title="Nome · Setor">
+  //   <span class="tc-terc__name">Zélia</span>
+  //   <span class="tc-terc__chip" title="Setor: Aparador">
+  //     <i class="fas fa-sitemap"></i>
+  //     <span class="tc-terc__chip-label">Aparador</span>
+  //   </span>
+  // </div>
+}
+```
+
+**Aplicado em 3 pontos:**
+1. **Tabela Remessas** (`app.js` linha 2922) — `<td>${TERC.tercWithSetor(r?.nome_terc, r?.nome_setor)}</td>`
+2. **Tabela Retornos** (`app.js` linha 5909) — `<td>${TERC.tercWithSetor(x.nome_terc, x.nome_setor)}</td>`
+3. **Modal de detalhes da remessa** (`app.js` linha 5505) — reutiliza apenas o `tc-terc__chip` no layout vertical
+
+### CSS — `styles.css` (~100 linhas adicionadas)
+Classes BEM-like introduzidas:
+- `.tc-terc` — container flex (`display:inline-flex; align-items:center; gap:8px; width:100%; min-width:0`)
+- `.tc-terc__name` — `flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap` (encolhe com ellipsis se faltar espaço)
+- **`.tc-terc__chip`** — **`flex:0 0 auto` (CRÍTICO — chip nunca encolhe)**, altura fixa 22px, padding `0 9px`, border-radius `999px`, max-width 160px, `white-space:nowrap`
+- `.tc-terc__chip-label` — ellipsis interno se o nome do setor for muito longo
+- `.tc-terc--compact` — variante reduzida (altura 19px) para uso futuro
+- **Dark mode** (`[data-theme="dark"]`) — fundo roxo neon `rgba(167,139,250,0.18)` + texto `#C4B5FD` + borda `rgba(167,139,250,0.36)`
+- **Responsivo tablet** (`@media (max-width:1024px)`) — gap 6px, chip 20px, max-width 130px
+- **Responsivo mobile** (`@media (max-width:640px)`) — gap 5px, chip 18px, max-width 90px, ícone 8px
+- **Print** (`@media print`) — chip vira borda cinza neutra sem fundo (compatível com PDF nativo do browser)
+
+### Benefícios
+- ✅ **Alturas de linha uniformes** entre registros com e sem setor (zero "jumping")
+- ✅ **Chip nunca quebra ou invade outra coluna** graças a `flex: 0 0 auto`
+- ✅ **Nome com ellipsis** automático se exceder o espaço disponível
+- ✅ **Responsivo** em desktop / tablet / mobile com tamanhos dedicados
+- ✅ **Dark mode** mantém paleta azul escuro / roxo neon do sistema
+- ✅ **Componentizado**: 1 chamada de função em qualquer tela futura
+- ✅ **Retrocompatibilidade**: classe antiga `.rem-setor-chip` foi **preservada** no CSS
+
+### Garantias de segurança (zero risco de regressão)
+- **Backend intocado** — `dist/_worker.js` 315.01 kB (mesmo tamanho do HOTFIX 0039)
+- **Dados intocados** — nenhuma query/UPDATE/migration; apenas render-side
+- **Tabelas intocadas** — mesma estrutura `<table>` / `<tr>` / `<td>`, apenas conteúdo da célula
+- **Pontos com colunas separadas** (cadastro de terceirizados, top terceirizados do dashboard) **NÃO** foram alterados — usam layout próprio
+- **Selects HTML `<option>`** (filtro de terceirizado) — preservados com texto `nome · setor`
+- Cache busting: `app.js?v=47 → v=48` + `styles.css?v=47 → v=48` (`src/index.tsx` linhas 208/242)
+
+### Deploy & Validação
+- **Build**: `dist/_worker.js 315.01 kB` (idêntico backend) — 4.25s, 51 modules transformed
+- **Local smoke**: HTML / 200, app.js?v=48 200 (519,445B), styles.css?v=48 200 (230,749B)
+- **Conteúdo verificado local**: `tercWithSetor` 3×, `tc-terc__chip` 12×, `.tc-terc` 7×
+- **Browser console (Playwright)**: CLEAN — zero erros JS, page load 8.56s
+- **PROD smoke**: HTML 200 + app.js?v=48 200 + styles.css?v=48 200 (servindo conteúdo correto)
+- **Deployment URL**: https://bbf9d85b.corepro-confeccao.pages.dev
+- **Status PROD**: ✅ Ativo em https://corepro-confeccao.pages.dev
+
+### Validado em
+- ✅ Tela **Remessas** — desktop / tablet / mobile
+- ✅ Tela **Retornos** — desktop / tablet / mobile
+- ✅ **Modal de detalhes da remessa** — chip vertical preservado
+- ✅ **Dark mode** — paleta azul escuro / roxo neon mantida
+- ✅ **Print/PDF nativo do browser** — chip neutro sem fundo
+- ✅ **Empresa principal e secundárias** (multi-tenant)
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -1740,6 +1819,7 @@ Substituir o texto exibido **"Aguardando envio"** por **"Aguardando Retorno"** e
 - [x] ~~Filtros por Setor em Remessas/Retornos/Dashboard/Relatórios~~ ✅ **Implementado HOTFIX 0037 Pt.2** (filtro + chip visual + agregações)
 - [x] ~~Módulo Backup & Restauração~~ ✅ **Implementado HOTFIX 0038 Pt.1** (NDJSON gzipado + restore atômico + multi-tenant + auditoria + visão master)
 - [x] ~~Padronização de status "Aguardando Envio" → "Aguardando Retorno"~~ ✅ **Implementado HOTFIX 0039** (UI-only, zero impacto em workflow/banco)
+- [x] ~~Alinhamento Terceirizado + Setor em tabelas (Remessas/Retornos)~~ ✅ **Implementado HOTFIX 0040** (componente `.tc-terc` reutilizável + responsivo + dark + print, zero impacto em backend/dados)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

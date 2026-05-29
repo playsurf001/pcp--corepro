@@ -4471,6 +4471,123 @@ textarea.field-invalid {
   border-color: rgba(167, 139, 250, 0.34);
 }
 
+/* ============================================================
+   HOTFIX 0040 — Componente Terceirizado + Setor (tc-terc)
+   Substitui o padrão antigo (texto inline + .rem-setor-chip) por
+   um wrapper flex que garante:
+     • alinhamento horizontal perfeito (centro vertical)
+     • truncamento aplicado SOMENTE ao nome
+     • chip nunca encolhe (flex-shrink: 0)
+     • altura uniforme em todas as linhas da tabela
+     • responsividade premium (mobile reduz chip mas preserva alinhamento)
+   ============================================================ */
+.tc-terc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;             /* permite que o filho .tc-terc__name encolha */
+  line-height: 1.3;
+  vertical-align: middle;
+}
+
+.tc-terc__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.tc-terc__chip {
+  flex: 0 0 auto;           /* CRÍTICO: chip nunca encolhe nem invade espaço */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;             /* altura fixa garante linhas uniformes */
+  padding: 0 9px;
+  background: rgba(124, 58, 237, 0.13);
+  color: #7C3AED;
+  border: 1px solid rgba(124, 58, 237, 0.30);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  white-space: nowrap;
+  max-width: 160px;          /* limita chip muito longo (raro) */
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.tc-terc__chip > i {
+  font-size: 9px;
+  opacity: 0.85;
+  flex: 0 0 auto;
+}
+.tc-terc__chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Compact variant (uso em dashboard/cards densos) */
+.tc-terc--compact .tc-terc__chip {
+  height: 19px;
+  padding: 0 7px;
+  font-size: 9.5px;
+}
+.tc-terc--compact .tc-terc__chip > i { font-size: 8px; }
+
+/* Dark mode — sintonia com paleta neon do CorePro */
+[data-theme="dark"] .tc-terc__chip {
+  background: rgba(167, 139, 250, 0.18);
+  color: #C4B5FD;
+  border-color: rgba(167, 139, 250, 0.36);
+}
+[data-theme="dark"] .tc-terc__chip:hover {
+  background: rgba(167, 139, 250, 0.26);
+}
+
+/* Responsivo — tablet */
+@media (max-width: 1024px) {
+  .tc-terc { gap: 6px; }
+  .tc-terc__chip {
+    height: 20px;
+    padding: 0 7px;
+    font-size: 10px;
+    max-width: 130px;
+  }
+}
+
+/* Responsivo — mobile */
+@media (max-width: 640px) {
+  .tc-terc {
+    gap: 5px;
+  }
+  .tc-terc__chip {
+    height: 18px;
+    padding: 0 6px;
+    font-size: 9.5px;
+    max-width: 90px;
+  }
+  .tc-terc__chip > i {
+    font-size: 8px;
+  }
+}
+
+/* Impressão (romaneio/relatório PDF nativo) — chip plano sem cor de fundo */
+@media print {
+  .tc-terc { gap: 4px; }
+  .tc-terc__chip {
+    background: transparent !important;
+    border: 1px solid #94a3b8 !important;
+    color: #475569 !important;
+    height: auto;
+    padding: 0 5px;
+  }
+  .tc-terc__chip > i { display: none; }
+}
+
 /* Status pill */
 .srv-status-on,
 .srv-status-off {

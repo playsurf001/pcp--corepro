@@ -1280,6 +1280,38 @@ const TERC = {
     const label = this.statusLabel(s);
     return `<span class="px-2 py-0.5 rounded text-xs ${map[s] || 'bg-slate-100 text-slate-700'}">${label}</span>`;
   },
+  /* ============================================================
+   * HOTFIX 0040 — Componente reutilizável Terceirizado + Setor
+   *
+   * Renderiza o par "Nome do Terceirizado + Badge do Setor" alinhado
+   * horizontalmente, com truncamento aplicado APENAS ao nome (preservando
+   * o chip visível e legível). Usado em:
+   *   - Tabela de Remessas
+   *   - Tabela de Retornos
+   *   - Demais tabelas que mostram (nome_terc, nome_setor)
+   *
+   * Estrutura DOM:
+   *   <div class="tc-terc" title="Nome · Setor">
+   *     <span class="tc-terc__name">Zélia</span>
+   *     <span class="tc-terc__chip" title="Setor: Aparador">
+   *       <i class="fas fa-sitemap"></i>Aparador
+   *     </span>
+   *   </div>
+   *
+   * Quando o setor é nulo/vazio, o chip é omitido (zero impacto visual).
+   * ============================================================ */
+  tercWithSetor(nome, setor, opts) {
+    opts = opts || {};
+    const safeName = escapeHtml(nome || '—');
+    const safeSetor = setor ? escapeHtml(setor) : '';
+    const fullTitle = nome ? (setor ? `${escapeHtml(nome)} · Setor: ${safeSetor}` : escapeHtml(nome)) : '';
+    const chip = safeSetor
+      ? `<span class="tc-terc__chip" title="Setor: ${safeSetor}"><i class="fas fa-sitemap"></i><span class="tc-terc__chip-label">${safeSetor}</span></span>`
+      : '';
+    // `opts.compact` reduz padding/fonte do chip (uso em telas densas como dashboard)
+    const cls = 'tc-terc' + (opts.compact ? ' tc-terc--compact' : '');
+    return `<div class="${cls}" title="${fullTitle}"><span class="tc-terc__name">${safeName}</span>${chip}</div>`;
+  },
   // Cache de parâmetros da empresa para impressão
   empresa: null,
   async loadEmpresa(force = false) {
@@ -2887,10 +2919,7 @@ ROUTES.terc_remessas = async (main) => {
       <tr class="remessas-row">
         <td class="text-right font-mono tabular-nums">${r?.num_controle ?? '—'}</td>
         <td>${escapeHtml(r?.num_op || '—')}</td>
-        <td class="truncate" title="${escapeHtml(r?.nome_terc || '')}${r?.nome_setor ? ' · ' + escapeHtml(r.nome_setor) : ''}">
-          ${escapeHtml(r?.nome_terc || '—')}
-          ${r?.nome_setor ? `<span class="rem-setor-chip" title="Setor: ${escapeHtml(r.nome_setor)}"><i class="fas fa-sitemap"></i>${escapeHtml(r.nome_setor)}</span>` : ''}
-        </td>
+        <td>${TERC.tercWithSetor(r?.nome_terc, r?.nome_setor)}</td>
         <td class="text-xs text-slate-500 truncate" title="${escapeHtml(r?.desc_servico || '')}">${escapeHtml(r?.desc_servico || '—')}</td>
         <td>
           <span class="font-mono text-xs">${escapeHtml(r?.cod_ref || '')}</span>
@@ -5473,7 +5502,7 @@ async function TERC_openRemDetalhe(id) {
     </div>
     <div id="print-area">
       <div class="grid grid-cols-3 gap-3 text-sm mb-4">
-        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Terceirizado</div><div class="font-semibold">${r.nome_terc || '—'}</div><div class="text-xs text-slate-500 mt-1">${r.nome_setor || ''}</div></div>
+        <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Terceirizado</div><div class="font-semibold">${escapeHtml(r.nome_terc || '—')}</div>${r.nome_setor ? `<div class="mt-1"><span class="tc-terc__chip"><i class="fas fa-sitemap"></i><span class="tc-terc__chip-label">${escapeHtml(r.nome_setor)}</span></span></div>` : ''}</div>
         <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Referência</div><div class="font-mono font-semibold">${r.cod_ref || '—'}</div><div class="text-xs">${r.desc_ref || ''} ${r.cor ? '· ' + r.cor : ''}</div></div>
         <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Serviço</div><div class="font-semibold">${r.desc_servico || '—'}</div>${r.nome_colecao ? '<div class="text-xs">' + r.nome_colecao + '</div>' : ''}</div>
         <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">Saída / Previsão</div><div>${fmt.date(r.dt_saida)} → <b>${fmt.date(r.dt_previsao)}</b></div><div class="text-xs text-slate-500">${fmt.safeNum(r.prazo_dias)} dia(s)</div></div>
@@ -5877,10 +5906,7 @@ ROUTES.terc_retornos = async (main) => {
       <tr class="retornos-row">
         <td class="whitespace-nowrap">${fmt.date(x.dt_retorno)}</td>
         <td class="text-right font-mono">${x.num_controle ?? '—'}</td>
-        <td class="truncate" title="${escapeHtml(x.nome_terc||'')}${x.nome_setor ? ' · ' + escapeHtml(x.nome_setor) : ''}">
-          ${escapeHtml(x.nome_terc || '—')}
-          ${x.nome_setor ? `<span class="rem-setor-chip" title="Setor: ${escapeHtml(x.nome_setor)}"><i class="fas fa-sitemap"></i>${escapeHtml(x.nome_setor)}</span>` : ''}
-        </td>
+        <td>${TERC.tercWithSetor(x.nome_terc, x.nome_setor)}</td>
         <td>${refCorParts.join(' ') || '—'}</td>
         <td class="text-xs text-slate-600 truncate" title="${escapeHtml(x.desc_servico||'')}">${escapeHtml(x.desc_servico || '')}</td>
         <td class="text-right text-emerald-700 tabular-nums">${fmt.int(x.qtd_boa)}</td>
