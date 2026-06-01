@@ -2617,8 +2617,8 @@ app.get('/terc/retornos', async (c) => {
     SELECT
       rt.id_retorno, rt.id_remessa, rt.dt_retorno, rt.qtd_total,
       rt.qtd_boa, rt.qtd_refugo, rt.qtd_conserto, rt.valor_pago,
-      rt.dt_pagamento, rt.observacao,
-      r.num_controle, r.cod_ref, r.cor, r.num_op,
+      rt.dt_pagamento, rt.observacao, rt.id_pagamento,
+      r.num_controle, r.cod_ref, r.cor, r.num_op, r.id_terc,
       t.nome_terc,
       sv.desc_servico,
       st.nome_setor, st.cor AS setor_cor

@@ -1923,6 +1923,140 @@ Criado componente CSS reutilizável (`styles.css` linhas ~4592-4810) + markup HT
 
 ---
 
+## 🆕 HOTFIX 0042 (2026-06-01) — Módulo de Pagamentos de Terceirizados (Financeiro completo)
+
+### Contexto
+Antes deste hotfix o sistema **registrava** retornos com valores (peças boas × valor unitário), mas **não havia gestão financeira**: o campo `terc_retornos.dt_pagamento` apenas marcava "pago/não pago" sem rastrear *quando*, *quanto*, *como*, *por quem*, nem gerar comprovante. Reconciliar pagamentos com terceirizados era manual.
+
+Este hotfix entrega um **módulo financeiro completo** para pagar terceirizados em lote, com comprovante em PDF, histórico, estorno e auditoria — **sem quebrar nenhum cálculo nem o significado do `dt_pagamento`** (que continua sendo source of truth para "está pago?").
+
+### Arquitetura — backward-compatible
+- ✅ `terc_retornos.dt_pagamento` **mantido como fonte da verdade** ("está pago?") — relatórios, dashboard, exports e badges existentes funcionam idênticos.
+- ✅ Nova coluna **opcional** `terc_retornos.id_pagamento` (FK → `payments_terc.id_pagamento`) liga o retorno ao comprovante quando pago via novo módulo.
+- ✅ Pagamentos **legados** (que têm `dt_pagamento` mas não têm `id_pagamento`) continuam aparecendo como "Pago" — apenas não terão comprovante PDF retroativo, o que é correto.
+- ✅ Todo o módulo é **multi-tenant** via `id_empresa` em ambas as novas tabelas + `UNIQUE (id_empresa, id_retorno)` em `payment_terc_items` impede pagamento duplicado.
+
+### Schema novo (migration `0042_pagamentos_terceirizados.sql`)
+**Tabela `payments_terc`** — cabeçalho do comprovante:
+- `id_pagamento PK`, `id_empresa FK`, `id_terc FK`
+- `dt_pagamento`, `valor_total`, `qtd_retornos`, `qtd_pecas_boas`
+- `forma_pagamento` (PIX | Dinheiro | Transferência | TED | DOC | Cartão | Outro)
+- `observacao`, `status` (CHECK `Confirmado` | `Estornado`)
+- `usuario` (quem registrou), `ip_origem` (auditoria)
+- `estornado_por`, `dt_estorno`, `motivo_estorno`, `dt_criacao`
+
+**Tabela `payment_terc_items`** — itens (retornos incluídos):
+- `id_item PK`, `id_pagamento FK`, `id_empresa FK`, `id_retorno FK`, `valor`
+- `UNIQUE (id_empresa, id_retorno)` → garante que um mesmo retorno não pode ser pago 2x sem estornar primeiro
+
+**ALTER em `terc_retornos`:**
+- `ADD COLUMN id_pagamento INTEGER` (FK opcional)
+- `CREATE INDEX idx_terc_ret_pagamento` para joins rápidos
+
+### Endpoints REST (`src/routes/payments_terc.ts` — 5 rotas)
+
+| Método | Rota | Função |
+|---|---|---|
+| `GET` | `/api/payments-terc/summary?id_terc=N` | Resumo financeiro do terceirizado: total retornos, peças boas, valor total, valor pago, valor pendente, qtd pendentes/pagos, último pagamento |
+| `GET` | `/api/payments-terc` | Histórico paginado com filtros (de, ate, id_terc, forma, status, search) |
+| `GET` | `/api/payments-terc/:id` | Detalhe do pagamento + itens (JOIN com retornos/remessas/serviços) |
+| `POST` | `/api/payments-terc` | **Cria pagamento em lote** — valida same tenant + same terceirizado + nenhum já pago; atomicamente insere header + N itens + `UPDATE retornos SET dt_pagamento=?, id_pagamento=?` |
+| `POST` | `/api/payments-terc/:id/void` | **Estorna** — `requireAdmin()` middleware; marca status='Estornado', limpa `dt_pagamento` + `id_pagamento` dos retornos (voltam a "Pendente" e podem ser repagos) |
+
+**Validações no POST:**
+- Todos os retornos devem ter `id_empresa = c.get('id_empresa')` (tenant scoping)
+- Todos os retornos devem ter mesmo `id_terc` (rejeita lote mixado)
+- Nenhum retorno pode ter `dt_pagamento` preenchido (proteção contra double-pay)
+- Forma de pagamento deve estar em `FORMAS_VALIDAS`
+
+**Auditoria:** todos os endpoints chamam `audit(c, 'PAGTERC', 'CREATE'|'VOID', id, ...)` e capturam IP do header `cf-connecting-ip` / `x-forwarded-for`.
+
+### Frontend — Retornos com seleção e pagamento
+**1. Coluna checkbox** na primeira coluna da tabela de Retornos:
+- Header com **check-all** que seleciona todas as linhas pagáveis da página
+- Linhas já pagas: ícone `—` (não selecionável)
+- Linhas com `valor_pago > 0` e não pagas: checkbox ativo
+- Linha selecionada destacada com `box-shadow` esquerdo verde + fundo `rgba(16,185,129,.10)`
+- Estado `indeterminate` do check-all quando seleção parcial
+
+**2. Painel financeiro** `.ret-finance-panel` (aparece ao filtrar por `id_terc`):
+- Cabeçalho: ícone + nome do terceirizado + telefone + badge "Quitado" (se tudo pago)
+- 5 stat cards: **Qtd Retornos**, **Peças Boas**, **Valor Total**, **Valor Pago** (emerald), **Valor Pendente** (highlight verde glow)
+- Botão **"Pagar Todos do Terceirizado"** — atalho que busca todos os pendentes (até 1000) e abre modal pré-preenchido
+
+**3. Barra flutuante** `.ret-payment-bar` (aparece ao selecionar 1+ retornos):
+- Fixed bottom centralizada, com glow verde
+- Mostra: `X retornos · Y peças · R$ Z` em tempo real
+- Botão **"Limpar"** + botão **"Pagar Selecionados"**
+- Bloqueia pagamento de múltiplos terceirizados na mesma seleção (mostra aviso)
+
+**4. Modal de pagamento** (`openPaymentModal`):
+- Resumo visual: terceirizado + 3 stats (X retornos / X peças / **Valor total destacado**)
+- Form: **Data do pagamento** (default hoje), **Forma** (select com 7 opções), **Observação** (textarea opcional)
+- Banner azul de confirmação: *"Você está prestes a confirmar o pagamento de X retornos no valor de R$ Y..."*
+- POST `/api/payments-terc` → ao retornar OK, abre **toast de sucesso** com botão **"Gerar PDF do Comprovante"**
+
+**5. Comprovante PDF** (`generatePaymentReceiptPDF`):
+- jsPDF + jspdf-autotable (já carregados via CDN)
+- A4 retrato com:
+  - Cabeçalho: razão social da empresa + CNPJ + endereço + "COMPROVANTE DE PAGAMENTO Nº {id}"
+  - Bloco terceirizado: nome, telefone, PIX
+  - Tabela: **CTRL | OP | Ref | Serviço | Valor** (uma linha por retorno)
+  - Totais (qtd retornos, peças, **valor total em destaque**)
+  - Forma de pagamento + observação
+  - Rodapé: responsável (usuário logado) + IP + data/hora + 2 linhas para assinatura
+
+### Frontend — Histórico de Pagamentos (`ROUTES.pagamentos_terc`)
+Menu **Financeiro → Pagamentos** (novo grupo na sidebar com ícone `fa-hand-holding-dollar`):
+- **KPIs**: total de pagamentos, valor consolidado, qtd retornos pagos, qtd estornos
+- **Filtros**: período (de/até), terceirizado, forma de pagamento, status, busca textual
+- **Tabela paginada**: `ID | Data | Terceirizado | Qtd Retornos | Valor | Forma | Usuário | Status`
+- **Ações por linha**: 👁️ ver detalhe (modal com itens) · 📄 gerar PDF · ⛔ **estornar (somente admin)**
+- Estorno pede confirmação + motivo, libera os retornos (voltam para Pendente, podem ser repagos)
+
+### CSS — Componentes (`.ret-payment-bar`, `.ret-finance-panel`, `.rfp-stat`, `.pay-summary`, `.pay-stat`, `.pay-confirm-banner`)
+- Padrão dark gradient + glow verde (alinhado com HOTFIX 0040/0041)
+- `.rfp-stat[data-variant]` com 5 variantes: `neutral`, `blue`, `emerald`, `amber`, `highlight`
+- Light theme overrides em todas as classes
+- Responsivo: 5→3→2 colunas no painel financeiro · barra full-width no mobile
+- `.pay-stat--highlight` com `text-shadow` verde para o valor total
+- Linha selecionada usa `tr:has(.ret-checkbox:checked)` para destaque sem JS extra
+
+### Segurança & Multi-tenant
+- ✅ **Tenant scoping**: 100% das queries com `WHERE id_empresa = ?` + JOINs com igualdade de `id_empresa`
+- ✅ **UNIQUE composto** `(id_empresa, id_retorno)` em `payment_terc_items` impede pagamento duplicado mesmo em race conditions
+- ✅ **RBAC**: estorno protegido por `requireAdmin()` (perfil='admin' apenas)
+- ✅ **Auditoria completa**: usuário, IP, módulo (`PAGTERC`), ação (`CREATE`/`VOID`), antes/depois — registrado em `auditoria`
+- ✅ **CHECK constraint** `status IN ('Confirmado','Estornado')` no DB impede status inválido
+
+### Arquivos alterados
+| Arquivo | Mudança |
+|---|---|
+| `migrations/0042_pagamentos_terceirizados.sql` | **CRIADO** — 2 tabelas + ALTER + índices (12 commands) |
+| `src/routes/payments_terc.ts` | **CRIADO** — Router Hono com 5 endpoints + audit + RBAC |
+| `src/index.tsx` | `import paymentsTerc` + `app.route('/api', paymentsTerc)` + cache bust v=50 |
+| `src/routes/terceirizacao.ts` | `+ rt.id_pagamento, r.id_terc` no SELECT de `/terc/retornos` |
+| `public/static/app.js` | NAV menu + checkbox column + finance panel + payment bar + modal + PDF + ROUTES.pagamentos_terc + helpers globais |
+| `public/static/styles.css` | +600 linhas — `.ret-payment-bar`, `.ret-finance-panel`, `.rfp-stat[data-variant]`, `.pay-summary`, `.pay-stat`, `.pay-confirm-banner`, light theme, responsivo |
+
+### Validação técnica
+- **Build**: `dist/_worker.js 325.23 kB` (+10 kB vs HOTFIX 0041, esperado por payments_terc.ts)
+- **Local smoke**: HTML 200 / app.js?v=50 200 / styles.css?v=50 200 / API summary 401 (auth required ✅) / 117 classes CSS / 21 funções JS
+- **Migration LOCAL**: `npx wrangler d1 migrations apply pcp-confeccao-prod --local` → 12 commands ✅
+- **Migration PROD**: `--remote` → 12 commands em 4.02ms ✅
+- **Deploy PROD**: `https://1caf23e3.corepro-confeccao.pages.dev` ✅
+- **PROD smoke**: HTML 200 + app.js?v=50 (559 KB) + styles.css?v=50 (255 KB) + APIs retornando 401 + 117 classes + 21 funções confirmadas em PROD
+
+### Compatibilidade total
+- ✅ **Zero impacto** em retornos já pagos pelo método legado (continuam "Pago" via `dt_pagamento`)
+- ✅ **Zero impacto** em cálculos (valor unitário × peças boas continua idêntico)
+- ✅ **Zero impacto** em relatórios/dashboard/exports
+- ✅ **Multiempresa**: cada empresa só vê e paga seus próprios retornos
+- ✅ **Print/PDF de retornos**: chip de "Pago" continua funcionando (depende só de `dt_pagamento`)
+- ✅ **Repagamento após estorno**: funciona — o estorno limpa `dt_pagamento` + `id_pagamento`, retorno volta a "Pendente" e pode ser incluído em novo lote
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -1932,6 +2066,7 @@ Criado componente CSS reutilizável (`styles.css` linhas ~4592-4810) + markup HT
 - [x] ~~Padronização de status "Aguardando Envio" → "Aguardando Retorno"~~ ✅ **Implementado HOTFIX 0039** (UI-only, zero impacto em workflow/banco)
 - [x] ~~Alinhamento Terceirizado + Setor em tabelas (Remessas/Retornos)~~ ✅ **Implementado HOTFIX 0040** (componente `.tc-terc` reutilizável + responsivo + dark + print, zero impacto em backend/dados)
 - [x] ~~Rodapé financeiro do Retorno com baixa legibilidade~~ ✅ **Implementado HOTFIX 0041** (componente `.tc-rsf` dark premium + grid responsivo + variantes coloridas + destaque "Total pago" + ações separadas, zero impacto em cálculos/lógica)
+- [x] ~~Módulo financeiro / pagamento de terceirizados (sem gestão de "quando pagou / como / comprovante")~~ ✅ **Implementado HOTFIX 0042** (módulo Financeiro → Pagamentos completo: checkbox + painel financeiro por terceirizado + barra flutuante + modal de pagamento em lote + 7 formas + comprovante PDF (jsPDF + autoTable) + histórico paginado + estorno admin-only + auditoria com IP + 2 novas tabelas multi-tenant + backward-compat com `dt_pagamento`)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

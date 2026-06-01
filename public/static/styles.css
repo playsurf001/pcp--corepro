@@ -4839,6 +4839,589 @@ textarea.field-invalid {
   .tc-rsf__actions { display: none !important; }
 }
 
+/* ================================================================
+ * HOTFIX 0042 — Módulo de Pagamentos de Terceirizados
+ * Componentes: .ret-payment-bar, .ret-finance-panel, .rfp-stat,
+ *              .pay-summary, .pay-stat, .pay-confirm-banner,
+ *              .ret-col-check, .ret-checkbox, .is-payable
+ * ================================================================ */
+
+/* ---------------------------------------------------------------
+ * Coluna de seleção na tabela de Retornos
+ * --------------------------------------------------------------- */
+.ret-col-check {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  text-align: center;
+  padding: 6px 4px !important;
+  vertical-align: middle;
+}
+.ret-col-check input[type="checkbox"] {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: #10b981;
+  margin: 0;
+  vertical-align: middle;
+}
+.ret-col-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.ret-checkbox {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: #10b981;
+  margin: 0;
+  vertical-align: middle;
+}
+.ret-check-na {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 11px;
+  opacity: 0.5;
+}
+.ret-check-na::before {
+  content: "—";
+}
+
+/* Realce visual da linha selecionada/selecionável */
+tr.is-payable td {
+  background: rgba(16, 185, 129, 0.025);
+  transition: background 0.18s ease;
+}
+tr.is-payable:hover td {
+  background: rgba(16, 185, 129, 0.06);
+}
+tr.is-payable:has(.ret-checkbox:checked) td {
+  background: rgba(16, 185, 129, 0.10) !important;
+  box-shadow: inset 3px 0 0 #10b981;
+}
+[data-theme="light"] tr.is-payable td {
+  background: rgba(16, 185, 129, 0.04);
+}
+[data-theme="light"] tr.is-payable:has(.ret-checkbox:checked) td {
+  background: rgba(16, 185, 129, 0.14) !important;
+}
+
+/* ---------------------------------------------------------------
+ * Painel financeiro do terceirizado (visível ao filtrar id_terc)
+ * --------------------------------------------------------------- */
+.ret-finance-panel {
+  margin: 14px 0;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #0b1220 0%, #131c31 60%, #0b1220 100%);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.ret-finance-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0));
+  flex-wrap: wrap;
+}
+.ret-finance-panel__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ret-finance-panel__title > i {
+  font-size: 18px;
+  color: #34d399;
+  filter: drop-shadow(0 0 6px rgba(16, 185, 129, 0.4));
+}
+.ret-finance-panel__name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ret-finance-panel__phone {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-left: 8px;
+  font-weight: 500;
+}
+.ret-finance-panel__paid-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  margin-left: 8px;
+}
+.ret-finance-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ret-finance-panel__actions .btn {
+  min-height: 36px;
+  padding: 7px 14px;
+  font-weight: 600;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.ret-finance-panel__stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+/* Stat card individual */
+.rfp-stat {
+  padding: 11px 13px;
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.rfp-stat:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.rfp-stat__label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rfp-stat__label > i { color: #a78bfa; font-size: 11px; }
+.rfp-stat__value {
+  font-size: 20px;
+  font-weight: 800;
+  color: #f1f5f9;
+  letter-spacing: -0.3px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.rfp-stat__sub {
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* Variantes coloridas */
+.rfp-stat[data-variant="neutral"] { border-color: rgba(148, 163, 184, 0.22); }
+.rfp-stat[data-variant="neutral"] .rfp-stat__value { color: #e2e8f0; }
+
+.rfp-stat[data-variant="blue"] { border-color: rgba(59, 130, 246, 0.32); }
+.rfp-stat[data-variant="blue"] .rfp-stat__value { color: #93c5fd; }
+.rfp-stat[data-variant="blue"] .rfp-stat__label { color: #bfdbfe; }
+.rfp-stat[data-variant="blue"] .rfp-stat__label > i { color: #60a5fa; }
+
+.rfp-stat[data-variant="emerald"] { border-color: rgba(16, 185, 129, 0.34); }
+.rfp-stat[data-variant="emerald"] .rfp-stat__value { color: #6ee7b7; }
+.rfp-stat[data-variant="emerald"] .rfp-stat__label { color: #a7f3d0; }
+.rfp-stat[data-variant="emerald"] .rfp-stat__label > i { color: #34d399; }
+
+.rfp-stat[data-variant="amber"] { border-color: rgba(245, 158, 11, 0.34); }
+.rfp-stat[data-variant="amber"] .rfp-stat__value { color: #fcd34d; }
+.rfp-stat[data-variant="amber"] .rfp-stat__label { color: #fde68a; }
+.rfp-stat[data-variant="amber"] .rfp-stat__label > i { color: #fbbf24; }
+
+.rfp-stat[data-variant="highlight"] {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.16), rgba(5, 150, 105, 0.10));
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.08), 0 6px 18px rgba(16, 185, 129, 0.18);
+}
+.rfp-stat[data-variant="highlight"] .rfp-stat__label { color: #a7f3d0; }
+.rfp-stat[data-variant="highlight"] .rfp-stat__label > i { color: #34d399; }
+.rfp-stat[data-variant="highlight"] .rfp-stat__value {
+  color: #34d399;
+  font-size: 22px;
+  text-shadow: 0 0 14px rgba(16, 185, 129, 0.35);
+}
+.rfp-stat[data-variant="highlight"] .rfp-stat__sub { color: #6ee7b7; }
+
+/* Responsivo painel financeiro */
+@media (max-width: 1024px) {
+  .ret-finance-panel__stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+}
+@media (max-width: 640px) {
+  .ret-finance-panel__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+    padding: 12px;
+  }
+  .rfp-stat__value { font-size: 17px; }
+  .rfp-stat[data-variant="highlight"] .rfp-stat__value { font-size: 19px; }
+  .ret-finance-panel__head {
+    padding: 12px 14px;
+  }
+  .ret-finance-panel__actions {
+    width: 100%;
+  }
+  .ret-finance-panel__actions .btn {
+    flex: 1 1 calc(50% - 4px);
+  }
+}
+
+/* Light theme do painel */
+[data-theme="light"] .ret-finance-panel {
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 60%, #ffffff 100%);
+  border-color: #e2e8f0;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+}
+[data-theme="light"] .ret-finance-panel__head {
+  border-bottom-color: #e2e8f0;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), rgba(0, 0, 0, 0));
+}
+[data-theme="light"] .ret-finance-panel__name { color: #0f172a; }
+[data-theme="light"] .ret-finance-panel__phone { color: #64748b; }
+[data-theme="light"] .ret-finance-panel__title > i { color: #059669; filter: none; }
+[data-theme="light"] .rfp-stat {
+  background: #ffffff;
+  border-color: #e2e8f0;
+}
+[data-theme="light"] .rfp-stat__label { color: #64748b; }
+[data-theme="light"] .rfp-stat__value { color: #0f172a; }
+[data-theme="light"] .rfp-stat__sub { color: #94a3b8; }
+[data-theme="light"] .rfp-stat[data-variant="blue"] .rfp-stat__value { color: #1d4ed8; }
+[data-theme="light"] .rfp-stat[data-variant="emerald"] .rfp-stat__value { color: #047857; }
+[data-theme="light"] .rfp-stat[data-variant="amber"] .rfp-stat__value { color: #b45309; }
+[data-theme="light"] .rfp-stat[data-variant="highlight"] {
+  background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+  border-color: #86efac;
+}
+[data-theme="light"] .rfp-stat[data-variant="highlight"] .rfp-stat__value { color: #047857; text-shadow: none; }
+[data-theme="light"] .rfp-stat[data-variant="highlight"] .rfp-stat__label { color: #065f46; }
+[data-theme="light"] .rfp-stat[data-variant="highlight"] .rfp-stat__sub { color: #047857; }
+[data-theme="light"] .ret-finance-panel__paid-badge {
+  background: #d1fae5;
+  color: #047857;
+  border-color: #86efac;
+}
+
+/* ---------------------------------------------------------------
+ * Barra flutuante de pagamento (aparece com seleção)
+ * --------------------------------------------------------------- */
+.ret-payment-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%) translateY(120%);
+  z-index: 950;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #0b1220 0%, #1e293b 50%, #0b1220 100%);
+  border: 1px solid rgba(16, 185, 129, 0.42);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(16, 185, 129, 0.10),
+              0 0 24px rgba(16, 185, 129, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.25s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.18s ease;
+  min-width: 320px;
+  max-width: calc(100vw - 40px);
+}
+.ret-payment-bar.is-visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.ret-payment-bar__info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ret-payment-bar__info > i {
+  color: #34d399;
+  font-size: 16px;
+  filter: drop-shadow(0 0 6px rgba(16, 185, 129, 0.5));
+}
+.ret-payment-bar__info b {
+  color: #f1f5f9;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ret-payment-bar__sep {
+  color: rgba(148, 163, 184, 0.4);
+  font-weight: 400;
+  margin: 0 2px;
+}
+.ret-payment-bar__total {
+  color: #6ee7b7;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.32);
+}
+.ret-payment-bar__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ret-payment-bar__actions .btn {
+  min-height: 36px;
+  padding: 7px 14px;
+  font-weight: 700;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.ret-payment-bar__actions .btn-success {
+  background: linear-gradient(135deg, #059669, #10b981);
+  border: none;
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.42);
+}
+.ret-payment-bar__actions .btn-success:hover {
+  background: linear-gradient(135deg, #047857, #059669);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(16, 185, 129, 0.55);
+}
+.ret-payment-bar__actions .btn-ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #94a3b8;
+}
+.ret-payment-bar__actions .btn-ghost:hover {
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+/* Mobile: barra ocupa quase toda largura */
+@media (max-width: 640px) {
+  .ret-payment-bar {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    transform: translateY(120%);
+    min-width: 0;
+    max-width: none;
+    padding: 10px 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .ret-payment-bar.is-visible {
+    transform: translateY(0);
+  }
+  .ret-payment-bar__info {
+    flex: 1 1 100%;
+    font-size: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .ret-payment-bar__actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .ret-payment-bar__actions .btn {
+    flex: 1 1 auto;
+    padding: 7px 10px;
+  }
+}
+
+/* Light theme barra */
+[data-theme="light"] .ret-payment-bar {
+  background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 50%, #ffffff 100%);
+  border-color: #86efac;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16), 0 0 0 1px rgba(16, 185, 129, 0.12);
+}
+[data-theme="light"] .ret-payment-bar__info { color: #0f172a; }
+[data-theme="light"] .ret-payment-bar__info > i { color: #059669; filter: none; }
+[data-theme="light"] .ret-payment-bar__info b { color: #0f172a; }
+[data-theme="light"] .ret-payment-bar__total { color: #047857; text-shadow: none; }
+[data-theme="light"] .ret-payment-bar__sep { color: #cbd5e1; }
+[data-theme="light"] .ret-payment-bar__actions .btn-ghost {
+  border-color: #cbd5e1;
+  color: #64748b;
+}
+[data-theme="light"] .ret-payment-bar__actions .btn-ghost:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+/* ---------------------------------------------------------------
+ * Modal de pagamento — resumo (.pay-summary, .pay-stat)
+ * --------------------------------------------------------------- */
+.pay-summary {
+  margin-bottom: 16px;
+  padding: 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(16, 185, 129, 0.02));
+  border: 1px solid rgba(16, 185, 129, 0.28);
+}
+.pay-summary__terc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(16, 185, 129, 0.18);
+  color: #f1f5f9;
+  font-size: 14px;
+  font-weight: 600;
+}
+.pay-summary__terc > i {
+  color: #34d399;
+  font-size: 15px;
+}
+.pay-summary__terc b {
+  color: #f1f5f9;
+  font-weight: 700;
+}
+.pay-summary__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.pay-stat {
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.pay-stat__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+.pay-stat__value {
+  font-size: 17px;
+  font-weight: 800;
+  color: #e2e8f0;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.2px;
+}
+.pay-stat--highlight {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(5, 150, 105, 0.10));
+  border-color: rgba(16, 185, 129, 0.45);
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.16);
+}
+.pay-stat--highlight .pay-stat__label { color: #a7f3d0; }
+.pay-stat--highlight .pay-stat__value {
+  color: #34d399;
+  font-size: 19px;
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+
+@media (max-width: 540px) {
+  .pay-summary__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pay-stat--highlight {
+    grid-column: span 2;
+  }
+}
+
+/* Light theme pay-summary */
+[data-theme="light"] .pay-summary {
+  background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+  border-color: #86efac;
+}
+[data-theme="light"] .pay-summary__terc {
+  color: #0f172a;
+  border-bottom-color: #a7f3d0;
+}
+[data-theme="light"] .pay-summary__terc > i { color: #059669; }
+[data-theme="light"] .pay-stat {
+  background: #ffffff;
+  border-color: #e2e8f0;
+}
+[data-theme="light"] .pay-stat__label { color: #64748b; }
+[data-theme="light"] .pay-stat__value { color: #0f172a; }
+[data-theme="light"] .pay-stat--highlight {
+  background: linear-gradient(135deg, #d1fae5, #a7f3d0);
+  border-color: #6ee7b7;
+}
+[data-theme="light"] .pay-stat--highlight .pay-stat__label { color: #065f46; }
+[data-theme="light"] .pay-stat--highlight .pay-stat__value { color: #047857; text-shadow: none; }
+
+/* ---------------------------------------------------------------
+ * Banner de confirmação (info pré-submit)
+ * --------------------------------------------------------------- */
+.pay-confirm-banner {
+  margin-top: 12px;
+  padding: 11px 14px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #bfdbfe;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.pay-confirm-banner > i {
+  color: #60a5fa;
+  font-size: 15px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.pay-confirm-banner b { color: #dbeafe; font-weight: 700; }
+
+[data-theme="light"] .pay-confirm-banner {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+[data-theme="light"] .pay-confirm-banner > i { color: #2563eb; }
+[data-theme="light"] .pay-confirm-banner b { color: #1e3a8a; }
+
+/* ---------------------------------------------------------------
+ * Modal size helpers (caso .modal-sm/md/lg ainda não existam)
+ * --------------------------------------------------------------- */
+.modal-sm .modal-content,
+.modal-content.modal-sm { max-width: 460px; }
+.modal-md .modal-content,
+.modal-content.modal-md { max-width: 640px; }
+.modal-lg .modal-content,
+.modal-content.modal-lg { max-width: 880px; }
+
 /* Status pill */
 .srv-status-on,
 .srv-status-off {

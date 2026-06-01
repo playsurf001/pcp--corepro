@@ -415,6 +415,9 @@ const NAV = [
   { id: 'terc_remessas',         label: 'Remessas',          icon: 'fa-truck-fast',       group: 'Terceirização', tercOnly: true },
   { id: 'terc_retornos',         label: 'Retornos',          icon: 'fa-truck-arrow-right',group: 'Terceirização', tercOnly: true },
 
+  // ==== FINANCEIRO (HOTFIX 0042 — Pagamentos de Terceirizados) ====
+  { id: 'pagamentos_terc',       label: 'Pagamentos',        icon: 'fa-hand-holding-dollar', group: 'Financeiro', tercOnly: true },
+
   // ==== ANÁLISES ====
   { id: 'relatorios_detalhados', label: 'Relatórios',        icon: 'fa-chart-pie',        group: 'Análises',      tercOnly: true },
 
@@ -443,6 +446,7 @@ const GROUP_ICONS = {
   'Cadastros': 'fa-folder-tree',
   'Configurações': 'fa-gear',
   'Terceirização': 'fa-truck-fast',
+  'Financeiro': 'fa-hand-holding-dollar',
   'Análises': 'fa-chart-pie',
 };
 
@@ -5699,6 +5703,29 @@ ROUTES.terc_retornos = async (main) => {
           <!-- 🚨 Banner de alerta de integridade (oculto por padrão) -->
           <div id="ret-integrity-banner" style="display:none"></div>
 
+          <!-- 💰 HOTFIX 0042 — Painel financeiro do terceirizado filtrado (oculto até filtrar) -->
+          <div id="ret-terc-finance-panel" style="display:none"></div>
+
+          <!-- 💵 HOTFIX 0042 — Barra flutuante de pagamento (aparece quando há retornos selecionados) -->
+          <div id="ret-payment-bar" class="ret-payment-bar" style="display:none">
+            <div class="ret-payment-bar__info">
+              <i class="fas fa-square-check"></i>
+              <span><b id="rpb-count">0</b> retorno(s) selecionado(s)</span>
+              <span class="ret-payment-bar__sep">·</span>
+              <span><b id="rpb-pieces">0</b> peças boas</span>
+              <span class="ret-payment-bar__sep">·</span>
+              <span>Total: <b id="rpb-total" class="ret-payment-bar__total">R$ 0,00</b></span>
+            </div>
+            <div class="ret-payment-bar__actions">
+              <button id="rpb-clear" class="btn btn-secondary btn-sm" title="Limpar seleção">
+                <i class="fas fa-xmark mr-1"></i>Limpar
+              </button>
+              <button id="rpb-pay" class="btn btn-primary btn-sm" title="Pagar selecionados">
+                <i class="fas fa-hand-holding-dollar mr-1"></i>Pagar Selecionados
+              </button>
+            </div>
+          </div>
+
           <!-- Linha 2: filtros -->
           <div class="page-sticky-grid">
             <div class="filter-cell filter-cell-search">
@@ -5789,6 +5816,7 @@ ROUTES.terc_retornos = async (main) => {
       <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm retornos-table">
           <thead><tr>
+            <th class="ret-col-check no-print"><input type="checkbox" disabled /></th>
             <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>
             <th>Ref/Cor</th><th>Serviço</th>
             <th class="text-right">Boas</th><th class="text-right">Falta</th><th class="text-right">Conserto</th>
@@ -5922,12 +5950,350 @@ ROUTES.terc_retornos = async (main) => {
     }
   }
 
+  /* ============================================================
+   * 💰 HOTFIX 0042 — PAGAMENTOS DE TERCEIRIZADOS
+   * Funções dedicadas à seleção, painel financeiro e modal de pagamento.
+   * Multi-tenant safe — todas usam api() que injeta token automaticamente.
+   * ============================================================ */
+
+  // Carrega painel financeiro quando filtro de terceirizado está ativo
+  async function loadTercFinancePanel() {
+    const panel = document.getElementById('ret-terc-finance-panel');
+    if (!panel) return;
+    if (!state.id_terc) { panel.style.display = 'none'; panel.innerHTML = ''; return; }
+    try {
+      const r = await api('get', '/payments-terc/summary?id_terc=' + state.id_terc);
+      const d = r?.data || {};
+      const t = d.terceirizado || {};
+      const tot = d.totais || {};
+      const last = d.ultimo_pagamento;
+      const setorChip = t.nome_setor ? TERC.tercWithSetor('', t.nome_setor).replace(/<div[^>]*>|<\/div>/g, '').replace(/<span class="tc-terc__name">[^<]*<\/span>/, '') : '';
+      panel.innerHTML = `
+        <div class="ret-finance-panel">
+          <div class="ret-finance-panel__head">
+            <div class="ret-finance-panel__title">
+              <i class="fas fa-user-tie"></i>
+              <span class="ret-finance-panel__name">${escapeHtml(t.nome_terc || '—')}</span>
+              ${t.nome_setor ? `<span class="tc-terc__chip"><i class="fas fa-sitemap"></i><span class="tc-terc__chip-label">${escapeHtml(t.nome_setor)}</span></span>` : ''}
+              ${t.telefone ? `<span class="ret-finance-panel__phone"><i class="fas fa-phone"></i>${escapeHtml(t.telefone)}</span>` : ''}
+            </div>
+            <div class="ret-finance-panel__actions">
+              ${tot.qtd_pendentes > 0 ? `
+                <button id="btn-pay-all-terc" class="btn btn-primary btn-sm" title="Pagar TODOS os retornos pendentes deste terceirizado">
+                  <i class="fas fa-hand-holding-dollar mr-1"></i>Pagar Todos do Terceirizado
+                </button>
+              ` : `
+                <span class="ret-finance-panel__paid-badge"><i class="fas fa-check-circle"></i>Sem pendências</span>
+              `}
+            </div>
+          </div>
+          <div class="ret-finance-panel__stats">
+            <div class="rfp-stat" data-variant="neutral">
+              <div class="rfp-stat__label">Retornos</div>
+              <div class="rfp-stat__value">${fmt.int(tot.total_retornos)}</div>
+              <div class="rfp-stat__sub">${fmt.int(tot.qtd_pendentes)} pendente(s) · ${fmt.int(tot.qtd_pagos)} pago(s)</div>
+            </div>
+            <div class="rfp-stat" data-variant="emerald">
+              <div class="rfp-stat__label">Peças boas</div>
+              <div class="rfp-stat__value">${fmt.int(tot.total_pecas_boas)}</div>
+              <div class="rfp-stat__sub">acumuladas</div>
+            </div>
+            <div class="rfp-stat" data-variant="amber">
+              <div class="rfp-stat__label">Pendente</div>
+              <div class="rfp-stat__value">${TERC.fmtBRL(tot.valor_pendente)}</div>
+              <div class="rfp-stat__sub">a pagar</div>
+            </div>
+            <div class="rfp-stat" data-variant="blue">
+              <div class="rfp-stat__label">Já pago</div>
+              <div class="rfp-stat__value">${TERC.fmtBRL(tot.valor_pago)}</div>
+              <div class="rfp-stat__sub">quitado</div>
+            </div>
+            <div class="rfp-stat" data-variant="highlight">
+              <div class="rfp-stat__label">Total geral</div>
+              <div class="rfp-stat__value">${TERC.fmtBRL(tot.valor_total)}</div>
+              <div class="rfp-stat__sub">${last ? `último pgto: ${fmt.date(last.dt_pagamento)} (${last.forma_pagamento})` : 'sem pagamentos ainda'}</div>
+            </div>
+          </div>
+        </div>
+      `;
+      panel.style.display = '';
+      const btnAll = document.getElementById('btn-pay-all-terc');
+      if (btnAll) btnAll.onclick = () => payAllForTerc(Number(state.id_terc));
+    } catch (e) {
+      console.error('[finance-panel] erro', e);
+      panel.style.display = 'none';
+    }
+  }
+
+  // Atualiza barra flutuante de pagamento conforme seleção
+  function updatePaymentBar() {
+    const bar = document.getElementById('ret-payment-bar');
+    if (!bar) return;
+    const checks = Array.from($tbl.querySelectorAll('.ret-checkbox:checked'));
+    const count = checks.length;
+    let total = 0, pieces = 0;
+    const tercSet = new Set();
+    checks.forEach(cb => {
+      total  += Number(cb.dataset.retValor || 0);
+      pieces += Number(cb.dataset.retBoas  || 0);
+      if (cb.dataset.retTercId) tercSet.add(cb.dataset.retTercId);
+    });
+    if (count === 0) { bar.style.display = 'none'; return; }
+    bar.style.display = '';
+    document.getElementById('rpb-count').textContent = count;
+    document.getElementById('rpb-pieces').textContent = fmt.int(pieces);
+    document.getElementById('rpb-total').textContent = TERC.fmtBRL(total);
+    const $pay = document.getElementById('rpb-pay');
+    // Bloqueia se múltiplos terceirizados selecionados
+    if (tercSet.size > 1) {
+      $pay.disabled = true;
+      $pay.title = 'Selecione retornos de apenas 1 terceirizado por vez';
+      $pay.innerHTML = '<i class="fas fa-triangle-exclamation mr-1"></i>Múltiplos terceirizados';
+      $pay.classList.add('btn-warning');
+      $pay.classList.remove('btn-primary');
+    } else {
+      $pay.disabled = false;
+      $pay.title = 'Pagar selecionados';
+      $pay.innerHTML = '<i class="fas fa-hand-holding-dollar mr-1"></i>Pagar Selecionados';
+      $pay.classList.add('btn-primary');
+      $pay.classList.remove('btn-warning');
+    }
+    // Sincroniza "check-all" do header
+    const $checkAll = $tbl.querySelector('#ret-check-all');
+    if ($checkAll) {
+      const allCbs = $tbl.querySelectorAll('.ret-checkbox');
+      const allChecked = allCbs.length > 0 && count === allCbs.length;
+      const someChecked = count > 0 && count < allCbs.length;
+      $checkAll.checked = allChecked;
+      $checkAll.indeterminate = someChecked;
+    }
+  }
+
+  function getSelectedRetornos() {
+    return Array.from($tbl.querySelectorAll('.ret-checkbox:checked')).map(cb => ({
+      id_retorno: Number(cb.dataset.retId),
+      id_terc:    Number(cb.dataset.retTercId),
+      nome_terc:  cb.dataset.retTerc || '',
+      valor:      Number(cb.dataset.retValor || 0),
+      qtd_boa:    Number(cb.dataset.retBoas || 0),
+    }));
+  }
+
+  // Pagar selecionados (botão da barra flutuante)
+  async function payFromSelection() {
+    const sel = getSelectedRetornos();
+    if (!sel.length) { toast('Selecione ao menos 1 retorno.', 'warning'); return; }
+    const tercSet = new Set(sel.map(s => s.id_terc));
+    if (tercSet.size > 1) {
+      toast('Selecione retornos de apenas 1 terceirizado por vez.', 'warning');
+      return;
+    }
+    const idTerc = sel[0].id_terc;
+    const nomeTerc = sel[0].nome_terc;
+    if (!idTerc) {
+      toast('Retorno sem terceirizado vinculado — não é possível pagar.', 'error');
+      return;
+    }
+    openPaymentModal({
+      id_terc: idTerc,
+      nome_terc: nomeTerc,
+      id_retornos: sel.map(s => s.id_retorno),
+      valor_total: sel.reduce((a, s) => a + s.valor, 0),
+      qtd_boas:    sel.reduce((a, s) => a + s.qtd_boa, 0),
+    });
+  }
+
+  // Pagar TODOS pendentes do terceirizado filtrado
+  async function payAllForTerc(idTerc) {
+    if (!idTerc) return;
+    // Marca todos os checkboxes da página primeiro (UX) e usa fluxo da seleção,
+    // MAS busca também os pendentes que possam estar em outras páginas.
+    try {
+      // Busca todos pendentes deste terceirizado em todas as páginas do filtro
+      const p = new URLSearchParams({
+        de: state.de, ate: state.ate,
+        id_terc: String(idTerc),
+        status_pag: 'pendente',
+        per_page: '1000', page: '1',
+      });
+      const r = await api('get', '/terc/retornos?' + p.toString());
+      const rows = (r?.data?.rows || []).filter(x => !x.dt_pagamento && Number(x.valor_pago) > 0);
+      if (!rows.length) {
+        toast('Nenhum retorno pendente para este terceirizado.', 'info');
+        return;
+      }
+      const nomeTerc = rows[0].nome_terc || '';
+      openPaymentModal({
+        id_terc: idTerc,
+        nome_terc: nomeTerc,
+        id_retornos: rows.map(x => x.id_retorno),
+        valor_total: rows.reduce((a, x) => a + Number(x.valor_pago || 0), 0),
+        qtd_boas:    rows.reduce((a, x) => a + Number(x.qtd_boa    || 0), 0),
+        isAll: true,
+      });
+    } catch (e) {
+      console.error('[pay-all-terc] erro', e);
+      toast('Falha ao buscar retornos pendentes.', 'error');
+    }
+  }
+
+  // Abre modal de pagamento (em lote, individual ou todos)
+  function openPaymentModal(cfg) {
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    const card = document.createElement('div');
+    card.className = 'modal modal-md';
+    const hoje = dayjs().format('YYYY-MM-DD');
+    const formas = ['PIX','Dinheiro','Transferência','TED','DOC','Cartão','Outro'];
+
+    card.innerHTML = `
+      <div class="modal-header">
+        <h3 class="modal-title">
+          <i class="fas fa-hand-holding-dollar mr-2 text-emerald-600"></i>
+          Pagamento de Terceirizado
+        </h3>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="modal-body">
+        <!-- Resumo do pagamento -->
+        <div class="pay-summary">
+          <div class="pay-summary__terc">
+            <div class="text-xs uppercase tracking-wider text-slate-500">Terceirizado</div>
+            <div class="text-lg font-semibold">${escapeHtml(cfg.nome_terc || '—')}</div>
+            ${cfg.isAll ? '<div class="text-xs text-amber-700 mt-1"><i class="fas fa-bolt mr-1"></i>Pagar TODOS os retornos pendentes</div>' : ''}
+          </div>
+          <div class="pay-summary__stats">
+            <div class="pay-stat"><div class="pay-stat__label">Retornos</div><div class="pay-stat__value">${fmt.int(cfg.id_retornos.length)}</div></div>
+            <div class="pay-stat"><div class="pay-stat__label">Peças boas</div><div class="pay-stat__value">${fmt.int(cfg.qtd_boas)}</div></div>
+            <div class="pay-stat pay-stat--highlight"><div class="pay-stat__label">Total a pagar</div><div class="pay-stat__value">${TERC.fmtBRL(cfg.valor_total)}</div></div>
+          </div>
+        </div>
+
+        <!-- Formulário -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Data do pagamento *</label>
+            <input id="pm-dt" type="date" value="${hoje}" />
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Forma de pagamento *</label>
+            <select id="pm-forma">
+              ${formas.map(f => `<option value="${f}">${f}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="mt-3">
+          <label class="block text-xs uppercase tracking-wider text-slate-500 mb-1">Observação (opcional)</label>
+          <textarea id="pm-obs" rows="2" placeholder="Ex: Pagamento referente aos retornos de maio." maxlength="500"></textarea>
+        </div>
+
+        <!-- Confirmação visual -->
+        <div class="pay-confirm-banner mt-4">
+          <i class="fas fa-circle-info"></i>
+          <div>
+            <div class="font-semibold">Você está pagando:</div>
+            <div class="text-sm mt-1">
+              <b>${cfg.id_retornos.length}</b> retorno(s) ·
+              <b>${fmt.int(cfg.qtd_boas)}</b> peças boas ·
+              <b>${TERC.fmtBRL(cfg.valor_total)}</b>
+            </div>
+            <div class="text-xs text-slate-500 mt-1">Após confirmar, os retornos ficarão marcados como pagos e um comprovante será gerado.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close type="button"><i class="fas fa-xmark mr-1"></i>Cancelar</button>
+        <button id="pm-confirm" class="btn btn-primary" type="button">
+          <i class="fas fa-check mr-1"></i>Confirmar Pagamento
+        </button>
+      </div>
+    `;
+    m.appendChild(card);
+    document.body.appendChild(m);
+    card.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+
+    document.getElementById('pm-confirm').onclick = async () => {
+      const dt = (document.getElementById('pm-dt')   ).value || hoje;
+      const forma = (document.getElementById('pm-forma')).value;
+      const obs = (document.getElementById('pm-obs')  ).value || '';
+      const btn = document.getElementById('pm-confirm');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Processando…';
+      try {
+        const r = await api('post', '/payments-terc', {
+          id_terc: cfg.id_terc,
+          id_retornos: cfg.id_retornos,
+          dt_pagamento: dt,
+          forma_pagamento: forma,
+          observacao: obs,
+        });
+        const idPag = Number(r?.data?.id_pagamento || 0);
+        m.remove();
+        toast('Pagamento registrado com sucesso!', 'success');
+        // Refresh lista + painel
+        cacheInvalidate();
+        await fetchData({ bypassCache: true });
+        if (state.id_terc) loadTercFinancePanel();
+        // Oferece comprovante imediatamente
+        if (idPag) showPaymentReceiptOption(idPag);
+      } catch (e) {
+        console.error('[payment] erro', e);
+        const msg = e?.response?.data?.error || 'Falha ao registrar pagamento.';
+        toast(msg, 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i>Confirmar Pagamento';
+      }
+    };
+  }
+
+  // Toast com botão "Gerar PDF"
+  function showPaymentReceiptOption(idPagamento) {
+    const m = document.createElement('div');
+    m.className = 'modal-backdrop';
+    const card = document.createElement('div');
+    card.className = 'modal modal-sm';
+    card.innerHTML = `
+      <div class="modal-body text-center" style="padding: 30px;">
+        <div style="font-size: 48px; color: #10b981; margin-bottom: 12px;">
+          <i class="fas fa-circle-check"></i>
+        </div>
+        <div class="text-xl font-semibold mb-2">Pagamento confirmado!</div>
+        <div class="text-sm text-slate-500 mb-5">
+          Pagamento <b>#${idPagamento}</b> registrado com sucesso.<br>
+          Deseja gerar o comprovante em PDF agora?
+        </div>
+        <div class="flex gap-2 justify-center">
+          <button class="btn btn-secondary" data-close type="button">
+            <i class="fas fa-xmark mr-1"></i>Agora não
+          </button>
+          <button id="pmr-pdf" class="btn btn-primary" type="button">
+            <i class="fas fa-file-pdf mr-1"></i>Gerar Comprovante
+          </button>
+        </div>
+      </div>
+    `;
+    m.appendChild(card);
+    document.body.appendChild(m);
+    card.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+    document.getElementById('pmr-pdf').onclick = async () => {
+      m.remove();
+      await generatePaymentReceiptPDF(idPagamento);
+    };
+  }
+
   function rowHtml(x) {
     const refCorParts = [];
     if (x.cod_ref) refCorParts.push(`<span class="font-mono text-xs">${escapeHtml(x.cod_ref)}</span>`);
     if (x.cor) refCorParts.push(escapeHtml(x.cor));
+    // HOTFIX 0042 — Checkbox só habilitado para retornos PENDENTES com valor > 0
+    const isPago = !!x.dt_pagamento;
+    const canPay = !isPago && Number(x.valor_pago) > 0;
+    const checkboxHtml = canPay
+      ? `<input type="checkbox" class="ret-checkbox" data-ret-id="${x.id_retorno}" data-ret-terc-id="${x.id_terc || ''}" data-ret-terc="${escapeHtml(x.nome_terc || '')}" data-ret-valor="${Number(x.valor_pago) || 0}" data-ret-boas="${Number(x.qtd_boa) || 0}" title="Selecionar para pagamento" />`
+      : `<span class="ret-check-na" title="${isPago ? 'Já pago' : 'Sem valor a pagar'}"><i class="fas fa-${isPago ? 'check' : 'minus'}"></i></span>`;
     return `
-      <tr class="retornos-row">
+      <tr class="retornos-row${canPay ? ' is-payable' : ''}" data-ret-id="${x.id_retorno}" data-ret-terc-id="${x.id_terc || ''}">
+        <td class="ret-col-check text-center no-print">${checkboxHtml}</td>
         <td class="whitespace-nowrap">${fmt.date(x.dt_retorno)}</td>
         <td class="text-right font-mono">${x.num_controle ?? '—'}</td>
         <td>${TERC.tercWithSetor(x.nome_terc, x.nome_setor)}</td>
@@ -5964,6 +6330,9 @@ ROUTES.terc_retornos = async (main) => {
       <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm retornos-table">
           <thead><tr>
+            <th class="ret-col-check no-print" title="Selecionar todos pendentes da página">
+              <input type="checkbox" id="ret-check-all" />
+            </th>
             <th>Data</th><th class="text-right">Ctrl</th><th>Terceirizado</th>
             <th>Ref/Cor</th><th>Serviço</th>
             <th class="text-right">Boas</th><th class="text-right">Falta</th><th class="text-right">Conserto</th>
@@ -5983,6 +6352,21 @@ ROUTES.terc_retornos = async (main) => {
       const ret = Number(b.dataset.delRet), rem = Number(b.dataset.delRem);
       window.TERC_delRetFromList(ret, rem);
     });
+
+    // HOTFIX 0042 — Seleção para pagamento
+    $tbl.querySelectorAll('.ret-checkbox').forEach(cb => {
+      cb.addEventListener('change', updatePaymentBar);
+    });
+    const $checkAll = $tbl.querySelector('#ret-check-all');
+    if ($checkAll) {
+      $checkAll.addEventListener('change', () => {
+        const checked = $checkAll.checked;
+        $tbl.querySelectorAll('.ret-checkbox').forEach(cb => { cb.checked = checked; });
+        updatePaymentBar();
+      });
+    }
+    // Restaura seleção (filtro por terceirizado pode preservar)
+    updatePaymentBar();
   }
 
   function renderPager(total, page, perPage, totalPages) {
@@ -6113,6 +6497,8 @@ ROUTES.terc_retornos = async (main) => {
       renderIntegrityBanner(data.integridade || null);
       renderTable(data.rows || []);
       renderPager(data.total || 0, data.page || 1, data.per_page || state.per_page, data.total_pages || 1);
+      // HOTFIX 0042 — Painel financeiro só quando há 1 terceirizado filtrado
+      loadTercFinancePanel();
     } catch (e) {
       if (e?.canceled) {
         // Request cancelado — outra busca está em andamento. Não mostra erro.
@@ -6198,12 +6584,452 @@ ROUTES.terc_retornos = async (main) => {
     } catch {}
   };
 
+  // HOTFIX 0042 — Barra flutuante de pagamento
+  const $rpbClear = document.getElementById('rpb-clear');
+  const $rpbPay   = document.getElementById('rpb-pay');
+  if ($rpbClear) $rpbClear.onclick = () => {
+    $tbl.querySelectorAll('.ret-checkbox').forEach(cb => { cb.checked = false; });
+    const ca = $tbl.querySelector('#ret-check-all'); if (ca) { ca.checked = false; ca.indeterminate = false; }
+    updatePaymentBar();
+  };
+  if ($rpbPay) $rpbPay.onclick = payFromSelection;
+
   // ----- Sticky shadow visual -----
   _setupStickyShadow(document.querySelector('.retornos-toolbar'));
 
   // ----- Primeira carga (usa cache se houver) -----
   try { await fetchData(); } catch (e) { console.error('[terc_retornos] init', e); }
 };
+
+/* ============================================================
+ * 💰 HOTFIX 0042 — PAGAMENTOS DE TERCEIRIZADOS
+ * Helpers globais reutilizáveis: PDF do comprovante e histórico.
+ * ============================================================ */
+
+/**
+ * Gera comprovante PDF do pagamento usando jsPDF + autoTable.
+ * Usa a empresa do usuário logado (state.user / TERC.empresa).
+ */
+async function generatePaymentReceiptPDF(idPagamento) {
+  try {
+    const r = await api('get', '/payments-terc/' + idPagamento);
+    const pag = r?.data?.pagamento || {};
+    const itens = r?.data?.itens || [];
+
+    // jsPDF disponível como window.jspdf.jsPDF
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) { toast('jsPDF não está carregado.', 'error'); return; }
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    let y = 14;
+
+    // Cabeçalho
+    doc.setFontSize(16); doc.setFont('helvetica', 'bold');
+    doc.text(pag.empresa_nome || 'CorePro — Terceirização', 14, y);
+    doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+    y += 6;
+    doc.text('Comprovante de Pagamento de Terceirizado', 14, y);
+    y += 5;
+    doc.setDrawColor(200); doc.line(14, y, pageW - 14, y);
+    y += 6;
+
+    // Bloco identificação do pagamento
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text(`Pagamento Nº ${pag.id_pagamento}`, 14, y);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Data: ${fmt.date(pag.dt_pagamento)}`, pageW - 14, y, { align: 'right' });
+    y += 6;
+    doc.text(`Status: ${pag.status || 'Confirmado'}`, 14, y);
+    doc.text(`Forma: ${pag.forma_pagamento || '—'}`, pageW - 14, y, { align: 'right' });
+    y += 8;
+
+    // Dados terceirizado
+    doc.setFont('helvetica', 'bold'); doc.text('Terceirizado', 14, y); y += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Nome: ${pag.nome_terc || '—'}`, 14, y); y += 5;
+    if (pag.nome_setor) { doc.text(`Setor: ${pag.nome_setor}`, 14, y); y += 5; }
+    if (pag.telefone)   { doc.text(`Telefone: ${pag.telefone}`, 14, y); y += 5; }
+    y += 3;
+
+    // Tabela de itens
+    const head = [['CTRL', 'OP', 'Referência', 'Cor', 'Serviço', 'Boas', 'Valor (R$)']];
+    const body = itens.map(i => [
+      String(i.num_controle || '—'),
+      String(i.num_op || '—'),
+      String(i.cod_ref || '—'),
+      String(i.cor || '—'),
+      String(i.desc_servico || '—'),
+      String(i.qtd_boa || 0),
+      Number(i.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+    ]);
+    doc.autoTable({
+      startY: y, head, body,
+      theme: 'striped',
+      headStyles: { fillColor: [37, 99, 235], textColor: 255, fontSize: 9 },
+      bodyStyles: { fontSize: 8 },
+      columnStyles: {
+        0: { halign: 'right', cellWidth: 16 },
+        1: { halign: 'right', cellWidth: 18 },
+        5: { halign: 'right', cellWidth: 14 },
+        6: { halign: 'right', cellWidth: 24 },
+      },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    // Totais
+    doc.setDrawColor(180); doc.line(14, y, pageW - 14, y); y += 6;
+    doc.setFontSize(10); doc.setFont('helvetica', 'bold');
+    doc.text(`Total de retornos: ${pag.qtd_retornos || 0}`, 14, y);
+    doc.text(`Peças boas: ${pag.qtd_pecas_boas || 0}`, 80, y);
+    const valorFmt = Number(pag.valor_total || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    doc.setFontSize(12);
+    doc.text(`Total pago: ${valorFmt}`, pageW - 14, y, { align: 'right' });
+    y += 8;
+
+    // Observação
+    if (pag.observacao) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+      doc.text('Observação:', 14, y); y += 5;
+      doc.setFont('helvetica', 'normal');
+      const lines = doc.splitTextToSize(String(pag.observacao), pageW - 28);
+      doc.text(lines, 14, y); y += lines.length * 5 + 3;
+    }
+
+    // Responsável + assinatura
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+    doc.text(`Responsável (sistema): ${pag.usuario || '—'}`, 14, y); y += 5;
+    if (pag.ip_origem) { doc.text(`IP de origem: ${pag.ip_origem}`, 14, y); y += 5; }
+    y += 15;
+
+    // Assinatura
+    doc.setDrawColor(60); doc.line(14, y, 100, y);
+    doc.line(pageW - 100, y, pageW - 14, y);
+    y += 4;
+    doc.setFontSize(8);
+    doc.text('Recebido por (assinatura)', 14, y);
+    doc.text('Empresa (assinatura)', pageW - 100, y);
+
+    // Rodapé
+    const pageH = doc.internal.pageSize.getHeight();
+    doc.setFontSize(7); doc.setTextColor(120);
+    doc.text(`Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} · CorePro — Terceirização Têxtil`, pageW / 2, pageH - 8, { align: 'center' });
+
+    doc.save(`comprovante_pagamento_${idPagamento}.pdf`);
+    toast('Comprovante PDF gerado!', 'success');
+  } catch (e) {
+    console.error('[pdf-comprovante] erro', e);
+    toast('Falha ao gerar comprovante PDF.', 'error');
+  }
+}
+window.generatePaymentReceiptPDF = generatePaymentReceiptPDF;
+
+/* ============================================================
+ * ROUTES.pagamentos_terc — HISTÓRICO DE PAGAMENTOS
+ * Tela: Financeiro → Pagamentos. Lista todos os pagamentos de
+ * terceirizados da empresa (multi-tenant). Permite ver detalhes,
+ * gerar PDF e estornar (admin only).
+ * ============================================================ */
+ROUTES.pagamentos_terc = async (main) => {
+  await TERC.load();
+  const hoje = dayjs().format('YYYY-MM-DD');
+  const ini  = dayjs().subtract(90, 'day').format('YYYY-MM-DD');
+
+  const st = {
+    de: ini, ate: hoje, id_terc: '', forma: '', status: '', search: '',
+    page: 1, per_page: 50,
+  };
+
+  main.innerHTML = `
+    <div class="pagamentos-page">
+      <div class="page-sticky-header">
+        <div class="page-sticky-row">
+          <h2 class="text-xl font-bold mb-3">
+            <i class="fas fa-hand-holding-dollar mr-2 text-emerald-600"></i>
+            Pagamentos de Terceirizados
+            <span class="text-sm text-slate-500 font-normal ml-2">Histórico financeiro completo</span>
+          </h2>
+          <div id="pg-kpis" class="ret-kpis-grid"></div>
+          <div class="page-sticky-grid mt-2">
+            <div class="filter-cell filter-cell-search">
+              <label>Buscar</label>
+              <div class="search-input-wrap">
+                <i class="fas fa-search search-icon"></i>
+                <input id="pgf-search" placeholder="Nome do terceirizado, observação, ID…" />
+              </div>
+            </div>
+            <div class="filter-cell">
+              <label>Terceirizado</label>
+              <select id="pgf-terc">${TERC.optTerc()}</select>
+            </div>
+            <div class="filter-cell">
+              <label>De</label>
+              <input id="pgf-de" type="date" value="${st.de}" />
+            </div>
+            <div class="filter-cell">
+              <label>Até</label>
+              <input id="pgf-ate" type="date" value="${st.ate}" />
+            </div>
+            <div class="filter-cell">
+              <label>Forma</label>
+              <select id="pgf-forma">
+                <option value="">Todas</option>
+                <option value="PIX">PIX</option>
+                <option value="Dinheiro">Dinheiro</option>
+                <option value="Transferência">Transferência</option>
+                <option value="TED">TED</option>
+                <option value="DOC">DOC</option>
+                <option value="Cartão">Cartão</option>
+                <option value="Outro">Outro</option>
+              </select>
+            </div>
+            <div class="filter-cell">
+              <label>Status</label>
+              <select id="pgf-status">
+                <option value="">Todos</option>
+                <option value="Confirmado">Confirmados</option>
+                <option value="Estornado">Estornados</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="pg-tbl" class="card p-0 mt-3"></div>
+      <div id="pg-pager" class="retornos-pager"></div>
+    </div>
+  `;
+
+  const $tbl = $('#pg-tbl'), $kpis = $('#pg-kpis'), $pager = $('#pg-pager');
+
+  function rowHtml(p) {
+    const isVoid = p.status === 'Estornado';
+    return `
+      <tr class="${isVoid ? 'opacity-60' : ''}">
+        <td class="text-right font-mono">#${p.id_pagamento}</td>
+        <td class="whitespace-nowrap">${fmt.date(p.dt_pagamento)}</td>
+        <td>${TERC.tercWithSetor(p.nome_terc, p.nome_setor)}</td>
+        <td class="text-right tabular-nums">${fmt.int(p.qtd_retornos)}</td>
+        <td class="text-right tabular-nums">${fmt.int(p.qtd_pecas_boas)}</td>
+        <td class="text-right tabular-nums font-semibold ${isVoid ? 'line-through text-slate-400' : 'text-emerald-700'}">${TERC.fmtBRL(p.valor_total)}</td>
+        <td><span class="badge ${p.forma_pagamento === 'PIX' ? 'badge-pago' : ''}">${escapeHtml(p.forma_pagamento || '—')}</span></td>
+        <td class="text-xs text-slate-600">${escapeHtml(p.usuario || '—')}</td>
+        <td class="text-center">
+          ${isVoid
+            ? '<span class="badge badge-pendente"><i class="fas fa-rotate-left mr-1"></i>Estornado</span>'
+            : '<span class="badge badge-pago"><i class="fas fa-check mr-1"></i>Confirmado</span>'}
+        </td>
+        <td class="text-center no-print whitespace-nowrap">
+          <button class="btn btn-sm btn-secondary" title="Ver detalhes" data-view="${p.id_pagamento}"><i class="fas fa-eye"></i></button>
+          <button class="btn btn-sm btn-primary" title="Gerar PDF" data-pdf="${p.id_pagamento}"><i class="fas fa-file-pdf"></i></button>
+          ${(!isVoid && window.isAdmin && window.isAdmin())
+            ? `<button class="btn btn-sm btn-danger" title="Estornar pagamento" data-void="${p.id_pagamento}"><i class="fas fa-rotate-left"></i></button>`
+            : ''}
+        </td>
+      </tr>`;
+  }
+
+  function renderKpis(k) {
+    const card = (label, val, cls, icon) => `
+      <div class="card p-3 kpi-card">
+        <div class="text-xs uppercase tracking-wider text-slate-500 flex items-center gap-1">
+          <i class="fas ${icon} ${cls}"></i><span>${label}</span>
+        </div>
+        <div class="text-2xl font-bold ${cls} mt-1 tabular-nums">${val}</div>
+      </div>`;
+    $kpis.innerHTML = [
+      card('Pagamentos',       fmt.int(k.qtd),                     'text-brand',       'fa-hand-holding-dollar'),
+      card('Valor confirmado', TERC.fmtBRL(k.valor_confirmado),     'text-emerald-600', 'fa-circle-check'),
+      card('Valor estornado',  TERC.fmtBRL(k.valor_estornado),      'text-red-600',     'fa-rotate-left'),
+    ].join('');
+  }
+
+  function renderTable(rows) {
+    if (!rows.length) {
+      $tbl.innerHTML = `
+        <div class="p-10 text-center text-slate-500">
+          <i class="fas fa-money-bill-wave text-3xl mb-2 block opacity-50"></i>
+          <div>Nenhum pagamento encontrado.</div>
+          <div class="text-xs mt-2">Registre pagamentos na tela de Retornos.</div>
+        </div>`;
+      return;
+    }
+    $tbl.innerHTML = `
+      <div class="table-scroll">
+        <table class="w-full text-sm retornos-table">
+          <thead><tr>
+            <th class="text-right">ID</th>
+            <th>Data</th>
+            <th>Terceirizado</th>
+            <th class="text-right">Retornos</th>
+            <th class="text-right">Peças</th>
+            <th class="text-right">Valor</th>
+            <th>Forma</th>
+            <th>Responsável</th>
+            <th class="text-center">Status</th>
+            <th class="text-center no-print">Ações</th>
+          </tr></thead>
+          <tbody>${rows.map(rowHtml).join('')}</tbody>
+        </table>
+      </div>`;
+
+    $tbl.querySelectorAll('[data-pdf]').forEach(b => b.onclick = () => generatePaymentReceiptPDF(Number(b.dataset.pdf)));
+    $tbl.querySelectorAll('[data-view]').forEach(b => b.onclick = () => viewPaymentDetail(Number(b.dataset.view)));
+    $tbl.querySelectorAll('[data-void]').forEach(b => b.onclick = () => voidPayment(Number(b.dataset.void), fetchData));
+  }
+
+  function renderPager(total, page, perPage, totalPages) {
+    if (!total) { $pager.innerHTML = ''; return; }
+    const start = (page - 1) * perPage + 1;
+    const end = Math.min(start + perPage - 1, total);
+    $pager.innerHTML = `
+      <div class="pager-info">Mostrando <b>${start}</b>–<b>${end}</b> de <b>${total}</b> pagamento(s)</div>
+      <div class="pager-ctrl">
+        <button class="pager-btn" id="pgg-prev" ${page<=1?'disabled':''}><i class="fas fa-angle-left"></i></button>
+        <span class="pager-page is-current">${page}/${totalPages}</span>
+        <button class="pager-btn" id="pgg-next" ${page>=totalPages?'disabled':''}><i class="fas fa-angle-right"></i></button>
+      </div>`;
+    const $p = $('#pgg-prev'), $n = $('#pgg-next');
+    if ($p) $p.onclick = () => { st.page = Math.max(1, st.page - 1); fetchData(); };
+    if ($n) $n.onclick = () => { st.page = Math.min(totalPages, st.page + 1); fetchData(); };
+  }
+
+  async function fetchData() {
+    $tbl.innerHTML = '<div class="p-10 text-center text-slate-400"><i class="fas fa-spinner fa-spin"></i> Carregando…</div>';
+    const p = new URLSearchParams({
+      de: st.de, ate: st.ate, page: String(st.page), per_page: String(st.per_page),
+    });
+    if (st.id_terc) p.set('id_terc', st.id_terc);
+    if (st.forma)   p.set('forma', st.forma);
+    if (st.status)  p.set('status', st.status);
+    if (st.search)  p.set('search', st.search);
+    try {
+      const r = await api('get', '/payments-terc?' + p.toString());
+      const d = r?.data || {};
+      renderKpis(d.kpis || {});
+      renderTable(d.rows || []);
+      renderPager(d.total || 0, d.page || 1, d.per_page || st.per_page, d.total_pages || 1);
+    } catch (e) {
+      console.error('[pagamentos] fetch erro', e);
+      $tbl.innerHTML = '<div class="p-10 text-center text-red-500">Erro ao carregar pagamentos.</div>';
+    }
+  }
+
+  // Filtros
+  let _t = null;
+  $('#pgf-search').addEventListener('input', () => {
+    clearTimeout(_t); _t = setTimeout(() => { st.search = $('#pgf-search').value.trim(); st.page = 1; fetchData(); }, 300);
+  });
+  ['#pgf-terc', '#pgf-de', '#pgf-ate', '#pgf-forma', '#pgf-status'].forEach(sel => {
+    const el = $(sel); if (!el) return;
+    el.addEventListener('change', () => {
+      st.id_terc = $('#pgf-terc').value;
+      st.de      = $('#pgf-de').value;
+      st.ate     = $('#pgf-ate').value;
+      st.forma   = $('#pgf-forma').value;
+      st.status  = $('#pgf-status').value;
+      st.page = 1;
+      fetchData();
+    });
+  });
+
+  // Detalhes modal
+  async function viewPaymentDetail(id) {
+    try {
+      const r = await api('get', '/payments-terc/' + id);
+      const pag = r?.data?.pagamento || {};
+      const itens = r?.data?.itens || [];
+      const isVoid = pag.status === 'Estornado';
+      const m = document.createElement('div'); m.className = 'modal-backdrop';
+      const card = document.createElement('div'); card.className = 'modal modal-lg';
+      card.innerHTML = `
+        <div class="modal-header">
+          <h3 class="modal-title">
+            <i class="fas fa-receipt mr-2"></i>Pagamento #${pag.id_pagamento}
+            ${isVoid ? '<span class="badge badge-pendente ml-2">Estornado</span>' : '<span class="badge badge-pago ml-2">Confirmado</span>'}
+          </h3>
+          <button class="modal-close" data-close>×</button>
+        </div>
+        <div class="modal-body">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <div class="bg-slate-50 p-3 rounded">
+              <div class="text-xs text-slate-500">Terceirizado</div>
+              <div class="font-semibold">${escapeHtml(pag.nome_terc || '—')}</div>
+              ${pag.nome_setor ? `<div class="mt-1"><span class="tc-terc__chip"><i class="fas fa-sitemap"></i><span class="tc-terc__chip-label">${escapeHtml(pag.nome_setor)}</span></span></div>` : ''}
+              ${pag.telefone ? `<div class="text-xs text-slate-500 mt-1"><i class="fas fa-phone mr-1"></i>${escapeHtml(pag.telefone)}</div>` : ''}
+            </div>
+            <div class="bg-emerald-50 p-3 rounded">
+              <div class="text-xs text-slate-500">Pagamento</div>
+              <div class="text-2xl font-bold text-emerald-700">${TERC.fmtBRL(pag.valor_total)}</div>
+              <div class="text-xs mt-1">${fmt.date(pag.dt_pagamento)} · ${escapeHtml(pag.forma_pagamento || '—')}</div>
+              <div class="text-xs text-slate-500">${pag.qtd_retornos || 0} retorno(s) · ${pag.qtd_pecas_boas || 0} peças</div>
+            </div>
+          </div>
+          ${pag.observacao ? `<div class="bg-blue-50 border border-blue-200 p-2 rounded text-sm mb-3"><b>Observação:</b> ${escapeHtml(pag.observacao)}</div>` : ''}
+          ${isVoid ? `<div class="bg-red-50 border border-red-200 p-2 rounded text-sm mb-3 text-red-700"><b><i class="fas fa-rotate-left mr-1"></i>Estornado</b> em ${pag.dt_estorno || '—'} por <b>${escapeHtml(pag.estornado_por || '—')}</b>. Motivo: ${escapeHtml(pag.motivo_estorno || '—')}</div>` : ''}
+          <div class="text-sm font-semibold mb-2">Retornos pagos:</div>
+          <div class="table-scroll" style="max-height: 40vh; overflow:auto;">
+            <table class="w-full text-sm">
+              <thead><tr>
+                <th class="text-right">CTRL</th><th>OP</th><th>Ref</th><th>Cor</th><th>Serviço</th>
+                <th class="text-right">Boas</th><th class="text-right">Valor</th>
+              </tr></thead>
+              <tbody>${itens.map(i => `
+                <tr>
+                  <td class="text-right font-mono">${i.num_controle || '—'}</td>
+                  <td>${escapeHtml(i.num_op || '—')}</td>
+                  <td class="font-mono text-xs">${escapeHtml(i.cod_ref || '—')}</td>
+                  <td>${escapeHtml(i.cor || '—')}</td>
+                  <td class="text-xs">${escapeHtml(i.desc_servico || '—')}</td>
+                  <td class="text-right tabular-nums text-emerald-700">${fmt.int(i.qtd_boa)}</td>
+                  <td class="text-right tabular-nums">${TERC.fmtBRL(i.valor)}</td>
+                </tr>`).join('')}</tbody>
+            </table>
+          </div>
+          <div class="text-xs text-slate-500 mt-3">
+            Registrado por: <b>${escapeHtml(pag.usuario || '—')}</b>
+            ${pag.ip_origem ? ' · IP: ' + escapeHtml(pag.ip_origem) : ''}
+            ${pag.dt_criacao ? ' · em ' + escapeHtml(pag.dt_criacao) : ''}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-close type="button"><i class="fas fa-xmark mr-1"></i>Fechar</button>
+          <button class="btn btn-primary" id="vp-pdf" type="button"><i class="fas fa-file-pdf mr-1"></i>Gerar PDF</button>
+        </div>
+      `;
+      m.appendChild(card); document.body.appendChild(m);
+      card.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+      $('#vp-pdf').onclick = () => generatePaymentReceiptPDF(id);
+    } catch (e) {
+      console.error('[view-payment] erro', e);
+      toast('Erro ao carregar detalhes.', 'error');
+    }
+  }
+
+  // Estorno (admin only)
+  async function voidPayment(id, refresh) {
+    if (!window.isAdmin || !window.isAdmin()) {
+      toast('Apenas administradores podem estornar pagamentos.', 'warning');
+      return;
+    }
+    const motivo = prompt('Motivo do estorno (obrigatório):');
+    if (!motivo || motivo.trim().length < 3) {
+      toast('Estorno cancelado.', 'info'); return;
+    }
+    if (!confirm(`Confirma o estorno do pagamento #${id}?\n\nOs retornos voltarão para o status "Pendente" e poderão ser pagos novamente.`)) return;
+    try {
+      await api('post', `/payments-terc/${id}/void`, { motivo: motivo.trim() });
+      toast('Pagamento estornado.', 'success');
+      if (typeof refresh === 'function') refresh();
+    } catch (e) {
+      console.error('[void] erro', e);
+      const msg = e?.response?.data?.error || 'Falha ao estornar pagamento.';
+      toast(msg, 'error');
+    }
+  }
+
+  await fetchData();
+};
+window.isAdmin = window.isAdmin || (() => state.user?.perfil === 'admin');
 
 /* ============================================================
  * 🏠 CENTRAL DE TERCEIRIZAÇÃO — UI em blocos minimizados (accordion)
