@@ -2385,10 +2385,11 @@ app.put('/terc/remessas/:id', async (c) => {
 
 /* =================================================================
  * HOTFIX 0043 — Exclusão em LOTE de Remessas
+ * HOTFIX 0044 — Correção definitiva (causa raiz: limite de parâmetros D1)
  *
  * POST /terc/remessas/bulk-delete
  *
- * Body: { ids: number[], confirm?: 'SIM', force_cancel_paid?: boolean }
+ * Body: { ids: number[], confirm?: 'SIM' }
  *
  * Comportamento:
  *  - Sempre tenant-scoped (id_empresa do contexto).
@@ -2405,15 +2406,49 @@ app.put('/terc/remessas/:id', async (c) => {
  *  3. Remessa pertence a outra empresa (tenant cross — sempre proibido).
  *
  * Auditoria: registra em audit() com módulo TERC, ação BULK_DEL_REM,
- *            usuário, lista de CTRLs excluídos, IP de origem.
+ *            usuário, lista de CTRLs excluídos (até 50, + "+N restantes"),
+ *            IP de origem. Payload completo de detail é truncado para
+ *            evitar estouro da coluna v_novo da auditoria.
  *
  * Multi-tenant: SEMPRE filtra por id_empresa. IDs de outra empresa são
  *               silenciosamente classificados como "não encontrados"
  *               (não vaza nem confirma a existência).
  *
- * Performance: usa IN (placeholders) limitado a 500 IDs por chamada
- *              (alinhado ao LIMIT 500 do GET /terc/remessas).
+ * --- HOTFIX 0044: causa raiz do erro "Erro no banco de dados" ---
+ * Cada DELETE com IN (?,?,...) usa um placeholder POR ID. Com 221 IDs
+ * + id_empresa, eram 222 binds por statement; o D1 tem limite prático
+ * de ~100 parâmetros bindados por statement, gerando o erro genérico
+ * "D1_ERROR: too many SQL variables" — que era mapeado pelo handler
+ * global para "Erro no banco de dados. Equipe foi notificada.".
+ *
+ * Solução aplicada:
+ *   1. Chunking: processa em LOTES de 80 IDs por statement.
+ *   2. DB.batch(): cada lote roda como transação atômica do D1 — se
+ *      qualquer DELETE do lote falhar, NENHUM é aplicado (rollback).
+ *   3. Defensive DELETEs explícitos para TODOS os filhos conhecidos
+ *      (terc_consertos, terc_alertas, payment_terc_items via retornos),
+ *      mesmo onde a FK já é CASCADE — defesa em profundidade.
+ *   4. Per-chunk try/catch: lotes que falham viram "falhadas" no
+ *      relatório, com motivo técnico; lotes que dão certo são
+ *      contabilizados em "excluidas". Nenhum lote interrompe os outros.
+ *   5. Auditoria final ÚNICA com payload truncado, em vez de duas
+ *      chamadas de audit() (que poderiam estourar v_novo com 221 CTRLs).
+ *
+ * Performance: usa IN (placeholders) limitado a 80 IDs por chunk;
+ *              hard cap defensivo de 500 IDs por chamada.
  * ================================================================= */
+
+// HOTFIX 0044 — tamanho do lote para cada DELETE com IN-clause.
+// D1 tem limite prático de ~100 parâmetros bindados por statement.
+// 80 IDs + 1 (id_empresa) = 81 binds por statement, com margem segura.
+const BULK_DEL_CHUNK = 80;
+
+/** Divide um array em chunks de tamanho fixo. */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 app.post('/terc/remessas/bulk-delete', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const usuario = getUser(c);
@@ -2539,125 +2574,251 @@ app.post('/terc/remessas/bulk-delete', async (c) => {
     }, 409);
   }
 
+  // ---- HOTFIX 0044 — execução em CHUNKS com DB.batch() atômico ----
+  //
+  // Para cada lote de até BULK_DEL_CHUNK (80) IDs, montamos uma lista
+  // de prepared statements e executamos com c.env.DB.batch([...]).
+  // O batch do D1 é executado em transação atômica: ou todos os
+  // statements aplicam, ou nenhum aplica (rollback automático). Isso
+  // garante a integridade sem precisarmos de BEGIN/COMMIT manuais.
+  //
+  // Ordem dos DELETEs respeita a cadeia de FKs:
+  //   (filhos de retornos)
+  //     → terc_retorno_grade
+  //     → terc_retorno_item_grade
+  //     → terc_retorno_itens
+  //   (retornos da remessa)  ← isso também limpa payment_terc_items
+  //                            via CASCADE em id_retorno
+  //     → terc_retornos
+  //   (outros filhos da remessa)
+  //     → terc_eventos
+  //     → terc_alertas        (defense-in-depth)
+  //     → terc_consertos      (defense-in-depth)
+  //     → terc_remessa_item_grade
+  //     → terc_remessa_itens
+  //     → terc_remessa_grade
+  //   (a remessa em si)
+  //     → terc_remessas
+  //
+  // Cada chunk é tentado dentro de try/catch. Se um chunk falhar,
+  // seus IDs vão para `falhas` com o motivo técnico (hint); os demais
+  // chunks continuam. Assim 200+ remessas com 1 problema isolado
+  // ainda removem o restante e o usuário vê exatamente o que falhou.
+  // ------------------------------------------------------------------
+
   const idsPermitidos = permitidas.map(p => p.id_remessa);
-  const ph2 = idsPermitidos.map(() => '?').join(',');
-  let totalRetornosApagados = 0;
-
-  // 5a) Conta total de retornos para auditoria antes de apagar
-  const retCount = await c.env.DB.prepare(`
-    SELECT COUNT(*) AS c FROM terc_retornos
-     WHERE id_empresa = ? AND id_remessa IN (${ph2})
-  `).bind(id_empresa, ...idsPermitidos).first<any>();
-  totalRetornosApagados = Number(retCount?.c) || 0;
-
-  // 5b) Hard delete em cascata (mesma ordem do DELETE individual)
-  //     - terc_retorno_grade  (filhos dos retornos)
-  //     - terc_retornos       (filhos da remessa)
-  //     - terc_eventos        (histórico) — pode não existir em todos tenants
-  //     - terc_remessa_grade  (grades da remessa)
-  //     - terc_remessa_itens  (itens da remessa)  ← novo, para multi-produto
-  //     - terc_remessa_item_grade (grades dos itens) ← novo
-  //     - terc_remessas       (a remessa em si)
-  try {
-    await c.env.DB.prepare(`
-      DELETE FROM terc_retorno_grade
-       WHERE id_empresa = ?
-         AND id_retorno IN (
-           SELECT id_retorno FROM terc_retornos
-            WHERE id_empresa = ? AND id_remessa IN (${ph2})
-         )
-    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
-  } catch (e) { /* tabela pode não existir em tenants legados */ }
-
-  try {
-    await c.env.DB.prepare(`
-      DELETE FROM terc_retorno_item_grade
-       WHERE id_empresa = ?
-         AND id_ret_item IN (
-           SELECT ri.id_ret_item FROM terc_retorno_itens ri
-            WHERE ri.id_empresa = ? AND ri.id_remessa IN (${ph2})
-         )
-    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
-  } catch (e) { /* idem */ }
-
-  try {
-    await c.env.DB.prepare(`
-      DELETE FROM terc_retorno_itens
-       WHERE id_empresa = ? AND id_remessa IN (${ph2})
-    `).bind(id_empresa, ...idsPermitidos).run();
-  } catch (e) { /* idem */ }
-
-  await c.env.DB.prepare(`
-    DELETE FROM terc_retornos
-     WHERE id_empresa = ? AND id_remessa IN (${ph2})
-  `).bind(id_empresa, ...idsPermitidos).run();
-
-  await c.env.DB.prepare(`
-    DELETE FROM terc_eventos
-     WHERE id_empresa = ? AND id_remessa IN (${ph2})
-  `).bind(id_empresa, ...idsPermitidos).run().catch(() => {});
-
-  await c.env.DB.prepare(`
-    DELETE FROM terc_remessa_grade
-     WHERE id_empresa = ? AND id_remessa IN (${ph2})
-  `).bind(id_empresa, ...idsPermitidos).run().catch(() => {});
-
-  try {
-    await c.env.DB.prepare(`
-      DELETE FROM terc_remessa_item_grade
-       WHERE id_empresa = ?
-         AND id_item IN (
-           SELECT id_item FROM terc_remessa_itens
-            WHERE id_empresa = ? AND id_remessa IN (${ph2})
-         )
-    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
-  } catch (e) { /* idem */ }
-
-  try {
-    await c.env.DB.prepare(`
-      DELETE FROM terc_remessa_itens
-       WHERE id_empresa = ? AND id_remessa IN (${ph2})
-    `).bind(id_empresa, ...idsPermitidos).run();
-  } catch (e) { /* idem */ }
-
-  await c.env.DB.prepare(`
-    DELETE FROM terc_remessas
-     WHERE id_empresa = ? AND id_remessa IN (${ph2})
-  `).bind(id_empresa, ...idsPermitidos).run();
-
-  // 5c) Auditoria — registra a operação completa
-  const ctrlsList = permitidas.map(p => p.num_controle).filter(n => n > 0).join(',');
-  const detalhe = JSON.stringify({
-    ids: idsPermitidos,
-    ctrls: permitidas.map(p => p.num_controle),
-    qtd_excluidas: permitidas.length,
-    qtd_bloqueadas: bloqueadas.length,
-    retornos_apagados: totalRetornosApagados,
-    ip,
-  });
-
-  await audit(
-    c, MOD, 'BULK_DEL_REM',
-    `bulk:${permitidas.length}remessas`,
-    'ctrls', '', ctrlsList || String(permitidas.length),
-    usuario
+  const idsPorIdMap = new Map<number, RemissaoItem>(
+    permitidas.map(p => [p.id_remessa, p])
   );
 
-  // Log adicional com detalhe completo (separado para facilitar busca)
-  await audit(
-    c, MOD, 'BULK_DEL_REM_DETAIL',
-    `ip:${ip}`,
-    'payload', '', detalhe,
-    usuario
-  ).catch(() => {});
+  // 5a) Conta total de retornos para auditoria ANTES de apagar (lote a lote)
+  let totalRetornosApagados = 0;
+  for (const ck of chunk(idsPermitidos, BULK_DEL_CHUNK)) {
+    const ph = ck.map(() => '?').join(',');
+    try {
+      const r = await c.env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM terc_retornos
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(id_empresa, ...ck).first<any>();
+      totalRetornosApagados += Number(r?.c) || 0;
+    } catch { /* contagem é informativa — não interrompe */ }
+  }
 
+  // 5b) Hard delete em CHUNKS atômicos
+  const idsExcluidos: number[] = [];
+  const falhas: Array<{ id_remessa: number; num_controle: number; motivo: string }> = [];
+
+  for (const ck of chunk(idsPermitidos, BULK_DEL_CHUNK)) {
+    const ph = ck.map(() => '?').join(',');
+    const binds = [id_empresa, ...ck];
+    const bindsWithEmpresa2 = [id_empresa, id_empresa, ...ck]; // p/ subqueries c/ tenant
+
+    // Lista de statements do lote — executados em transação atômica via batch().
+    // Statements com subqueries que dependem de filhos já apagados continuam
+    // válidos (a subquery roda no momento do statement, dentro do mesmo batch).
+    const stmts = [
+      // ---- Filhos dos RETORNOS desta remessa ----
+      c.env.DB.prepare(
+        `DELETE FROM terc_retorno_grade
+          WHERE id_empresa = ?
+            AND id_retorno IN (
+              SELECT id_retorno FROM terc_retornos
+               WHERE id_empresa = ? AND id_remessa IN (${ph})
+            )`
+      ).bind(...bindsWithEmpresa2),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_retorno_item_grade
+          WHERE id_empresa = ?
+            AND id_ret_item IN (
+              SELECT id_ret_item FROM terc_retorno_itens
+               WHERE id_empresa = ? AND id_remessa IN (${ph})
+            )`
+      ).bind(...bindsWithEmpresa2),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_retorno_itens
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      // ---- RETORNOS (limpa também payment_terc_items via CASCADE em id_retorno) ----
+      c.env.DB.prepare(
+        `DELETE FROM terc_retornos
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      // ---- Outros filhos diretos da REMESSA ----
+      c.env.DB.prepare(
+        `DELETE FROM terc_eventos
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_alertas
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_consertos
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_remessa_item_grade
+          WHERE id_empresa = ?
+            AND id_item IN (
+              SELECT id_item FROM terc_remessa_itens
+               WHERE id_empresa = ? AND id_remessa IN (${ph})
+            )`
+      ).bind(...bindsWithEmpresa2),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_remessa_itens
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      c.env.DB.prepare(
+        `DELETE FROM terc_remessa_grade
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+
+      // ---- A REMESSA em si ----
+      c.env.DB.prepare(
+        `DELETE FROM terc_remessas
+          WHERE id_empresa = ? AND id_remessa IN (${ph})`
+      ).bind(...binds),
+    ];
+
+    try {
+      // batch() = transação atômica do D1. Falha em qualquer DELETE
+      // faz rollback de todo o lote (nenhum DELETE desse chunk aplica).
+      await c.env.DB.batch(stmts);
+      for (const id of ck) idsExcluidos.push(id);
+    } catch (e: any) {
+      // Lote falhou inteiro — marca cada ID do chunk com o motivo.
+      const raw = String(e?.message || e || 'Erro desconhecido');
+      let motivo = 'Falha técnica no banco';
+      if (/FOREIGN KEY constraint failed/i.test(raw)) {
+        motivo = 'Possui registros vinculados que impedem a exclusão';
+      } else if (/too many SQL variables|too many parameters/i.test(raw)) {
+        motivo = 'Lote excedeu o limite do banco (tente novamente)';
+      } else if (/database is locked|SQLITE_BUSY/i.test(raw)) {
+        motivo = 'Banco temporariamente ocupado';
+      } else if (/no such table/i.test(raw)) {
+        const m = raw.match(/no such table:\s*([\w.]+)/i);
+        motivo = m ? `Tabela ausente: ${m[1]}` : 'Tabela ausente no banco';
+      }
+      // Log estruturado para o tail
+      console.error('[bulk-delete chunk fail]', JSON.stringify({
+        id_empresa, login: usuario || 'anon',
+        chunk_size: ck.length,
+        first_ids: ck.slice(0, 5),
+        raw: raw.slice(0, 240),
+      }));
+      for (const id of ck) {
+        const ref = idsPorIdMap.get(id);
+        falhas.push({
+          id_remessa: id,
+          num_controle: ref?.num_controle || 0,
+          motivo,
+        });
+      }
+    }
+  }
+
+  // 5c) Auditoria — uma única chamada, payload TRUNCADO
+  //     Evita estourar v_novo da auditoria com 200+ CTRLs.
+  const MAX_CTRLS_AUDIT = 50;
+  const ctrlsExcluidos = idsExcluidos
+    .map(id => idsPorIdMap.get(id)?.num_controle || 0)
+    .filter(n => n > 0);
+  const ctrlsResumo = ctrlsExcluidos.length <= MAX_CTRLS_AUDIT
+    ? ctrlsExcluidos.join(',')
+    : ctrlsExcluidos.slice(0, MAX_CTRLS_AUDIT).join(',') +
+      ` (+${ctrlsExcluidos.length - MAX_CTRLS_AUDIT} restantes)`;
+
+  const detalhe = JSON.stringify({
+    qtd_selecionadas: ids.length,
+    qtd_excluidas: idsExcluidos.length,
+    qtd_bloqueadas: bloqueadas.length,
+    qtd_falhadas: falhas.length,
+    retornos_apagados: totalRetornosApagados,
+    ctrls_sample: ctrlsExcluidos.slice(0, 20),
+    falhas_sample: falhas.slice(0, 5).map(f => ({ ctrl: f.num_controle, motivo: f.motivo })),
+    ip,
+  }).slice(0, 4000); // limite duro defensivo
+
+  try {
+    await audit(
+      c, MOD, 'BULK_DEL_REM',
+      `bulk:${idsExcluidos.length}/${ids.length}`,
+      'resumo', '', `excl=${idsExcluidos.length}; bloq=${bloqueadas.length}; falha=${falhas.length}; ctrls=${ctrlsResumo}`,
+      usuario
+    );
+  } catch (e) {
+    console.error('[bulk-delete audit fail]', String((e as any)?.message || e));
+  }
+
+  // Log de payload detalhado em separado (só se houver algo de fato)
+  if (idsExcluidos.length > 0 || falhas.length > 0) {
+    audit(
+      c, MOD, 'BULK_DEL_REM_DETAIL',
+      `ip:${ip}`,
+      'payload', '', detalhe,
+      usuario
+    ).catch(() => {});
+  }
+
+  // 5d) Resposta
+  // Cenário 1: TUDO falhou tecnicamente (nenhum chunk passou).
+  //            Devolve 500 com o detalhe para o front mostrar.
+  if (idsExcluidos.length === 0 && falhas.length > 0) {
+    return c.json({
+      ok: false,
+      code: 'BULK_DELETE_FAILED',
+      error: 'Não foi possível excluir as remessas selecionadas. Existem registros vinculados ou ocorreu uma falha técnica.',
+      executed: true,
+      total_selecionadas: ids.length,
+      total_excluidas: 0,
+      total_bloqueadas: bloqueadas.length,
+      total_falhadas: falhas.length,
+      retornos_apagados: 0,
+      bloqueadas,
+      falhas,
+    }, 500);
+  }
+
+  // Cenário 2: Sucesso parcial ou total — devolve relatório completo.
   return c.json(ok({
     executed: true,
-    total_excluidas: permitidas.length,
+    total_selecionadas: ids.length,
+    total_excluidas: idsExcluidos.length,
     total_bloqueadas: bloqueadas.length,
+    total_falhadas: falhas.length,
     retornos_apagados: totalRetornosApagados,
-    ctrls_excluidos: permitidas.map(p => p.num_controle),
+    ctrls_excluidos: ctrlsExcluidos,
     bloqueadas,
+    falhas,
   }));
 });
 

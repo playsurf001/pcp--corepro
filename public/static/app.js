@@ -3134,33 +3134,188 @@ ROUTES.terc_remessas = async (main) => {
       $ok.disabled = true;
       $ok.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Excluindo…';
 
+      // HOTFIX 0044 — chama com {silent:true} para nós mesmos
+      // tratarmos a resposta (sucesso parcial / falha total) com modal
+      // detalhado em vez do toast genérico do api().
+      let resp = null;
+      let errResp = null;
       try {
-        // Envia apenas os IDs permitidos — backend revalida tudo
         const idsPerm = permitidas.map(p => p.id_remessa);
         const r = await api('post', '/terc/remessas/bulk-delete',
-          { ids: idsPerm, confirm: 'SIM' });
-        const d = r?.data || {};
-        m.remove();
+          { ids: idsPerm, confirm: 'SIM' }, { silent: true });
+        resp = r?.data || r || {};
+      } catch (e) {
+        // api(silent) repassa o erro do axios — extraímos o payload do backend
+        errResp = e?.response?.data || null;
+        if (!errResp) {
+          // falha de rede / sem resposta: reabilita botão e mostra toast simples
+          $ok.disabled = false;
+          $ok.innerHTML = '<i class="fas fa-check mr-1"></i>Tentar novamente';
+          toast(e?.message || 'Falha de conexão. Tente novamente.', 'error');
+          return;
+        }
+      }
 
-        const nExc = Number(d.total_excluidas) || 0;
-        const nRet = Number(d.retornos_apagados) || 0;
-        const nBlk = Number(d.total_bloqueadas) || 0;
+      // Fecha modal de confirmação e mostra o modal de RESULTADO
+      m.remove();
 
-        let msg = `${nExc} remessa${nExc === 1 ? '' : 's'} excluída${nExc === 1 ? '' : 's'}`;
-        if (nRet > 0) msg += ` (${nRet} retorno${nRet === 1 ? '' : 's'} também)`;
-        if (nBlk > 0) msg += ` · ${nBlk} bloqueada${nBlk === 1 ? '' : 's'}`;
-        toast(msg, 'success');
+      // Quando deu erro o backend devolve {ok:false, falhas:[...], bloqueadas:[...]}.
+      // Quando deu sucesso (total ou parcial) devolve {ok:true, data:{...}}.
+      const d = errResp || resp || {};
+      const nExc = Number(d.total_excluidas) || 0;
+      const nRet = Number(d.retornos_apagados) || 0;
+      const nBlk = Number(d.total_bloqueadas) || 0;
+      const nFail = Number(d.total_falhadas) || 0;
+      const ctrlsExcluidos = Array.isArray(d.ctrls_excluidos) ? d.ctrls_excluidos : [];
+      const falhas = Array.isArray(d.falhas) ? d.falhas : [];
+      const bloqueadasResp = Array.isArray(d.bloqueadas) ? d.bloqueadas : bloqueadas;
 
-        // Limpa seleção + recarrega + invalida cache
+      showBulkDeleteResultModal({
+        nExc, nRet, nBlk, nFail,
+        ctrlsExcluidos,
+        falhas,
+        bloqueadas: bloqueadasResp,
+        hint: d.hint || errResp?.hint,
+        errorMsg: errResp?.error,
+      });
+
+      // Limpa seleção + recarrega tabela SE algo foi excluído
+      if (nExc > 0) {
         clearRemBulkSelection();
         cacheInvalidate();
         load({ bypassCache: true });
-      } catch (e) {
-        $ok.disabled = false;
-        $ok.innerHTML = '<i class="fas fa-check mr-1"></i>Tentar novamente';
-        // toast de erro já mostrado pelo api()
       }
     };
+  }
+
+  /**
+   * HOTFIX 0044 — Modal de RESULTADO da exclusão em lote.
+   * Mostra três blocos: ✓ excluídas, ⚠ bloqueadas, ✗ falhadas.
+   * Em PROD com 200+ remessas, esse modal é o ÚNICO sinal claro
+   * do que aconteceu (substitui o toast "Erro no banco de dados").
+   */
+  function showBulkDeleteResultModal({ nExc, nRet, nBlk, nFail, ctrlsExcluidos, falhas, bloqueadas, hint, errorMsg }) {
+    const total = nExc + nBlk + nFail;
+    const sucessoTotal = nFail === 0 && nBlk === 0 && nExc > 0;
+    const sucessoParcial = nExc > 0 && (nBlk > 0 || nFail > 0);
+    const fracassoTotal = nExc === 0;
+
+    // Header com ícone/cor segundo o resultado geral
+    let headerIcon, headerColor, headerTitle;
+    if (sucessoTotal)       { headerIcon='fa-circle-check';  headerColor='text-emerald-500'; headerTitle='Exclusão concluída'; }
+    else if (sucessoParcial){ headerIcon='fa-circle-exclamation'; headerColor='text-amber-500'; headerTitle='Exclusão concluída com observações'; }
+    else                    { headerIcon='fa-circle-xmark';  headerColor='text-red-500';     headerTitle='Não foi possível excluir'; }
+
+    // Listas — limita visualização a 12 para não estourar o modal
+    const CAP = 12;
+    const ctrlsView = ctrlsExcluidos.slice(0, CAP).join(', ');
+    const ctrlsMore = ctrlsExcluidos.length > CAP ? ` … (+${ctrlsExcluidos.length - CAP})` : '';
+
+    const bloqList = bloqueadas.slice(0, CAP).map(b => `
+      <div class="rem-bulk-blocked__row">
+        <span class="rem-bulk-blocked__ctrl">CTRL ${b.num_controle || '—'}</span>
+        <span class="rem-bulk-blocked__reason">${escapeHtml(b.motivo || 'Bloqueada')}</span>
+      </div>
+    `).join('');
+    const bloqMore = bloqueadas.length > CAP
+      ? `<div class="rem-bulk-blocked__more">… e mais ${bloqueadas.length - CAP} bloqueada${bloqueadas.length - CAP === 1 ? '' : 's'}.</div>`
+      : '';
+
+    const falhaList = falhas.slice(0, CAP).map(f => `
+      <div class="rem-bulk-blocked__row">
+        <span class="rem-bulk-blocked__ctrl">CTRL ${f.num_controle || '—'}</span>
+        <span class="rem-bulk-blocked__reason">${escapeHtml(f.motivo || 'Falha técnica')}</span>
+      </div>
+    `).join('');
+    const falhaMore = falhas.length > CAP
+      ? `<div class="rem-bulk-blocked__more">… e mais ${falhas.length - CAP} falha${falhas.length - CAP === 1 ? '' : 's'}.</div>`
+      : '';
+
+    const mr = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-3">
+        <i class="fas ${headerIcon} mr-2 ${headerColor}"></i>${headerTitle}
+      </h3>
+
+      ${errorMsg ? `
+        <div class="pay-confirm-banner mb-3" style="background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.32);color:#fecaca">
+          <i class="fas fa-triangle-exclamation"></i>
+          <div>${escapeHtml(errorMsg)}${hint ? `<div class="text-xs mt-1 opacity-80">Detalhe técnico: ${escapeHtml(hint)}</div>` : ''}</div>
+        </div>
+      ` : ''}
+
+      <div class="rem-bulk-summary">
+        <div class="rem-bulk-summary__row">
+          <span class="rem-bulk-summary__lbl">Total processado</span>
+          <span class="rem-bulk-summary__val">${total}</span>
+        </div>
+        <div class="rem-bulk-summary__row rem-bulk-summary__row--ok">
+          <span class="rem-bulk-summary__lbl"><i class="fas fa-circle-check mr-1"></i>Excluídas com sucesso</span>
+          <span class="rem-bulk-summary__val">${nExc}${nRet > 0 ? ` <span class="text-xs opacity-70">(${nRet} retorno${nRet === 1 ? '' : 's'})</span>` : ''}</span>
+        </div>
+        ${nBlk > 0 ? `
+          <div class="rem-bulk-summary__row rem-bulk-summary__row--block">
+            <span class="rem-bulk-summary__lbl"><i class="fas fa-ban mr-1"></i>Bloqueadas (regra de negócio)</span>
+            <span class="rem-bulk-summary__val">${nBlk}</span>
+          </div>
+        ` : ''}
+        ${nFail > 0 ? `
+          <div class="rem-bulk-summary__row rem-bulk-summary__row--block">
+            <span class="rem-bulk-summary__lbl"><i class="fas fa-circle-xmark mr-1"></i>Falharam tecnicamente</span>
+            <span class="rem-bulk-summary__val">${nFail}</span>
+          </div>
+        ` : ''}
+      </div>
+
+      ${nExc > 0 ? `
+        <div class="rem-bulk-permit">
+          <div class="rem-bulk-permit__title">
+            <i class="fas fa-list-check mr-1"></i>CTRLs excluídos:
+          </div>
+          <div class="rem-bulk-permit__list">${escapeHtml(ctrlsView)}${ctrlsMore}</div>
+        </div>
+      ` : ''}
+
+      ${nBlk > 0 ? `
+        <div class="rem-bulk-blocked">
+          <div class="rem-bulk-blocked__title">
+            <i class="fas fa-ban"></i>
+            <span><b>${nBlk}</b> bloqueada${nBlk === 1 ? '' : 's'} por regra de negócio:</span>
+          </div>
+          <div class="rem-bulk-blocked__list">${bloqList}${bloqMore}</div>
+        </div>
+      ` : ''}
+
+      ${nFail > 0 ? `
+        <div class="rem-bulk-blocked" style="border-color:rgba(239,68,68,.32);background:rgba(239,68,68,.06)">
+          <div class="rem-bulk-blocked__title" style="color:#fecaca">
+            <i class="fas fa-circle-xmark"></i>
+            <span><b>${nFail}</b> falharam tecnicamente:</span>
+          </div>
+          <div class="rem-bulk-blocked__list">${falhaList}${falhaMore}</div>
+        </div>
+      ` : ''}
+
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="rbb-result-ok" class="btn btn-primary">
+          <i class="fas fa-check mr-1"></i>Fechar
+        </button>
+      </div>
+    `;
+
+    mr.appendChild(card);
+    document.body.appendChild(mr);
+    document.getElementById('rbb-result-ok').onclick = () => mr.remove();
+
+    // Toast de complemento — curto e direto
+    if (sucessoTotal) {
+      toast(`${nExc} remessa${nExc === 1 ? '' : 's'} excluída${nExc === 1 ? '' : 's'} com sucesso.`, 'success');
+    } else if (sucessoParcial) {
+      toast(`${nExc} excluída${nExc === 1 ? '' : 's'} · ${nBlk + nFail} não foram processada${nBlk + nFail === 1 ? '' : 's'}. Veja o relatório.`, 'info');
+    } else {
+      toast('Nenhuma remessa foi excluída. Veja o relatório.', 'error');
+    }
   }
 
   function rowHtml(r) {

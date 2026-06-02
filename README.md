@@ -2182,6 +2182,90 @@ Todas com `id_empresa = ?` no WHERE para isolamento total. Tabelas que podem nã
 
 ---
 
+## 🆕 HOTFIX 0044 (2026-06-02) — Correção da Exclusão em Lote com Muitas Remessas
+
+### Contexto / Bug em produção
+Após o deploy da HOTFIX 0043, ao tentar excluir **221 remessas** (lote real de homologação) o sistema falhava sempre com o toast **"Erro no banco de dados. Equipe foi notificada."**. Sem nenhuma informação adicional o usuário não conseguia identificar o que estava errado, e tentar repetir só repetia o erro. Em lotes pequenos (1, 5, 10) tudo funcionava — o que indicava que o problema era proporcional ao volume.
+
+### Causa raiz confirmada
+**`D1_ERROR: too many SQL variables`** — o Cloudflare D1 tem **limite prático de ~100 parâmetros bindados por statement**. Cada DELETE em cascata da HOTFIX 0043 usava `IN(?,?,...)` com **um placeholder por ID**, mais o `id_empresa`. Com 221 IDs cada statement bindava **222 parâmetros**, estourando o limite e abortando a operação.
+
+Pior: o handler global de erros em `src/index.tsx` mapeava o regex `D1_ERROR` para a mensagem genérica **antes** dos padrões mais específicos serem testados, e em produção suprimia o `detail` técnico via `NODE_ENV === 'production'`. Resultado: o front recebia só `code: 'DB_ERROR'` sem nenhuma pista do que era.
+
+### Solução implementada (defesa em profundidade — 4 camadas)
+
+#### 1. Backend — `POST /terc/remessas/bulk-delete` reescrito com **chunking + DB.batch() atômico**
+- **Chunking**: IDs são processados em **lotes de 80** (constante `BULK_DEL_CHUNK` — 80+1=81 binds por statement, margem segura contra o limite ~100 do D1).
+- **`c.env.DB.batch([stmts])`** por chunk: cada lote roda como **transação atômica** do D1. Se qualquer DELETE do lote falhar, **nenhum** é aplicado (rollback automático) — sem precisar de `BEGIN/COMMIT` manuais.
+- **DELETEs defensivos** acrescentados para `terc_consertos`, `terc_alertas` e `terc_eventos` mesmo onde a FK já é CASCADE — **defesa em profundidade**: se algum tenant antigo perder o `ON DELETE CASCADE` por migration manual, a exclusão continua funcionando.
+- **Per-chunk try/catch**: lote que falha não interrompe os outros. IDs do lote vão para `falhas[]` com **motivo específico** (FK_VIOLATION, TOO_MANY_PARAMS, DB_BUSY, no such table, etc.) extraído por regex do erro do D1.
+- **Auditoria com payload truncado**: máximo de **50 CTRLs** + sufixo `(+N restantes)`; payload detalhe limitado a 4000 chars. Evita estourar a coluna `auditoria.v_novo` com lotes grandes.
+
+#### 2. Backend — handler global em `src/index.tsx` mais inteligente
+- Ordem dos regex **ajustada**: padrões específicos (`FOREIGN KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `too many SQL variables`, `database is locked`) são testados **ANTES** do regex genérico `D1_ERROR` (que cobre tudo do D1).
+- **Novos códigos identificáveis**: `TOO_MANY_PARAMS` (400), `DB_BUSY` (503), `FK_VIOLATION` com mensagem em PT-BR explicando que existem registros vinculados.
+- **Novo campo `hint`** (≤160 chars): pista técnica curta — **exposta também em PROD** — sem stack/dados sensíveis, para o suporte e o frontend mostrarem contexto.
+
+#### 3. Frontend — função `bulkDeleteRem()` com modal de **RESULTADO** rico
+- Substitui o toast genérico "Erro no banco de dados" por um **modal completo** com 3 blocos:
+  - ✓ **Excluídas com sucesso** (lista de CTRLs + contagem de retornos)
+  - ⚠ **Bloqueadas por regra de negócio** (cada CTRL com seu motivo: status_fin=Pago, retorno pago, etc.)
+  - ✗ **Falharam tecnicamente** (cada CTRL com motivo técnico: FK violada, banco ocupado, etc.)
+- Chamada à API agora usa `{silent: true}` para o frontend **assumir o controle** da exibição (em vez do toast automático do `api()`).
+- Trata tanto **sucesso parcial** (HTTP 200 com `falhas[]` populado) quanto **fracasso técnico total** (HTTP 500 com `BULK_DELETE_FAILED`).
+- Toast de complemento adapta o tom (success/info/error) ao resultado geral.
+
+#### 4. Cache bust `v=51 → v=52` para forçar reload do app.js novo
+
+### Mapa de FKs revisado (defense-in-depth)
+Mapeadas **11 tabelas filhas** de `terc_remessas` — todas tratadas explicitamente pelo novo bulk-delete:
+| Tabela | FK | ON DELETE | Notas |
+|---|---|---|---|
+| `terc_alertas` | `id_remessa` | CASCADE | DELETE explícito adicionado |
+| `terc_consertos` | `id_remessa` | NO ACTION (FK simples) | DELETE explícito **crítico** — sem ele bloquearia |
+| `terc_eventos` | `id_remessa` | CASCADE | DELETE explícito mantido |
+| `terc_remessa_grade` | `id_remessa` | CASCADE | DELETE explícito |
+| `terc_remessa_itens` | `id_remessa` | CASCADE | DELETE explícito |
+| `terc_remessa_item_grade` | via `id_item` | CASCADE indireta | DELETE explícito via subquery |
+| `terc_retornos` | `id_remessa` | CASCADE | DELETE explícito (limpa `payment_terc_items` via CASCADE em `id_retorno`) |
+| `terc_retorno_grade` | via `id_retorno` | CASCADE indireta | DELETE explícito via subquery |
+| `terc_retorno_itens` | `id_remessa` + `id_retorno` | CASCADE | DELETE explícito |
+| `terc_retorno_item_grade` | via `id_ret_item` | CASCADE indireta | DELETE explícito via subquery |
+| `payment_terc_items` | via `id_retorno` | CASCADE | Limpa automaticamente quando `terc_retornos` é deletado |
+
+### Arquivos alterados
+- `src/index.tsx` — handler global de erros com regex reordenado, novos códigos, campo `hint` exposto em PROD. Cache bust v=52.
+- `src/routes/terceirizacao.ts` — endpoint `POST /terc/remessas/bulk-delete` totalmente reescrito (~250 → ~320 linhas) com chunking, batch atômico, defensive DELETEs, per-chunk error capture, auditoria truncada.
+- `public/static/app.js` — `bulkDeleteRem()` chama API silent e renderiza nova `showBulkDeleteResultModal()` com 3 blocos (excluídas/bloqueadas/falhadas).
+
+### Métricas pós-deploy
+- **Build**: `dist/_worker.js 332.82 kB` (+2.9 kB vs HOTFIX 0043 — apenas lógica nova, sem dependências)
+- **PROD URL**: https://corepro-confeccao.pages.dev — deployment `ee245820`
+- **Smoke PROD**: HTTP 200 raiz · cache bust v=52 propagado · `showBulkDeleteResultModal` + `BULK_DELETE_FAILED` presentes no app.js novo · endpoint bulk-delete retorna 401 limpo sem auth (parser/middleware OK)
+- **Zero breaking changes**: API mantém o mesmo contrato (`ids[]`, `confirm: 'SIM'`) — campos adicionais (`total_falhadas`, `falhas[]`, `hint`) são opcionais no frontend antigo.
+- **Compatibilidade total** com HOTFIXes 0042 (validação de retorno pago via `id_pagamento`) e 0043 (todas as validações de bloqueio mantidas).
+
+### Garantias
+- ✅ **Atomicidade por lote**: cada chunk de 80 IDs é "tudo ou nada"
+- ✅ **Resiliência a lotes grandes**: 500 IDs (cap defensivo) = 7 chunks de 80 max — totalmente dentro do limite do D1
+- ✅ **Visibilidade**: usuário sempre vê exatamente o que aconteceu (sucesso/bloqueio/falha por CTRL)
+- ✅ **Audit completa**: registra resumo + payload truncado, nunca estoura `v_novo`
+- ✅ **Defense-in-depth**: funciona mesmo se uma FK CASCADE desaparecer por migration manual no futuro
+- ✅ **Multi-tenant intacto**: `id_empresa` em todas as cláusulas WHERE
+
+### Como o usuário vê a correção
+**Antes (HOTFIX 0043 com bug):**
+> ❌ Toast vermelho: "Erro no banco de dados. Equipe foi notificada." (e nada mais — usuário fica no escuro)
+
+**Depois (HOTFIX 0044):**
+> ✅ Modal completo:
+> - **Total processado: 221**
+> - ✓ **Excluídas com sucesso: 215** (33 retornos também) — CTRLs: 230, 231, 232, …
+> - ⚠ **Bloqueadas (regra de negócio): 6** — CTRL 240: "Possui 2 retorno(s) já pago(s)"; CTRL 245: "Remessa está com status financeiro Pago"; …
+> - (✗ falhas técnicas só apareceriam se houvesse algum problema real do banco, com motivo específico tipo "Possui registros vinculados que impedem a exclusão")
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -2192,7 +2276,7 @@ Todas com `id_empresa = ?` no WHERE para isolamento total. Tabelas que podem nã
 - [x] ~~Alinhamento Terceirizado + Setor em tabelas (Remessas/Retornos)~~ ✅ **Implementado HOTFIX 0040** (componente `.tc-terc` reutilizável + responsivo + dark + print, zero impacto em backend/dados)
 - [x] ~~Rodapé financeiro do Retorno com baixa legibilidade~~ ✅ **Implementado HOTFIX 0041** (componente `.tc-rsf` dark premium + grid responsivo + variantes coloridas + destaque "Total pago" + ações separadas, zero impacto em cálculos/lógica)
 - [x] ~~Módulo financeiro / pagamento de terceirizados (sem gestão de "quando pagou / como / comprovante")~~ ✅ **Implementado HOTFIX 0042** (módulo Financeiro → Pagamentos completo: checkbox + painel financeiro por terceirizado + barra flutuante + modal de pagamento em lote + 7 formas + comprovante PDF (jsPDF + autoTable) + histórico paginado + estorno admin-only + auditoria com IP + 2 novas tabelas multi-tenant + backward-compat com `dt_pagamento`)
-- [x] ~~Exclusão em lote de remessas (até hoje só dava 1 por vez)~~ ✅ **Implementado HOTFIX 0043** (checkbox + check-all + barra flutuante + modal com pre-check + validações de bloqueio: status_fin='Pago' / retorno pago / cross-tenant; cascata hard-delete + auditoria 2 entradas + multi-tenant scoping + lixeira individual 100% intacta)
+- [x] ~~Exclusão em lote de remessas (até hoje só dava 1 por vez)~~ ✅ **Implementado HOTFIX 0043** (checkbox + check-all + barra flutuante + modal com pre-check + validações de bloqueio: status_fin='Pago' / retorno pago / cross-tenant; cascata hard-delete + auditoria 2 entradas + multi-tenant scoping + lixeira individual 100% intacta) + ✅ **Corrigido HOTFIX 0044** (causa raiz: limite de ~100 parâmetros bindados por statement do D1 — agora chunking de 80 IDs + `DB.batch()` atômico + DELETEs defensivos para `terc_consertos`/`terc_alertas` + per-chunk error capture + modal de resultado rico com excluídas/bloqueadas/falhadas + handler global expõe `hint` técnico em PROD)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

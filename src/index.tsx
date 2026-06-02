@@ -57,37 +57,66 @@ app.onError((err, c) => {
   if (stack) console.error('[onError] stack:', stack);
 
   // --- Mapeamento de erros conhecidos para mensagens amigáveis ---
+  // HOTFIX 0044: ordem dos testes ajustada para que padrões mais específicos
+  // (FK / UNIQUE / NOT NULL / CHECK) sejam testados ANTES do regex genérico
+  // /D1_ERROR/, que cobre TODOS os erros do D1 (eles vêm como
+  // "D1_ERROR: FOREIGN KEY constraint failed", "D1_ERROR: too many SQL variables", etc.).
+  // Também extraímos pistas adicionais (variáveis demais, banco bloqueado) e
+  // passamos a expor o `hint` (mensagem técnica curta) MESMO em produção para
+  // facilitar suporte sem vazar dados sensíveis.
   let status = 500;
   let friendly = 'Erro interno do servidor. Tente novamente em instantes.';
   let code: string | undefined = 'INTERNAL_ERROR';
+  let hint: string | undefined; // pista técnica curta — sempre exposta
 
   if (/no such table/i.test(raw)) {
     status = 500;
     code = 'SCHEMA_OUTDATED';
     friendly = 'Estrutura do banco desatualizada. Contate o suporte.';
+    const m = raw.match(/no such table:\s*([\w.]+)/i);
+    if (m) hint = `Tabela ausente: ${m[1]}`;
   } else if (/no such column/i.test(raw)) {
     status = 500;
     code = 'SCHEMA_OUTDATED';
     friendly = 'Coluna ausente no banco. Atualize as migrations.';
+    const m = raw.match(/no such column:\s*([\w.]+)/i);
+    if (m) hint = `Coluna ausente: ${m[1]}`;
   } else if (/UNIQUE constraint failed/i.test(raw)) {
     status = 409;
     code = 'DUPLICATE';
     if (/cores\.nome/i.test(raw))   friendly = 'Já existe uma cor com este nome nesta empresa.';
     else if (/cores\.hex/i.test(raw)) friendly = 'Já existe uma cor com este código HEX nesta empresa.';
     else friendly = 'Registro duplicado nesta empresa.';
+    const m = raw.match(/UNIQUE constraint failed:\s*([\w.,\s]+)/i);
+    if (m) hint = `Único violado: ${m[1].trim()}`;
   } else if (/FOREIGN KEY constraint failed/i.test(raw)) {
     status = 409;
     code = 'FK_VIOLATION';
-    friendly = 'Referência inválida (cadastro vinculado não existe ou pertence a outra empresa).';
+    friendly = 'Não foi possível concluir a operação pois há registros vinculados (retornos, pagamentos, romaneios ou outros lançamentos). Verifique as dependências e tente novamente.';
+    hint = 'FOREIGN KEY constraint failed';
   } else if (/NOT NULL constraint failed/i.test(raw)) {
     status = 400;
     code = 'MISSING_FIELD';
     const m = raw.match(/NOT NULL constraint failed:\s*([\w.]+)/i);
     friendly = m ? `Campo obrigatório ausente: ${m[1]}.` : 'Campo obrigatório ausente.';
+    if (m) hint = `NOT NULL: ${m[1]}`;
   } else if (/CHECK constraint failed/i.test(raw)) {
     status = 400;
     code = 'INVALID_VALUE';
     friendly = 'Valor inválido para o campo.';
+    const m = raw.match(/CHECK constraint failed:\s*([\w.]+)/i);
+    if (m) hint = `CHECK: ${m[1]}`;
+  } else if (/too many SQL variables|too many parameters/i.test(raw)) {
+    // D1 tem limite de ~100 parâmetros bindados por statement.
+    status = 400;
+    code = 'TOO_MANY_PARAMS';
+    friendly = 'Operação com muitos itens de uma vez. Tente em lotes menores (até ~80 por vez).';
+    hint = 'Limite de parâmetros do D1 excedido';
+  } else if (/database is locked|SQLITE_BUSY/i.test(raw)) {
+    status = 503;
+    code = 'DB_BUSY';
+    friendly = 'Banco temporariamente ocupado. Tente novamente em alguns segundos.';
+    hint = 'Banco bloqueado momentaneamente';
   } else if (/is not valid JSON|Unexpected token/i.test(raw)) {
     status = 400;
     code = 'INVALID_JSON';
@@ -96,6 +125,9 @@ app.onError((err, c) => {
     status = 500;
     code = 'DB_ERROR';
     friendly = 'Erro no banco de dados. Equipe foi notificada.';
+    // Extrai o que vem depois de "D1_ERROR:" como pista
+    const m = raw.match(/D1_ERROR:\s*([^\n]+)/i);
+    if (m) hint = m[1].slice(0, 160).trim();
   }
 
   return new Response(
@@ -103,7 +135,10 @@ app.onError((err, c) => {
       ok: false,
       error: friendly,
       code,
-      // Em dev, manda detalhe técnico abreviado para facilitar debug
+      // hint: pista técnica curta (≤160 chars), sem stack/dados sensíveis,
+      // exposta também em produção para auxiliar suporte e o frontend mostrar contexto.
+      hint,
+      // detail: stack/raw completo — só em dev/local
       detail: (c.env as any)?.NODE_ENV === 'production' ? undefined : raw.slice(0, 300),
     }),
     { status, headers: { 'Content-Type': 'application/json' } }
@@ -209,7 +244,7 @@ function renderSPA(): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link href="/static/styles.css?v=51" rel="stylesheet" />
+  <link href="/static/styles.css?v=52" rel="stylesheet" />
   <script>
     tailwind.config = {
       theme: {
@@ -243,7 +278,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
-  <script src="/static/app.js?v=51"></script>
+  <script src="/static/app.js?v=52"></script>
   <script src="/static/relatorios_det.js?v=6"></script>
 </body>
 </html>`;
