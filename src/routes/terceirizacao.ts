@@ -2383,6 +2383,284 @@ app.put('/terc/remessas/:id', async (c) => {
   }));
 });
 
+/* =================================================================
+ * HOTFIX 0043 — Exclusão em LOTE de Remessas
+ *
+ * POST /terc/remessas/bulk-delete
+ *
+ * Body: { ids: number[], confirm?: 'SIM', force_cancel_paid?: boolean }
+ *
+ * Comportamento:
+ *  - Sempre tenant-scoped (id_empresa do contexto).
+ *  - PRE-CHECK (sem confirm): retorna o que pode/não pode ser excluído,
+ *    SEM efetuar nenhuma alteração. Frontend mostra modal com a lista.
+ *  - COM confirm='SIM': executa hard-delete em cascata APENAS nas remessas
+ *    permitidas (passa pelas validações de bloqueio). Remessas bloqueadas
+ *    são ignoradas (não exclui nem cancela).
+ *
+ * Regras de bloqueio (uma só impede a exclusão):
+ *  1. Remessa está com status_fin='Pago' (financeiramente paga).
+ *  2. Remessa tem retornos vinculados QUE JÁ FORAM PAGOS via módulo
+ *     payment_terc (id_pagamento NOT NULL OU dt_pagamento NOT NULL).
+ *  3. Remessa pertence a outra empresa (tenant cross — sempre proibido).
+ *
+ * Auditoria: registra em audit() com módulo TERC, ação BULK_DEL_REM,
+ *            usuário, lista de CTRLs excluídos, IP de origem.
+ *
+ * Multi-tenant: SEMPRE filtra por id_empresa. IDs de outra empresa são
+ *               silenciosamente classificados como "não encontrados"
+ *               (não vaza nem confirma a existência).
+ *
+ * Performance: usa IN (placeholders) limitado a 500 IDs por chamada
+ *              (alinhado ao LIMIT 500 do GET /terc/remessas).
+ * ================================================================= */
+app.post('/terc/remessas/bulk-delete', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const usuario = getUser(c);
+  const ip = (
+    c.req.header('cf-connecting-ip') ||
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+    c.req.header('x-real-ip') ||
+    'desconhecido'
+  );
+
+  let body: any = {};
+  try { body = await c.req.json(); } catch { return fail('Corpo da requisição inválido.', 400); }
+
+  const rawIds = Array.isArray(body?.ids) ? body.ids : [];
+  const ids: number[] = Array.from(new Set(
+    rawIds.map((v: any) => toInt(v)).filter((n: number) => n > 0)
+  )).slice(0, 500); // hard cap defensivo
+
+  if (ids.length === 0) {
+    return fail('Nenhuma remessa selecionada.', 400);
+  }
+
+  const confirm = String(body?.confirm || '').toUpperCase();
+  const placeholders = ids.map(() => '?').join(',');
+
+  // 1) Busca as remessas SELECIONADAS que pertencem ao tenant
+  //    (qualquer ID que não voltar aqui = não existe OU pertence a outra empresa)
+  const remessas = (await c.env.DB.prepare(`
+    SELECT id_remessa, num_controle, status, status_fin
+      FROM terc_remessas
+     WHERE id_empresa = ?
+       AND id_remessa IN (${placeholders})
+  `).bind(id_empresa, ...ids).all()).results as any[];
+
+  const foundIds = new Set(remessas.map(r => Number(r.id_remessa)));
+  const notFound = ids.filter(i => !foundIds.has(i));
+
+  // 2) Para cada remessa encontrada, conta retornos totais + retornos PAGOS.
+  //    Um retorno é considerado pago se tiver dt_pagamento NOT NULL
+  //    OU id_pagamento NOT NULL (HOTFIX 0042).
+  const retornosInfo = remessas.length > 0
+    ? (await c.env.DB.prepare(`
+        SELECT id_remessa,
+               COUNT(*) AS total_ret,
+               SUM(CASE WHEN dt_pagamento IS NOT NULL OR id_pagamento IS NOT NULL THEN 1 ELSE 0 END) AS pagos_ret
+          FROM terc_retornos
+         WHERE id_empresa = ?
+           AND id_remessa IN (${remessas.map(() => '?').join(',')})
+         GROUP BY id_remessa
+      `).bind(id_empresa, ...remessas.map(r => r.id_remessa)).all()).results as any[]
+    : [];
+
+  const retMap: Record<number, { total: number; pagos: number }> = {};
+  for (const r of retornosInfo) {
+    retMap[Number(r.id_remessa)] = {
+      total: Number(r.total_ret) || 0,
+      pagos: Number(r.pagos_ret) || 0,
+    };
+  }
+
+  // 3) Classifica cada remessa: permitida x bloqueada (com motivo)
+  type RemissaoItem = {
+    id_remessa: number;
+    num_controle: number;
+    status: string;
+    qtd_retornos: number;
+    motivo?: string;
+  };
+
+  const permitidas: RemissaoItem[] = [];
+  const bloqueadas: RemissaoItem[] = [];
+
+  for (const rem of remessas) {
+    const info = retMap[Number(rem.id_remessa)] || { total: 0, pagos: 0 };
+    const item: RemissaoItem = {
+      id_remessa: Number(rem.id_remessa),
+      num_controle: Number(rem.num_controle) || 0,
+      status: String(rem.status || ''),
+      qtd_retornos: info.total,
+    };
+
+    // Regra 1: status_fin='Pago' → não pode excluir
+    if (String(rem.status_fin || '').toLowerCase() === 'pago') {
+      item.motivo = 'Remessa está com status financeiro "Pago"';
+      bloqueadas.push(item);
+      continue;
+    }
+
+    // Regra 2: tem retorno pago via módulo de pagamento → não pode excluir
+    if (info.pagos > 0) {
+      item.motivo = `Possui ${info.pagos} retorno(s) já pago(s)`;
+      bloqueadas.push(item);
+      continue;
+    }
+
+    permitidas.push(item);
+  }
+
+  // 4) PRE-CHECK (sem confirm) — devolve a classificação sem deletar nada.
+  //    Frontend usa isso para montar o modal de confirmação detalhado.
+  if (confirm !== 'SIM') {
+    return c.json(ok({
+      preview: true,
+      total_selecionadas: ids.length,
+      total_encontradas: remessas.length,
+      total_nao_encontradas: notFound.length,
+      total_permitidas: permitidas.length,
+      total_bloqueadas: bloqueadas.length,
+      permitidas,
+      bloqueadas,
+      ids_nao_encontrados: notFound,
+    }));
+  }
+
+  // 5) EXECUÇÃO real — só deleta as permitidas.
+  //    Se nenhuma permitida, retorna erro amigável.
+  if (permitidas.length === 0) {
+    return c.json({
+      ok: false,
+      code: 'ALL_BLOCKED',
+      error: 'Nenhuma das remessas selecionadas pode ser excluída.',
+      bloqueadas,
+    }, 409);
+  }
+
+  const idsPermitidos = permitidas.map(p => p.id_remessa);
+  const ph2 = idsPermitidos.map(() => '?').join(',');
+  let totalRetornosApagados = 0;
+
+  // 5a) Conta total de retornos para auditoria antes de apagar
+  const retCount = await c.env.DB.prepare(`
+    SELECT COUNT(*) AS c FROM terc_retornos
+     WHERE id_empresa = ? AND id_remessa IN (${ph2})
+  `).bind(id_empresa, ...idsPermitidos).first<any>();
+  totalRetornosApagados = Number(retCount?.c) || 0;
+
+  // 5b) Hard delete em cascata (mesma ordem do DELETE individual)
+  //     - terc_retorno_grade  (filhos dos retornos)
+  //     - terc_retornos       (filhos da remessa)
+  //     - terc_eventos        (histórico) — pode não existir em todos tenants
+  //     - terc_remessa_grade  (grades da remessa)
+  //     - terc_remessa_itens  (itens da remessa)  ← novo, para multi-produto
+  //     - terc_remessa_item_grade (grades dos itens) ← novo
+  //     - terc_remessas       (a remessa em si)
+  try {
+    await c.env.DB.prepare(`
+      DELETE FROM terc_retorno_grade
+       WHERE id_empresa = ?
+         AND id_retorno IN (
+           SELECT id_retorno FROM terc_retornos
+            WHERE id_empresa = ? AND id_remessa IN (${ph2})
+         )
+    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
+  } catch (e) { /* tabela pode não existir em tenants legados */ }
+
+  try {
+    await c.env.DB.prepare(`
+      DELETE FROM terc_retorno_item_grade
+       WHERE id_empresa = ?
+         AND id_ret_item IN (
+           SELECT ri.id_ret_item FROM terc_retorno_itens ri
+            WHERE ri.id_empresa = ? AND ri.id_remessa IN (${ph2})
+         )
+    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
+  } catch (e) { /* idem */ }
+
+  try {
+    await c.env.DB.prepare(`
+      DELETE FROM terc_retorno_itens
+       WHERE id_empresa = ? AND id_remessa IN (${ph2})
+    `).bind(id_empresa, ...idsPermitidos).run();
+  } catch (e) { /* idem */ }
+
+  await c.env.DB.prepare(`
+    DELETE FROM terc_retornos
+     WHERE id_empresa = ? AND id_remessa IN (${ph2})
+  `).bind(id_empresa, ...idsPermitidos).run();
+
+  await c.env.DB.prepare(`
+    DELETE FROM terc_eventos
+     WHERE id_empresa = ? AND id_remessa IN (${ph2})
+  `).bind(id_empresa, ...idsPermitidos).run().catch(() => {});
+
+  await c.env.DB.prepare(`
+    DELETE FROM terc_remessa_grade
+     WHERE id_empresa = ? AND id_remessa IN (${ph2})
+  `).bind(id_empresa, ...idsPermitidos).run().catch(() => {});
+
+  try {
+    await c.env.DB.prepare(`
+      DELETE FROM terc_remessa_item_grade
+       WHERE id_empresa = ?
+         AND id_item IN (
+           SELECT id_item FROM terc_remessa_itens
+            WHERE id_empresa = ? AND id_remessa IN (${ph2})
+         )
+    `).bind(id_empresa, id_empresa, ...idsPermitidos).run();
+  } catch (e) { /* idem */ }
+
+  try {
+    await c.env.DB.prepare(`
+      DELETE FROM terc_remessa_itens
+       WHERE id_empresa = ? AND id_remessa IN (${ph2})
+    `).bind(id_empresa, ...idsPermitidos).run();
+  } catch (e) { /* idem */ }
+
+  await c.env.DB.prepare(`
+    DELETE FROM terc_remessas
+     WHERE id_empresa = ? AND id_remessa IN (${ph2})
+  `).bind(id_empresa, ...idsPermitidos).run();
+
+  // 5c) Auditoria — registra a operação completa
+  const ctrlsList = permitidas.map(p => p.num_controle).filter(n => n > 0).join(',');
+  const detalhe = JSON.stringify({
+    ids: idsPermitidos,
+    ctrls: permitidas.map(p => p.num_controle),
+    qtd_excluidas: permitidas.length,
+    qtd_bloqueadas: bloqueadas.length,
+    retornos_apagados: totalRetornosApagados,
+    ip,
+  });
+
+  await audit(
+    c, MOD, 'BULK_DEL_REM',
+    `bulk:${permitidas.length}remessas`,
+    'ctrls', '', ctrlsList || String(permitidas.length),
+    usuario
+  );
+
+  // Log adicional com detalhe completo (separado para facilitar busca)
+  await audit(
+    c, MOD, 'BULK_DEL_REM_DETAIL',
+    `ip:${ip}`,
+    'payload', '', detalhe,
+    usuario
+  ).catch(() => {});
+
+  return c.json(ok({
+    executed: true,
+    total_excluidas: permitidas.length,
+    total_bloqueadas: bloqueadas.length,
+    retornos_apagados: totalRetornosApagados,
+    ctrls_excluidos: permitidas.map(p => p.num_controle),
+    bloqueadas,
+  }));
+});
+
 // Excluir remessa
 // Comportamento (refator 2026‑05‑04):
 //   - Por padrão (sem retornos), exclui completamente (HARD DELETE).

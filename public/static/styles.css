@@ -5422,6 +5422,386 @@ tr.is-payable:has(.ret-checkbox:checked) td {
 .modal-lg .modal-content,
 .modal-content.modal-lg { max-width: 880px; }
 
+/* ================================================================
+ * HOTFIX 0043 — Exclusão em Lote de Remessas
+ * Componentes: .rem-col-check, .rem-bulk-check, .rem-bulk-bar,
+ *              .rem-bulk-summary, .rem-bulk-permit, .rem-bulk-blocked
+ * ================================================================ */
+
+/* ---------------------------------------------------------------
+ * Coluna de seleção na tabela de Remessas
+ * --------------------------------------------------------------- */
+.rem-col-check {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  text-align: center;
+  padding: 6px 4px !important;
+  vertical-align: middle;
+}
+.rem-col-check input[type="checkbox"] {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: #ef4444;
+  margin: 0;
+  vertical-align: middle;
+}
+.rem-col-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.rem-bulk-check {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: #ef4444;
+  margin: 0;
+  vertical-align: middle;
+}
+
+/* Realce visual de linha selecionada (sem JS, via :has) */
+tr.is-bulk-selectable:hover td {
+  background: rgba(239, 68, 68, 0.025);
+  transition: background 0.16s ease;
+}
+tr.is-bulk-selectable:has(.rem-bulk-check:checked) td {
+  background: rgba(239, 68, 68, 0.10) !important;
+  box-shadow: inset 3px 0 0 #ef4444;
+}
+[data-theme="light"] tr.is-bulk-selectable:hover td {
+  background: rgba(239, 68, 68, 0.035);
+}
+[data-theme="light"] tr.is-bulk-selectable:has(.rem-bulk-check:checked) td {
+  background: rgba(239, 68, 68, 0.13) !important;
+}
+
+/* ---------------------------------------------------------------
+ * Barra flutuante de seleção em lote (Excluir Selecionadas)
+ * --------------------------------------------------------------- */
+.rem-bulk-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%) translateY(120%);
+  z-index: 950;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #0b1220 0%, #1e293b 50%, #0b1220 100%);
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5),
+              0 0 0 1px rgba(239, 68, 68, 0.10),
+              0 0 24px rgba(239, 68, 68, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.25s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.18s ease;
+  min-width: 340px;
+  max-width: calc(100vw - 40px);
+}
+.rem-bulk-bar.is-visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.rem-bulk-bar__info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.rem-bulk-bar__info > i {
+  color: #fca5a5;
+  font-size: 16px;
+  filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.5));
+}
+.rem-bulk-bar__info > i.fa-cubes {
+  color: #818cf8;
+  filter: drop-shadow(0 0 6px rgba(129, 140, 248, 0.4));
+}
+.rem-bulk-bar__info b {
+  color: #f1f5f9;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.rem-bulk-bar__sep {
+  color: rgba(148, 163, 184, 0.4);
+  font-weight: 400;
+  margin: 0 2px;
+}
+.rem-bulk-bar__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.rem-bulk-bar__actions .btn {
+  min-height: 36px;
+  padding: 7px 14px;
+  font-weight: 700;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.rem-bulk-bar__actions .btn-danger {
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  border: none;
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.42);
+}
+.rem-bulk-bar__actions .btn-danger:hover {
+  background: linear-gradient(135deg, #b91c1c, #dc2626);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.55);
+}
+.rem-bulk-bar__actions .btn-ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #94a3b8;
+}
+.rem-bulk-bar__actions .btn-ghost:hover {
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+/* Mobile */
+@media (max-width: 640px) {
+  .rem-bulk-bar {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    transform: translateY(120%);
+    min-width: 0;
+    max-width: none;
+    padding: 10px 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .rem-bulk-bar.is-visible {
+    transform: translateY(0);
+  }
+  .rem-bulk-bar__info {
+    flex: 1 1 100%;
+    font-size: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .rem-bulk-bar__actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .rem-bulk-bar__actions .btn {
+    flex: 1 1 auto;
+    padding: 7px 10px;
+  }
+}
+
+/* Light theme barra */
+[data-theme="light"] .rem-bulk-bar {
+  background: linear-gradient(135deg, #ffffff 0%, #fef2f2 50%, #ffffff 100%);
+  border-color: #fca5a5;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16),
+              0 0 0 1px rgba(239, 68, 68, 0.12);
+}
+[data-theme="light"] .rem-bulk-bar__info { color: #0f172a; }
+[data-theme="light"] .rem-bulk-bar__info > i { color: #dc2626; filter: none; }
+[data-theme="light"] .rem-bulk-bar__info > i.fa-cubes { color: #4f46e5; filter: none; }
+[data-theme="light"] .rem-bulk-bar__info b { color: #0f172a; }
+[data-theme="light"] .rem-bulk-bar__sep { color: #cbd5e1; }
+[data-theme="light"] .rem-bulk-bar__actions .btn-ghost {
+  border-color: #cbd5e1;
+  color: #64748b;
+}
+[data-theme="light"] .rem-bulk-bar__actions .btn-ghost:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+/* ---------------------------------------------------------------
+ * Modal de confirmação — resumo, lista de permitidas e bloqueadas
+ * --------------------------------------------------------------- */
+.rem-bulk-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 10px;
+}
+.rem-bulk-summary__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+.rem-bulk-summary__lbl {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+.rem-bulk-summary__val {
+  font-size: 22px;
+  font-weight: 800;
+  color: #e2e8f0;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.rem-bulk-summary__row--ok {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14), rgba(5, 150, 105, 0.06));
+  border-color: rgba(16, 185, 129, 0.32);
+}
+.rem-bulk-summary__row--ok .rem-bulk-summary__lbl { color: #a7f3d0; }
+.rem-bulk-summary__row--ok .rem-bulk-summary__val { color: #34d399; }
+.rem-bulk-summary__row--block {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.14), rgba(220, 38, 38, 0.06));
+  border-color: rgba(239, 68, 68, 0.32);
+}
+.rem-bulk-summary__row--block .rem-bulk-summary__lbl { color: #fecaca; }
+.rem-bulk-summary__row--block .rem-bulk-summary__val { color: #fca5a5; }
+
+/* Light theme summary */
+[data-theme="light"] .rem-bulk-summary {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+[data-theme="light"] .rem-bulk-summary__row {
+  background: #ffffff;
+  border-color: #e2e8f0;
+}
+[data-theme="light"] .rem-bulk-summary__lbl { color: #64748b; }
+[data-theme="light"] .rem-bulk-summary__val { color: #0f172a; }
+[data-theme="light"] .rem-bulk-summary__row--ok {
+  background: #ecfdf5;
+  border-color: #86efac;
+}
+[data-theme="light"] .rem-bulk-summary__row--ok .rem-bulk-summary__lbl { color: #065f46; }
+[data-theme="light"] .rem-bulk-summary__row--ok .rem-bulk-summary__val { color: #047857; }
+[data-theme="light"] .rem-bulk-summary__row--block {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+[data-theme="light"] .rem-bulk-summary__row--block .rem-bulk-summary__lbl { color: #991b1b; }
+[data-theme="light"] .rem-bulk-summary__row--block .rem-bulk-summary__val { color: #dc2626; }
+
+/* Lista de CTRLs permitidos */
+.rem-bulk-permit {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-radius: 9px;
+  background: rgba(16, 185, 129, 0.06);
+  border: 1px solid rgba(16, 185, 129, 0.22);
+}
+.rem-bulk-permit__title {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #6ee7b7;
+  margin-bottom: 5px;
+}
+.rem-bulk-permit__title > i { color: #34d399; }
+.rem-bulk-permit__list {
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  color: #e2e8f0;
+  line-height: 1.5;
+  word-break: break-word;
+}
+[data-theme="light"] .rem-bulk-permit {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+[data-theme="light"] .rem-bulk-permit__title { color: #047857; }
+[data-theme="light"] .rem-bulk-permit__title > i { color: #059669; }
+[data-theme="light"] .rem-bulk-permit__list { color: #0f172a; }
+
+/* Bloco de remessas BLOQUEADAS (com motivo) */
+.rem-bulk-blocked {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+}
+.rem-bulk-blocked__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fecaca;
+  margin-bottom: 8px;
+}
+.rem-bulk-blocked__title > i { color: #f87171; font-size: 14px; }
+.rem-bulk-blocked__title b { color: #fca5a5; font-weight: 700; }
+.rem-bulk-blocked__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.rem-bulk-blocked__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: rgba(15, 23, 42, 0.32);
+  border-radius: 6px;
+  border-left: 3px solid rgba(239, 68, 68, 0.5);
+  font-size: 12.5px;
+}
+.rem-bulk-blocked__ctrl {
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-weight: 700;
+  color: #fca5a5;
+  white-space: nowrap;
+  min-width: 84px;
+}
+.rem-bulk-blocked__reason {
+  color: #cbd5e1;
+  flex: 1 1 auto;
+}
+.rem-bulk-blocked__more {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-style: italic;
+  text-align: center;
+}
+
+/* Light theme blocked */
+[data-theme="light"] .rem-bulk-blocked {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+[data-theme="light"] .rem-bulk-blocked__title { color: #991b1b; }
+[data-theme="light"] .rem-bulk-blocked__title > i { color: #dc2626; }
+[data-theme="light"] .rem-bulk-blocked__title b { color: #b91c1c; }
+[data-theme="light"] .rem-bulk-blocked__row {
+  background: #ffffff;
+  border-left-color: #ef4444;
+}
+[data-theme="light"] .rem-bulk-blocked__ctrl { color: #b91c1c; }
+[data-theme="light"] .rem-bulk-blocked__reason { color: #475569; }
+[data-theme="light"] .rem-bulk-blocked__more { color: #64748b; }
+
 /* Status pill */
 .srv-status-on,
 .srv-status-off {

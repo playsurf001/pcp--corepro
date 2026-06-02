@@ -2057,6 +2057,131 @@ Menu **Financeiro → Pagamentos** (novo grupo na sidebar com ícone `fa-hand-ho
 
 ---
 
+## 🆕 HOTFIX 0043 (2026-06-02) — Exclusão em Lote de Remessas
+
+### Contexto
+Antes deste hotfix, **excluir várias remessas exigia clicar lixeira → confirmar → repetir** para cada uma, dezenas de vezes. Importações erradas, lotes de teste em ambiente de homologação ou limpeza periódica viravam tarefas manuais demoradas e propensas a erro humano. Faltava também uma **proteção financeira** clara — o usuário podia confirmar a exclusão de remessas que já tinham sido pagas, perdendo o vínculo com o histórico de pagamentos do HOTFIX 0042.
+
+Este hotfix entrega **seleção múltipla por checkbox + exclusão em lote com validações de bloqueio**, mantendo **100% intacta** a exclusão individual já existente.
+
+### Arquitetura — sem schema novo
+- ✅ **Não cria tabelas nem ALTER** — usa apenas as estruturas existentes (`terc_remessas`, `terc_retornos`, `payment_terc_items`)
+- ✅ **Backend único endpoint**: `POST /api/terc/remessas/bulk-delete` (não toca no `DELETE /terc/remessas/:id` individual)
+- ✅ **Frontend só estende a tabela de Remessas** — adiciona 1 coluna (checkbox) + 1 barra flutuante + 1 modal
+- ✅ **Multi-tenant**: 100% das queries com `WHERE id_empresa = ?` + IDs de outras empresas são silenciosamente ignorados (não vaza informação)
+
+### Endpoint REST
+| Método | Rota | Função |
+|---|---|---|
+| `POST` | `/api/terc/remessas/bulk-delete` | **2 modos**: PRE-CHECK (sem `confirm`) → retorna lista de permitidas/bloqueadas sem deletar; **EXECUÇÃO** (`confirm:'SIM'`) → deleta apenas as permitidas |
+
+**Body:**
+```json
+{ "ids": [123, 124, 125, ...], "confirm": "SIM" }
+```
+
+**Regras de bloqueio (qualquer uma impede a exclusão):**
+1. **`status_fin = 'Pago'`** → remessa já fechada financeiramente (não pode sumir do extrato)
+2. **Retorno já pago** → `terc_retornos.dt_pagamento IS NOT NULL` OU `id_pagamento IS NOT NULL` (vinculado ao módulo de pagamentos do HOTFIX 0042)
+3. **Tenant cross** → remessa de outra empresa nunca aparece (tratada como "não encontrada")
+
+**Resposta PRE-CHECK:**
+```json
+{
+  "ok": true,
+  "data": {
+    "preview": true,
+    "total_selecionadas": 20,
+    "total_permitidas": 17,
+    "total_bloqueadas": 3,
+    "permitidas": [ { "id_remessa": 124, "num_controle": 124, "qtd_retornos": 0 }, ... ],
+    "bloqueadas": [ { "num_controle": 125, "motivo": "Remessa está com status financeiro \"Pago\"" }, ... ]
+  }
+}
+```
+
+### Frontend — Tabela de Remessas
+**1. Coluna checkbox** na primeira coluna:
+- Header com **check-all** que seleciona todas as remessas da página corrente
+- Estado **indeterminate** quando seleção parcial
+- Linha selecionada destacada com `box-shadow` esquerdo vermelho + fundo `rgba(239,68,68,.10)` via `:has(.rem-bulk-check:checked)` (zero JS extra para o highlight)
+
+**2. Barra flutuante** `.rem-bulk-bar` (aparece com 1+ selecionada):
+- Fixed bottom centralizada, glow vermelho
+- Mostra em tempo real: **`X remessas selecionadas · Y peças`**
+- Botões: **"Cancelar Seleção"** + **"Excluir Selecionadas"**
+
+**3. Modal de confirmação** (rich):
+- **Resumo visual** com 3 cards: `Selecionadas` / `Serão excluídas` (verde) / `Bloqueadas` (vermelho)
+- **Lista dos CTRLs permitidos** (até 20 visíveis + "…+N")
+- **Lista detalhada das bloqueadas** (até 12 com motivo: "CTRL 125 — Possui pagamento registrado"; resto resumido)
+- **Banner de aviso vermelho**: *"Esta ação não poderá ser desfeita..."*
+- Se 0 permitidas → botão desabilitado + mensagem "Nenhuma pode ser excluída"
+
+**4. Atualização automática pós-exclusão:**
+- Limpa toda a seleção (incluindo check-all)
+- Invalida o cache de remessas (`sessionStorage`)
+- Recarrega a tabela com `bypassCache: true`
+- Contador "X remessas · Y peças" e dashboard se atualizam sem reload de página
+
+### Exclusão individual (lixeira) — INALTERADA
+- ✅ Botão lixeira individual continua na coluna **Ações** de cada linha
+- ✅ Mesmo modal de confirmação individual (com escolha cancelar/cascata para remessas com retornos)
+- ✅ Mesmo endpoint `DELETE /terc/remessas/:id` — **zero código tocado**
+
+### Segurança & Multi-tenant
+- ✅ **Tenant scoping**: `WHERE id_empresa = ?` em todas as queries (SELECT, DELETEs, COUNTs)
+- ✅ **Defensa em camadas**: o frontend só envia IDs permitidos no segundo POST, mas o backend **revalida tudo** mesmo assim (defense-in-depth)
+- ✅ **Hard cap 500 IDs/chamada** — alinhado ao `LIMIT 500` do GET `/terc/remessas`
+- ✅ **Bloqueio financeiro**: nunca é possível excluir remessa com retorno pago ou status_fin='Pago'
+- ✅ **Auditoria completa**: registra 2 entradas em `auditoria` por operação
+  - `BULK_DEL_REM` — usuário + qtd + lista de CTRLs excluídos
+  - `BULK_DEL_REM_DETAIL` — payload JSON com IDs, CTRLs, IP de origem, qtd bloqueadas, retornos apagados
+
+### Cascata de exclusão (hard delete)
+Para cada remessa permitida, na ordem:
+1. `terc_retorno_grade` (grades de retorno)
+2. `terc_retorno_item_grade` (grades de itens de retorno — multi-produto)
+3. `terc_retorno_itens` (itens de retorno — multi-produto)
+4. `terc_retornos`
+5. `terc_eventos` (histórico)
+6. `terc_remessa_grade` (grade da remessa — legado)
+7. `terc_remessa_item_grade` (grades de itens da remessa — multi-produto)
+8. `terc_remessa_itens` (itens da remessa — multi-produto)
+9. `terc_remessas`
+
+Todas com `id_empresa = ?` no WHERE para isolamento total. Tabelas que podem não existir em tenants legados são envolvidas em `try/catch` para tolerância.
+
+### CSS — Componentes (`.rem-bulk-bar`, `.rem-col-check`, `.rem-bulk-summary`, `.rem-bulk-blocked`, `.rem-bulk-permit`)
+- Padrão dark gradient + glow vermelho (alinhado com 0040/0041/0042 mas em outra paleta para diferenciar **destruição** de **pagamento**)
+- Light theme overrides em todas as classes
+- Responsivo mobile: barra full-width + botões empilhados
+- `tr:has(.rem-bulk-check:checked)` para highlight de linha sem JS
+
+### Arquivos alterados
+| Arquivo | Mudança |
+|---|---|
+| `src/routes/terceirizacao.ts` | **+250 linhas** — novo endpoint `POST /terc/remessas/bulk-delete` antes do `DELETE` individual |
+| `public/static/app.js` | Skeleton + rowHtml + renderTable: +1 coluna checkbox; shell: +barra `#rem-bulk-bar`; novas funções `getSelectedRemRows`, `updateRemBulkBar`, `clearRemBulkSelection`, `bulkDeleteRem`; bindings `#rbb-clear` + `#rbb-del` |
+| `public/static/styles.css` | **+350 linhas** — `.rem-col-check`, `.rem-bulk-bar` + filhos, `.rem-bulk-summary`, `.rem-bulk-permit`, `.rem-bulk-blocked` (+ light theme + responsivo mobile) |
+| `src/index.tsx` | Cache bust v=50 → v=51 |
+
+### Validação técnica
+- **Build**: `dist/_worker.js 329.91 kB` (+4.7 kB vs HOTFIX 0042 — apenas endpoint novo no backend)
+- **Local smoke**: HTML 200 / app.js?v=51 (571 KB) / styles.css?v=51 (266 KB) / API bulk-delete: 401 (auth required ✅) / 76 classes CSS / 18 funções JS
+- **Deploy PROD**: https://006b6813.corepro-confeccao.pages.dev
+- **PROD smoke**: HTML 200 + assets 200 + 76 classes + 18 funções + HOTFIX 0042 ainda presente (11 refs — zero regressão)
+
+### Compatibilidade total
+- ✅ **Zero impacto** na lixeira individual existente (endpoint + modal intocados)
+- ✅ **Zero impacto** em cálculos, totalizadores, dashboard, relatórios
+- ✅ **Multiempresa**: cada empresa só vê/seleciona/exclui as próprias remessas
+- ✅ **Compatível com paginação/filtros/busca** ativos (seleção opera sobre a página atual)
+- ✅ **Compatível com HOTFIX 0042**: respeita pagamentos registrados — não permite excluir remessa cujos retornos foram pagos pelo módulo financeiro
+- ✅ **Atualização sem refresh**: dashboard, contadores e relatórios se atualizam automaticamente após exclusão
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -2067,6 +2192,7 @@ Menu **Financeiro → Pagamentos** (novo grupo na sidebar com ícone `fa-hand-ho
 - [x] ~~Alinhamento Terceirizado + Setor em tabelas (Remessas/Retornos)~~ ✅ **Implementado HOTFIX 0040** (componente `.tc-terc` reutilizável + responsivo + dark + print, zero impacto em backend/dados)
 - [x] ~~Rodapé financeiro do Retorno com baixa legibilidade~~ ✅ **Implementado HOTFIX 0041** (componente `.tc-rsf` dark premium + grid responsivo + variantes coloridas + destaque "Total pago" + ações separadas, zero impacto em cálculos/lógica)
 - [x] ~~Módulo financeiro / pagamento de terceirizados (sem gestão de "quando pagou / como / comprovante")~~ ✅ **Implementado HOTFIX 0042** (módulo Financeiro → Pagamentos completo: checkbox + painel financeiro por terceirizado + barra flutuante + modal de pagamento em lote + 7 formas + comprovante PDF (jsPDF + autoTable) + histórico paginado + estorno admin-only + auditoria com IP + 2 novas tabelas multi-tenant + backward-compat com `dt_pagamento`)
+- [x] ~~Exclusão em lote de remessas (até hoje só dava 1 por vez)~~ ✅ **Implementado HOTFIX 0043** (checkbox + check-all + barra flutuante + modal com pre-check + validações de bloqueio: status_fin='Pago' / retorno pago / cross-tenant; cascata hard-delete + auditoria 2 entradas + multi-tenant scoping + lixeira individual 100% intacta)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

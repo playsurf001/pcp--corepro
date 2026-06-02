@@ -2865,6 +2865,25 @@ ROUTES.terc_remessas = async (main) => {
 
       <!-- ⬇️ Container scrollável (única região que rola) -->
       <div id="rem-tbl" class="card p-0 remessas-table-wrap" data-container="tableScrollContainer"></div>
+
+      <!-- ⬇️ HOTFIX 0043 — Barra flutuante de seleção em lote (Excluir Selecionadas) -->
+      <div id="rem-bulk-bar" class="rem-bulk-bar" role="region" aria-label="Ações em lote">
+        <div class="rem-bulk-bar__info">
+          <i class="fas fa-check-double"></i>
+          <span><b id="rbb-count">0</b> remessas selecionadas</span>
+          <span class="rem-bulk-bar__sep">·</span>
+          <i class="fas fa-cubes"></i>
+          <span><b id="rbb-pieces">0</b> peças</span>
+        </div>
+        <div class="rem-bulk-bar__actions">
+          <button id="rbb-clear" class="btn btn-ghost" title="Limpar seleção">
+            <i class="fas fa-xmark mr-1"></i><span>Cancelar Seleção</span>
+          </button>
+          <button id="rbb-del" class="btn btn-danger" title="Excluir as remessas selecionadas">
+            <i class="fas fa-trash mr-1"></i><span>Excluir Selecionadas</span>
+          </button>
+        </div>
+      </div>
     </div>
   `;
 
@@ -2894,7 +2913,7 @@ ROUTES.terc_remessas = async (main) => {
 
   // ----- Skeleton -----
   function skeletonTable() {
-    const cols = 13;
+    const cols = 14; // +1: coluna de checkbox (HOTFIX 0043)
     const rows = Array.from({ length: 8 }).map(() => `
       <tr class="skeleton-row">
         ${Array.from({length: cols}).map(() => '<td><span class="skeleton-cell"></span></td>').join('')}
@@ -2903,6 +2922,7 @@ ROUTES.terc_remessas = async (main) => {
       <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm remessas-table">
           <thead><tr>
+            <th class="rem-col-check no-print"><input type="checkbox" disabled /></th>
             <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
             <th>Serviço</th><th>Referência</th><th>Cor</th>
             <th class="text-right">Qtd</th><th class="text-right">Retornada</th>
@@ -2915,12 +2935,247 @@ ROUTES.terc_remessas = async (main) => {
       </div>`;
   }
 
+  // ============================================================
+  // HOTFIX 0043 — Helpers de seleção em lote para Remessas
+  // ============================================================
+
+  /** Lê as remessas atualmente selecionadas (checkbox marcado). */
+  function getSelectedRemRows() {
+    const checks = $tbl.querySelectorAll('.rem-bulk-check:checked');
+    const out = [];
+    checks.forEach(cb => {
+      out.push({
+        id:  Number(cb.dataset.remId),
+        num: Number(cb.dataset.remNum) || 0,
+        qtd: Number(cb.dataset.remQtd) || 0,
+      });
+    });
+    return out;
+  }
+
+  /**
+   * Atualiza a barra flutuante de ações em lote conforme a seleção atual.
+   * Sincroniza estado do checkbox "selecionar todos" (incluindo indeterminate).
+   */
+  function updateRemBulkBar() {
+    const bar = document.getElementById('rem-bulk-bar');
+    if (!bar) return;
+
+    const allChecks = $tbl.querySelectorAll('.rem-bulk-check');
+    const selChecks = $tbl.querySelectorAll('.rem-bulk-check:checked');
+    const total = allChecks.length;
+    const sel   = selChecks.length;
+
+    const checkAll = $tbl.querySelector('#rem-check-all');
+    if (checkAll) {
+      if (sel === 0)            { checkAll.checked = false; checkAll.indeterminate = false; }
+      else if (sel === total)   { checkAll.checked = true;  checkAll.indeterminate = false; }
+      else                      { checkAll.checked = false; checkAll.indeterminate = true;  }
+    }
+
+    if (sel === 0) {
+      bar.classList.remove('is-visible');
+      return;
+    }
+
+    // Soma peças
+    let pieces = 0;
+    selChecks.forEach(cb => { pieces += Number(cb.dataset.remQtd) || 0; });
+
+    const $count  = document.getElementById('rbb-count');
+    const $pieces = document.getElementById('rbb-pieces');
+    if ($count)  $count.textContent  = String(sel);
+    if ($pieces) $pieces.textContent = fmt.int(pieces);
+
+    bar.classList.add('is-visible');
+  }
+
+  /** Limpa toda a seleção (desmarca checkboxes + esconde barra). */
+  function clearRemBulkSelection() {
+    $tbl.querySelectorAll('.rem-bulk-check').forEach(cb => { cb.checked = false; });
+    const checkAll = $tbl.querySelector('#rem-check-all');
+    if (checkAll) { checkAll.checked = false; checkAll.indeterminate = false; }
+    updateRemBulkBar();
+  }
+
+  /**
+   * Fluxo de exclusão em lote:
+   *  1. Faz PRE-CHECK no backend (sem confirm) → recebe lista de permitidas/bloqueadas
+   *  2. Mostra modal detalhado: quantas serão excluídas, quais bloqueadas e por quê
+   *  3. Usuário confirma → POST novamente com confirm='SIM' → executa
+   *  4. Toast com resultado + invalida cache + recarrega tabela
+   */
+  async function bulkDeleteRem() {
+    const rows = getSelectedRemRows();
+    if (rows.length === 0) {
+      toast('Selecione pelo menos uma remessa.', 'info');
+      return;
+    }
+
+    const ids = rows.map(r => r.id);
+    let preview = null;
+
+    // === Passo 1: PRE-CHECK ===
+    try {
+      const r = await api('post', '/terc/remessas/bulk-delete',
+        { ids, confirm: '' }, { silent: false });
+      preview = r?.data || {};
+    } catch (e) {
+      // Erro do api() já mostrou toast — nada a fazer
+      return;
+    }
+
+    const permitidas = Array.isArray(preview?.permitidas) ? preview.permitidas : [];
+    const bloqueadas = Array.isArray(preview?.bloqueadas) ? preview.bloqueadas : [];
+    const totalPerm  = permitidas.length;
+    const totalBloq  = bloqueadas.length;
+    const totalSel   = rows.length;
+
+    // === Passo 2: Modal de confirmação ===
+    const m = el('div', { class: 'modal-backdrop' });
+    const card = el('div', { class: 'modal p-6 w-full max-w-2xl' });
+
+    const bloqHtml = totalBloq > 0 ? `
+      <div class="rem-bulk-blocked">
+        <div class="rem-bulk-blocked__title">
+          <i class="fas fa-ban"></i>
+          <span><b>${totalBloq}</b> remessa${totalBloq === 1 ? '' : 's'} não pode${totalBloq === 1 ? '' : 'm'} ser excluída${totalBloq === 1 ? '' : 's'}:</span>
+        </div>
+        <div class="rem-bulk-blocked__list">
+          ${bloqueadas.slice(0, 12).map(b => `
+            <div class="rem-bulk-blocked__row">
+              <span class="rem-bulk-blocked__ctrl">CTRL ${b.num_controle || '—'}</span>
+              <span class="rem-bulk-blocked__reason">${escapeHtml(b.motivo || 'Bloqueada')}</span>
+            </div>
+          `).join('')}
+          ${bloqueadas.length > 12 ? `
+            <div class="rem-bulk-blocked__more">
+              … e mais ${bloqueadas.length - 12} remessa${bloqueadas.length - 12 === 1 ? '' : 's'} bloqueada${bloqueadas.length - 12 === 1 ? '' : 's'}.
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    ` : '';
+
+    const permListPreview = permitidas.slice(0, 20).map(p => p.num_controle).filter(n => n > 0).join(', ');
+    const permListSuffix  = permitidas.length > 20 ? ` … (+${permitidas.length - 20})` : '';
+
+    card.innerHTML = `
+      <h3 class="text-lg font-semibold mb-2">
+        <i class="fas fa-trash-can mr-2 text-red-500"></i>
+        Exclusão em lote de remessas
+      </h3>
+
+      <div class="rem-bulk-summary">
+        <div class="rem-bulk-summary__row">
+          <span class="rem-bulk-summary__lbl">Selecionadas</span>
+          <span class="rem-bulk-summary__val">${totalSel}</span>
+        </div>
+        <div class="rem-bulk-summary__row rem-bulk-summary__row--ok">
+          <span class="rem-bulk-summary__lbl"><i class="fas fa-circle-check mr-1"></i>Serão excluídas</span>
+          <span class="rem-bulk-summary__val">${totalPerm}</span>
+        </div>
+        ${totalBloq > 0 ? `
+          <div class="rem-bulk-summary__row rem-bulk-summary__row--block">
+            <span class="rem-bulk-summary__lbl"><i class="fas fa-ban mr-1"></i>Bloqueadas</span>
+            <span class="rem-bulk-summary__val">${totalBloq}</span>
+          </div>
+        ` : ''}
+      </div>
+
+      ${totalPerm > 0 ? `
+        <div class="rem-bulk-permit">
+          <div class="rem-bulk-permit__title">
+            <i class="fas fa-list-check mr-1"></i>CTRLs a excluir:
+          </div>
+          <div class="rem-bulk-permit__list">${escapeHtml(permListPreview)}${permListSuffix}</div>
+        </div>
+      ` : ''}
+
+      ${bloqHtml}
+
+      ${totalPerm > 0 ? `
+        <div class="pay-confirm-banner mt-3">
+          <i class="fas fa-triangle-exclamation"></i>
+          <div>
+            Esta ação <b>não poderá ser desfeita</b>. As remessas excluídas
+            e seus retornos vinculados serão removidos permanentemente do banco.
+          </div>
+        </div>
+      ` : `
+        <div class="pay-confirm-banner mt-3" style="background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.32);color:#fecaca">
+          <i class="fas fa-circle-exclamation"></i>
+          <div>
+            <b>Nenhuma das remessas selecionadas pode ser excluída.</b>
+            Revise os bloqueios acima.
+          </div>
+        </div>
+      `}
+
+      <div class="flex justify-end gap-2 mt-4">
+        <button id="rbb-modal-cancel" class="btn btn-secondary">
+          <i class="fas fa-xmark mr-1"></i>Cancelar
+        </button>
+        <button id="rbb-modal-ok" class="btn btn-danger" ${totalPerm === 0 ? 'disabled' : ''}>
+          <i class="fas fa-check mr-1"></i>Confirmar Exclusão${totalPerm > 0 ? ` (${totalPerm})` : ''}
+        </button>
+      </div>
+    `;
+
+    m.appendChild(card);
+    document.body.appendChild(m);
+
+    document.getElementById('rbb-modal-cancel').onclick = () => m.remove();
+
+    const $ok = document.getElementById('rbb-modal-ok');
+    if (totalPerm === 0) return; // botão já disabled
+
+    $ok.onclick = async () => {
+      $ok.disabled = true;
+      $ok.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Excluindo…';
+
+      try {
+        // Envia apenas os IDs permitidos — backend revalida tudo
+        const idsPerm = permitidas.map(p => p.id_remessa);
+        const r = await api('post', '/terc/remessas/bulk-delete',
+          { ids: idsPerm, confirm: 'SIM' });
+        const d = r?.data || {};
+        m.remove();
+
+        const nExc = Number(d.total_excluidas) || 0;
+        const nRet = Number(d.retornos_apagados) || 0;
+        const nBlk = Number(d.total_bloqueadas) || 0;
+
+        let msg = `${nExc} remessa${nExc === 1 ? '' : 's'} excluída${nExc === 1 ? '' : 's'}`;
+        if (nRet > 0) msg += ` (${nRet} retorno${nRet === 1 ? '' : 's'} também)`;
+        if (nBlk > 0) msg += ` · ${nBlk} bloqueada${nBlk === 1 ? '' : 's'}`;
+        toast(msg, 'success');
+
+        // Limpa seleção + recarrega + invalida cache
+        clearRemBulkSelection();
+        cacheInvalidate();
+        load({ bypassCache: true });
+      } catch (e) {
+        $ok.disabled = false;
+        $ok.innerHTML = '<i class="fas fa-check mr-1"></i>Tentar novamente';
+        // toast de erro já mostrado pelo api()
+      }
+    };
+  }
+
   function rowHtml(r) {
     const qtdTotal = fmt.safeNum(r?.qtd_total);
     const qtdRet   = fmt.safeNum(r?.qtd_retornada_calc);
     const retClass = (qtdRet >= qtdTotal && qtdTotal > 0) ? 'text-emerald-600' : 'text-amber-600';
     return `
-      <tr class="remessas-row">
+      <tr class="remessas-row is-bulk-selectable">
+        <td class="rem-col-check no-print">
+          <input type="checkbox" class="rem-bulk-check"
+                 data-rem-id="${r.id_remessa}"
+                 data-rem-num="${r.num_controle ?? ''}"
+                 data-rem-qtd="${qtdTotal}"
+                 aria-label="Selecionar remessa ${r.num_controle ?? ''}" />
+        </td>
         <td class="text-right font-mono tabular-nums">${r?.num_controle ?? '—'}</td>
         <td>${escapeHtml(r?.num_op || '—')}</td>
         <td>${TERC.tercWithSetor(r?.nome_terc, r?.nome_setor)}</td>
@@ -2978,6 +3233,11 @@ ROUTES.terc_remessas = async (main) => {
       <div class="table-scroll" data-container="tableContentContainer">
         <table class="w-full text-sm remessas-table">
           <thead><tr>
+            <th class="rem-col-check no-print">
+              <input type="checkbox" id="rem-check-all"
+                     title="Selecionar / desmarcar todas da página"
+                     aria-label="Selecionar todas as remessas da página" />
+            </th>
             <th class="text-right">Ctrl</th><th>OP</th><th>Terceirizado</th>
             <th>Serviço</th><th>Referência</th><th>Cor</th>
             <th class="text-right">Qtd</th><th class="text-right">Retornada</th>
@@ -3001,6 +3261,25 @@ ROUTES.terc_remessas = async (main) => {
         if (act === 'print') return window.TERC_showPrintMenu(ev, id);
       });
     });
+
+    // === HOTFIX 0043 — Bindings de seleção em lote ===
+    const checkAll = $tbl.querySelector('#rem-check-all');
+    const rowChecks = $tbl.querySelectorAll('.rem-bulk-check');
+
+    if (checkAll) {
+      checkAll.addEventListener('change', () => {
+        rowChecks.forEach(cb => { cb.checked = checkAll.checked; });
+        updateRemBulkBar();
+      });
+    }
+    rowChecks.forEach(cb => {
+      cb.addEventListener('change', () => {
+        updateRemBulkBar();
+      });
+    });
+
+    // Reseta seleção / barra ao trocar de página/filtro
+    updateRemBulkBar();
   }
 
   // ----- Cache -----
@@ -3184,6 +3463,13 @@ ROUTES.terc_remessas = async (main) => {
   };
   // ----- Botões de ação (com loading state) -----
   $btnNova.onclick = () => TERC_openRemModal(null, () => { cacheInvalidate(); load({ bypassCache: true }); });
+
+  // === HOTFIX 0043 — Bindings da barra flutuante de seleção em lote ===
+  // Esses botões estão fora do #rem-tbl (no shell), então bindam apenas 1 vez.
+  const $rbbClear = document.getElementById('rbb-clear');
+  const $rbbDel   = document.getElementById('rbb-del');
+  if ($rbbClear) $rbbClear.onclick = () => clearRemBulkSelection();
+  if ($rbbDel)   $rbbDel.onclick   = () => bulkDeleteRem();
 
   $btnRomLote.onclick = async () => {
     if (!_lastRemessas.length) { toast('Filtre alguma remessa antes', 'warning'); return; }
