@@ -2363,6 +2363,91 @@ Por design, esses painéis sempre mostram a **realidade atual** independente do 
 
 ---
 
+## 🆕 HOTFIX 0046 (2026-06-03) — Sidebar com Scroll Interno (Logo fixo + Menus roláveis + Menu do usuário sempre visível)
+
+### Contexto
+Após acumular muitos módulos no sistema (Dashboard, Remessas, Retornos, Pagamentos, Relatórios, **Cadastros** com 8 itens, **Configurações** com 5 itens), em telas de notebook/tablet o menu do usuário (avatar, nome, perfil, sair) **era empurrado para fora da viewport** quando todos os grupos colapsáveis estavam expandidos. O usuário precisava rolar a sidebar inteira para alcançar "Sair" — UX ruim e fácil de perder.
+
+### Causa raiz
+1. A regra `.sidebar { overflow-y: auto }` aplicava scroll no **container raiz** da sidebar. Como `.sidebar-user-btn` é filho direto de `.sidebar`, ele também rolava junto com os menus.
+2. Pior: existia uma regra de reforço `.sidebar { overflow: visible }` (linha 2353 do `styles.css`, usada para garantir visibilidade do dropdown do usuário) que **anulava** o `overflow-y: auto` original, fazendo a sidebar inteira sair da viewport sem nenhum scroll — apenas o body rolava.
+3. O truque `margin-top: auto` no `.sidebar-user-btn` (que empurra o footer para baixo em flexbox) só funciona quando há **espaço sobrando**. Com muitos menus, o conteúdo ultrapassa a altura e o `margin-top: auto` perde efeito.
+
+### Solução implementada — Layout flexbox com 3 zonas
+Sem alteração no HTML render (já estava semanticamente correto), apenas refatoração cirúrgica do CSS:
+
+| Zona | Seletor | Comportamento |
+|------|---------|---------------|
+| **Topo (FIXO)** | `.sidebar-brand` | `flex-shrink: 0` — logo + tagline nunca encolhem nem somem |
+| **Meio (ROLÁVEL)** | `.sidebar-nav` | `flex: 1 1 auto; min-height: 0; overflow-y: auto` — única região com scroll interno |
+| **Rodapé (FIXO)** | `.sidebar-user-btn` | `flex-shrink: 0` — menu do usuário sempre acessível |
+| **Container raiz** | `.sidebar` | `height: 100vh; max-height: 100vh; overflow: hidden` — trava altura, bloqueia scroll do container |
+
+### Por que `min-height: 0` no `.sidebar-nav` foi crítico
+Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — o que significa que **não conseguem encolher abaixo do tamanho intrínseco do conteúdo**. Sem `min-height: 0` o `overflow-y: auto` nunca dispara porque o flex item simplesmente cresce, empurrando o footer pra fora. Esse é um dos "gotchas" mais clássicos de flexbox.
+
+### Detalhes técnicos
+- **Container raiz**: removido `overflow-y: auto`, substituído por `overflow: hidden` + altura travada em `100vh`/`max-height: 100vh`
+- **Regra global `overflow: visible`** (linha ~2353): `.sidebar` **removida da lista** — outras classes (`.main-layout`, `.content`, `#topbar`, `#main-content`, etc.) mantidas intactas
+- **Popover do usuário**: usa `position: fixed`, então **não é cortado** pelo `overflow: hidden` da sidebar (testado)
+- **Scrollbar moderna no `.sidebar-nav`**:
+  - WebKit: `6px` largura, thumb `#334155`, hover `#475569`
+  - Firefox: `scrollbar-width: thin`, `scrollbar-color: #334155 transparent`
+  - **Discreta**: invisível quando a sidebar não está em hover, aparece suavemente no hover
+- **Drawer mobile/tablet** (`@media max-width: 1023px`): mantém `height: 100vh` + `overflow: hidden` herdados — scroll interno do `.sidebar-nav` funciona idêntico em todas as resoluções
+- **Estado de colapso preservado**: `openState` dos grupos CADASTROS/CONFIGURAÇÕES (controlado por JS) não foi tocado — continua persistindo em localStorage
+- **Item ativo após scroll**: classe `.nav-item.active` mantém o gradiente lilás `#4F46E5→#7C3AED` mesmo quando rolado
+
+### Arquivos modificados
+- `public/static/styles.css` (+49 linhas, **HTML inalterado**)
+  - `.sidebar`: `overflow-y: auto` → `overflow: hidden`; adicionados `height: 100vh; max-height: 100vh`; removido `scroll-behavior` (movido p/ `.sidebar-nav`)
+  - `.sidebar-brand`: adicionado `flex-shrink: 0`
+  - `.sidebar-nav`: adicionados `min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth` + scrollbar moderna (WebKit + Firefox)
+  - `.sidebar-user-btn`: adicionado `flex-shrink: 0` (mantido `margin-top: auto` como fallback redundante)
+  - Removidas regras antigas `.sidebar::-webkit-scrollbar*` (substituídas por `.sidebar-nav::-webkit-scrollbar*`)
+  - Linha 2353: `.sidebar` removida da lista de `overflow: visible` (com comentário explicativo)
+  - `@media (max-width: 1023px)`: reforço de `height: 100vh; max-height: 100vh; overflow: hidden` no drawer
+- `src/index.tsx`: cache bust `v=53 → v=54` (linhas 247 e 281)
+
+### Critérios de aceitação atendidos
+- ✅ Logo permanece fixo no topo (não rola)
+- ✅ Apenas a região central (`.sidebar-nav`) rola
+- ✅ Menu do usuário (avatar/nome/perfil/sair) permanece sempre visível no rodapé
+- ✅ Nenhum item de navegação fica oculto — todos acessíveis via scroll interno
+- ✅ Funciona em **desktop** (largura 260px), **notebook** (idem), **tablet** (drawer 280px), **mobile** (drawer 84vw)
+- ✅ Mantém **100% das funcionalidades existentes**: collapse/expand de grupos (CADASTROS/CONFIGURAÇÕES) preservado, popover do usuário funcionando, hambúrguer mobile inalterado, item ativo destacado, todas as rotas SPA preservadas
+- ✅ Scrollbar discreta e moderna (6px, hover-revealed)
+
+### Métricas pós-deploy
+- **Build**: `dist/_worker.js 338.32 kB` (**idêntico ao HOTFIX 0045** — alteração 100% CSS-only, zero bytes no worker)
+- **CSS final**: 8538 linhas (+49 vs HOTFIX 0045)
+- **Deploy PROD**: `c589f4e8` em **https://corepro-confeccao.pages.dev**
+- **Smoke PROD**: Root 200 + CSS?v=54 200 + JS?v=54 200 + **11 markers `HOTFIX 0046`** confirmados no CSS servido + cache bust `v=54` propagado no HTML
+- **No-regression smoke**: endpoints `/api/terc/remessas/bulk-delete`, `/api/terc/ciclo-atual`, `/api/terc/ciclos`, `/api/terc/dashboard?periodo=ciclo` retornam **401** (auth exigida — comportamento intacto)
+- **Multi-tenant**: nenhuma alteração de backend/banco — comportamento idêntico para todas as empresas (HOTFIX 100% frontend visual)
+
+### Garantias
+- ✅ **Zero alteração no HTML render** da sidebar — estrutura `<aside><a.brand><nav><button.user-btn></aside>` mantida exatamente como estava
+- ✅ **Zero alteração no JavaScript** — `app.js` não tocado (collapse/expand state, popover, hambúrguer, rotas SPA, avatar refresh — todos intactos)
+- ✅ **Zero alteração no backend** — `_worker.js` bytes idênticos pre/pós-hotfix
+- ✅ **Reversível**: basta reverter as ~49 linhas em `styles.css` para voltar ao comportamento anterior
+- ✅ **Dark mode**: cores hardcoded da sidebar (já era dark-only por design) permanecem idênticas
+- ✅ **Multi-tenant**: zero impacto — alteração puramente visual no shell da aplicação
+
+### Padrão Flexbox 3-zonas (referência para futuras alterações)
+```css
+.sidebar {
+  height: 100vh; max-height: 100vh;
+  display: flex; flex-direction: column;
+  overflow: hidden;          /* container raiz NUNCA rola */
+}
+.sidebar-brand   { flex-shrink: 0; }                              /* topo fixo */
+.sidebar-nav     { flex: 1 1 auto; min-height: 0; overflow-y: auto; } /* meio rolável */
+.sidebar-user-btn{ flex-shrink: 0; }                              /* rodapé fixo */
+```
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -2375,6 +2460,7 @@ Por design, esses painéis sempre mostram a **realidade atual** independente do 
 - [x] ~~Módulo financeiro / pagamento de terceirizados (sem gestão de "quando pagou / como / comprovante")~~ ✅ **Implementado HOTFIX 0042** (módulo Financeiro → Pagamentos completo: checkbox + painel financeiro por terceirizado + barra flutuante + modal de pagamento em lote + 7 formas + comprovante PDF (jsPDF + autoTable) + histórico paginado + estorno admin-only + auditoria com IP + 2 novas tabelas multi-tenant + backward-compat com `dt_pagamento`)
 - [x] ~~Exclusão em lote de remessas (até hoje só dava 1 por vez)~~ ✅ **Implementado HOTFIX 0043** (checkbox + check-all + barra flutuante + modal com pre-check + validações de bloqueio: status_fin='Pago' / retorno pago / cross-tenant; cascata hard-delete + auditoria 2 entradas + multi-tenant scoping + lixeira individual 100% intacta) + ✅ **Corrigido HOTFIX 0044** (causa raiz: limite de ~100 parâmetros bindados por statement do D1 — agora chunking de 80 IDs + `DB.batch()` atômico + DELETEs defensivos para `terc_consertos`/`terc_alertas` + per-chunk error capture + modal de resultado rico com excluídas/bloqueadas/falhadas + handler global expõe `hint` técnico em PROD)
 - [x] ~~Dashboard mostrando dados acumulados em vez do ciclo atual de produção~~ ✅ **Implementado HOTFIX 0045** (conceito de ciclo de produção com fechamento manual + nova tabela `terc_ciclos_producao` com snapshot + 3 endpoints novos `/terc/ciclo-atual`, `/terc/ciclo/fechar`, `/terc/ciclos` + dashboard aceita `?periodo=ciclo|mes|30d|custom` + card CICLO ATUAL no topo + seletor de período persistido em localStorage + modal "Fechar Ciclo" com observação + modal "Ciclos Anteriores" com histórico paginado + painéis "agora" mantêm visão real independente do filtro + multi-tenant isolado + zero alteração em dados históricos)
+- [x] ~~Sidebar empurrando o menu do usuário para fora da viewport quando havia muitos módulos expandidos~~ ✅ **Implementado HOTFIX 0046** (refatoração CSS-only com flexbox 3-zonas: logo fixo no topo via `flex-shrink:0`, área de menus rolável via `flex:1 + min-height:0 + overflow-y:auto`, menu do usuário fixo no rodapé via `flex-shrink:0`, container raiz com `height:100vh + overflow:hidden`, scrollbar moderna 6px hover-revealed; **HTML 100% intacto**, **JS 100% intacto**, `_worker.js` 338.32 kB **idêntico**; funciona em desktop/notebook/tablet/mobile)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

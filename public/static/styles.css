@@ -317,6 +317,16 @@ label {
 /* ============================================================
  * SIDEBAR — FIXA EM DARK (independente do tema global)
  * Cores hardcoded — não usa tokens light/dark
+ * ----------------------------------------------------------------
+ * HOTFIX 0046 (2026-06): Layout com 3 zonas (header/menu/footer).
+ *   - .sidebar          → flex column, height 100vh, overflow hidden
+ *   - .sidebar-brand    → flex-shrink:0 (logo fixo no topo)
+ *   - .sidebar-nav      → flex:1 + overflow-y:auto (área rolável)
+ *   - .sidebar-user-btn → flex-shrink:0 (menu usuário fixo no rodapé)
+ *
+ *   Antes: scroll era aplicado no .sidebar inteiro, empurrando o
+ *   menu do usuário para fora da viewport quando havia muitos itens.
+ *   Agora apenas a região do meio (.sidebar-nav) rola.
  * ============================================================ */
 .sidebar {
   width: 260px;
@@ -328,23 +338,17 @@ label {
   background: #0F172A;
   color: #CBD5E1;
   border-right: 1px solid #1E293B;
-  overflow-y: auto;
-  scroll-behavior: smooth;
+  /* HOTFIX 0046: trava altura e bloqueia scroll do container raiz */
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
   transition: all 0.3s ease;
   color-scheme: dark;
 }
 
-/* Scrollbar interna da sidebar — sempre escura */
-.sidebar::-webkit-scrollbar { width: 8px; }
-.sidebar::-webkit-scrollbar-track { background: transparent; }
-.sidebar::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 8px;
-}
-.sidebar::-webkit-scrollbar-thumb:hover { background: #475569; }
-
-/* Header da sidebar (logo + tagline) — sempre dark */
+/* Header da sidebar (logo + tagline) — sempre dark — FIXO no topo */
 .sidebar-brand {
+  flex-shrink: 0; /* HOTFIX 0046: não deixa o logo encolher/sumir */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -372,12 +376,43 @@ label {
   opacity: 0.85;
 }
 
-/* Container das seções de menu */
+/* Container das seções de menu — ÁREA ROLÁVEL (HOTFIX 0046) */
 .sidebar-nav {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;          /* HOTFIX 0046: necessário em flexbox p/ permitir scroll */
+  overflow-y: auto;       /* HOTFIX 0046: scroll interno apenas nesta região */
+  overflow-x: hidden;
+  scroll-behavior: smooth;
   padding: 4px 0 16px;
+
+  /* Scrollbar moderna — Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+
+/* Scrollbar moderna — WebKit (Chrome, Edge, Safari) */
+.sidebar-nav::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+.sidebar-nav::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+/* Scrollbar só aparece em hover da sidebar (mais discreta) */
+.sidebar:not(:hover) .sidebar-nav::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.sidebar:hover .sidebar-nav::-webkit-scrollbar-thumb {
+  background: #334155;
 }
 
 /* Cada grupo de menu */
@@ -1981,15 +2016,22 @@ canvas { transition: filter 0.3s; }
  * BREAKPOINT TABLET (≤ 1024px) — sidebar recolhível como drawer
  * ============================================================ */
 @media (max-width: 1023px) {
-  /* Sidebar vira drawer fixo deslizante */
+  /* Sidebar vira drawer fixo deslizante.
+     HOTFIX 0046: mantém height:100vh + overflow:hidden + layout flex
+     herdados, garantindo que o scroll interno do .sidebar-nav funcione
+     também em tablets/mobile com muitos menus. */
   .sidebar {
     position: fixed;
     top: 0; left: 0; bottom: 0;
     width: 280px;
+    height: 100vh;
+    max-height: 100vh;
     z-index: 1000;
     transform: translateX(-100%);
     transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
     box-shadow: 4px 0 20px rgba(0,0,0,0.35);
+    /* overflow:hidden já vem da regra base — apenas reforço aqui */
+    overflow: hidden;
   }
   .sidebar.open { transform: translateX(0); }
 
@@ -2348,9 +2390,13 @@ input:focus, select:focus, textarea:focus {
   pointer-events: auto !important;
 }
 /* Reforço: containers principais NÃO devem cortar o dropdown
-   (position:fixed escapa do flow, mas garante visibility se houver bugs) */
+   (position:fixed escapa do flow, mas garante visibility se houver bugs)
+   HOTFIX 0046: .sidebar REMOVIDO desta lista — agora precisa de
+   overflow:hidden no container raiz para que o scroll fique restrito
+   ao .sidebar-nav (área central) e o menu do usuário permaneça fixo
+   no rodapé. O popover do usuário usa position:fixed, então não é
+   cortado pelo overflow:hidden da sidebar. */
 .main-layout,
-.sidebar,
 .content,
 #topbar,
 #main-content,
@@ -6142,6 +6188,8 @@ tr.is-bulk-selectable:has(.rem-bulk-check:checked) td {
 }
 
 /* ---------- BOTÃO DO USUÁRIO NA SIDEBAR (rodapé) ---------- */
+/* HOTFIX 0046: flex-shrink:0 garante que o menu do usuário NUNCA é
+   empurrado para fora da viewport, mesmo com muitos itens de menu. */
 .sidebar-user-btn {
   /* Reset de button */
   appearance: none;
@@ -6154,8 +6202,9 @@ tr.is-bulk-selectable:has(.rem-bulk-check:checked) td {
   cursor: pointer;
   width: 100%;
 
-  /* Layout */
-  margin-top: auto;
+  /* Layout — FIXO no rodapé (HOTFIX 0046) */
+  flex-shrink: 0;          /* HOTFIX 0046: nunca encolhe nem some */
+  margin-top: auto;        /* fallback — agora redundante porque .sidebar-nav consome o espaço */
   display: flex;
   align-items: center;
   gap: 10px;
