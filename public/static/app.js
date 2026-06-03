@@ -2439,11 +2439,59 @@ ROUTES.dashboard = async (main) => {
   const hoje = dayjs().format('YYYY-MM-DD');
   const de = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
 
+  // HOTFIX 0045 — Período padrão = "ciclo" (ciclo atual de produção).
+  // Salvamos o último período usado por usuário/empresa em localStorage
+  // para não perder a seleção entre navegações.
+  const LS_KEY = 'dashboard.periodo';
+  const periodoSalvo = (typeof localStorage !== 'undefined' && localStorage.getItem(LS_KEY)) || 'ciclo';
+
   main.innerHTML = `
+    <!-- HOTFIX 0045 — Card CICLO ATUAL -->
+    <div id="card-ciclo" class="dash-ciclo-card mb-4">
+      <div class="dash-ciclo-card__icon"><i class="fas fa-calendar-check"></i></div>
+      <div class="dash-ciclo-card__body">
+        <div class="dash-ciclo-card__label">📅 Ciclo Atual</div>
+        <div id="ciclo-titulo" class="dash-ciclo-card__title">Carregando…</div>
+        <div id="ciclo-subtitulo" class="dash-ciclo-card__sub">—</div>
+      </div>
+      <div class="dash-ciclo-card__actions">
+        <button id="btn-fechar-ciclo" class="btn btn-warning btn-sm" title="Fechar ciclo atual e iniciar novo">
+          <i class="fas fa-flag-checkered mr-1"></i>Fechar Ciclo
+        </button>
+        <button id="btn-ver-ciclos" class="btn btn-secondary btn-sm" title="Ver ciclos anteriores">
+          <i class="fas fa-clock-rotate-left mr-1"></i>Anteriores
+        </button>
+      </div>
+    </div>
+
     <div class="card p-4 mb-4">
       <div class="flex flex-wrap items-end gap-3">
-        <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
-        <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+        <!-- HOTFIX 0045 — Seletor de período -->
+        <div class="dash-periodo-seletor" role="radiogroup" aria-label="Selecionar período">
+          <label class="dash-periodo-opt ${periodoSalvo === 'ciclo' ? 'is-active' : ''}">
+            <input type="radio" name="periodo" value="ciclo" ${periodoSalvo === 'ciclo' ? 'checked' : ''} />
+            <span><i class="fas fa-calendar-check mr-1"></i>Ciclo Atual</span>
+          </label>
+          <label class="dash-periodo-opt ${periodoSalvo === 'mes' ? 'is-active' : ''}">
+            <input type="radio" name="periodo" value="mes" ${periodoSalvo === 'mes' ? 'checked' : ''} />
+            <span><i class="fas fa-calendar-days mr-1"></i>Mês Atual</span>
+          </label>
+          <label class="dash-periodo-opt ${periodoSalvo === '30d' ? 'is-active' : ''}">
+            <input type="radio" name="periodo" value="30d" ${periodoSalvo === '30d' ? 'checked' : ''} />
+            <span><i class="fas fa-clock-rotate-left mr-1"></i>Últimos 30 dias</span>
+          </label>
+          <label class="dash-periodo-opt ${periodoSalvo === 'custom' ? 'is-active' : ''}">
+            <input type="radio" name="periodo" value="custom" ${periodoSalvo === 'custom' ? 'checked' : ''} />
+            <span><i class="fas fa-calendar mr-1"></i>Personalizado</span>
+          </label>
+        </div>
+
+        <!-- Campos de data — só visíveis em "Personalizado" -->
+        <div id="custom-dates" class="flex flex-wrap items-end gap-3" style="display:${periodoSalvo === 'custom' ? 'flex' : 'none'}">
+          <div><label>De</label><input type="date" id="f-de" value="${de}" /></div>
+          <div><label>Até</label><input type="date" id="f-ate" value="${hoje}" /></div>
+        </div>
+
         <button id="btn-filtrar" class="btn btn-primary"><i class="fas fa-filter mr-1"></i>Atualizar</button>
         <div class="flex-1"></div>
         <a href="#terc_remessas" class="btn btn-secondary"><i class="fas fa-truck-fast mr-1"></i>Ver remessas</a>
@@ -2472,13 +2520,25 @@ ROUTES.dashboard = async (main) => {
   const FALLBACK_EMPTY = '<p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-circle-info mr-1"></i>Sem dados disponíveis</p>';
   const FALLBACK_ERROR = (msg) => `<p class="text-amber-600 text-sm py-4 text-center"><i class="fas fa-triangle-exclamation mr-1"></i>${msg || 'Falha ao carregar'}</p>`;
 
+  // HOTFIX 0045 — descobre qual período está selecionado nos radios
+  function getPeriodoSelecionado() {
+    const r = document.querySelector('input[name="periodo"]:checked');
+    return r?.value || 'ciclo';
+  }
+
   async function load() {
-    const de = ($('#f-de')?.value) || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
-    const ate = ($('#f-ate')?.value) || dayjs().format('YYYY-MM-DD');
+    // HOTFIX 0045 — monta URL conforme o período escolhido
+    const periodo = getPeriodoSelecionado();
+    let url = '/terc/dashboard?periodo=' + encodeURIComponent(periodo);
+    if (periodo === 'custom') {
+      const de = ($('#f-de')?.value) || dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+      const ate = ($('#f-ate')?.value) || dayjs().format('YYYY-MM-DD');
+      url += `&de=${de}&ate=${ate}`;
+    }
 
     let d = {};
     try {
-      const r = await api('get', `/terc/dashboard?de=${de}&ate=${ate}`, null, { silent: true });
+      const r = await api('get', url, null, { silent: true });
       d = (r && r.data) ? r.data : {};
     } catch (e) {
       console.error('[dashboard] erro ao buscar /terc/dashboard', e);
@@ -2487,6 +2547,34 @@ ROUTES.dashboard = async (main) => {
       if ($('#kpis')) $('#kpis').innerHTML = `<div class="col-span-full">${FALLBACK_ERROR(errMsg)}</div>`;
       d = {};
     }
+
+    // HOTFIX 0045 — atualiza o card CICLO ATUAL com a janela resolvida pelo backend
+    try {
+      const per = d?.periodo || {};
+      const ciclo = per.ciclo;
+      const tit = $('#ciclo-titulo');
+      const sub = $('#ciclo-subtitulo');
+      const fmtDt = (iso) => {
+        if (!iso) return '—';
+        const d2 = dayjs(iso);
+        return d2.isValid() ? d2.format('DD/MM/YYYY') : iso;
+      };
+      if (tit && sub) {
+        if (per.tipo === 'ciclo' && ciclo) {
+          tit.textContent = ciclo.label || `${fmtDt(ciclo.dt_inicio)} → Hoje`;
+          const partes = [`${fmtDt(ciclo.dt_inicio)} → ${fmtDt(ciclo.dt_fim)}`, `${ciclo.dias || 0} dia(s)`];
+          if (ciclo.nunca_fechou) partes.push('<span class="text-amber-500"><i class="fas fa-info-circle mr-1"></i>nunca fechado</span>');
+          sub.innerHTML = partes.join(' · ');
+        } else {
+          const labels = { mes: 'Mês atual', '30d': 'Últimos 30 dias', custom: 'Período personalizado' };
+          tit.textContent = labels[per.tipo] || 'Período selecionado';
+          sub.textContent = `${fmtDt(per.de)} → ${fmtDt(per.ate)}`;
+        }
+      }
+      // Mostra/esconde botão "Fechar Ciclo" — só faz sentido em modo ciclo
+      const btnF = $('#btn-fechar-ciclo');
+      if (btnF) btnF.style.display = (per.tipo === 'ciclo') ? '' : 'none';
+    } catch (e) { console.error('[dashboard] ciclo card', e); }
 
     const k = (d && typeof d === 'object' && d.kpis) ? d.kpis : {};
     const kr = (k && typeof k === 'object' && k.remessas) ? k.remessas : {};
@@ -2616,8 +2704,212 @@ ROUTES.dashboard = async (main) => {
     } catch (e) { console.error('[dashboard] atrasadas', e); if ($('#atrasadas')) $('#atrasadas').innerHTML = FALLBACK_ERROR(); }
   }
   if ($('#btn-filtrar')) $('#btn-filtrar').onclick = load;
+
+  // HOTFIX 0045 — radios de período: ao trocar, recarrega e persiste
+  document.querySelectorAll('input[name="periodo"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const sel = getPeriodoSelecionado();
+      try { localStorage.setItem(LS_KEY, sel); } catch {}
+      // Atualiza visual do radio "ativo"
+      document.querySelectorAll('.dash-periodo-opt').forEach(opt => {
+        opt.classList.toggle('is-active', opt.querySelector('input')?.checked);
+      });
+      // Mostra/esconde campos de data customizada
+      const cd = $('#custom-dates');
+      if (cd) cd.style.display = (sel === 'custom') ? 'flex' : 'none';
+      // Recarrega imediatamente (não precisa clicar "Atualizar")
+      load();
+    });
+  });
+
+  // HOTFIX 0045 — botão Fechar Ciclo
+  if ($('#btn-fechar-ciclo')) {
+    $('#btn-fechar-ciclo').onclick = () => abrirModalFecharCiclo(load);
+  }
+
+  // HOTFIX 0045 — botão Ver Anteriores
+  if ($('#btn-ver-ciclos')) {
+    $('#btn-ver-ciclos').onclick = () => abrirModalCiclosAnteriores();
+  }
+
   try { await load(); } catch (e) { console.error('[dashboard] load top‑level', e); }
 };
+
+/**
+ * HOTFIX 0045 — Modal de confirmação para FECHAR CICLO ATUAL
+ * Mostra o resumo do ciclo (período, totais), pede observação opcional
+ * e cria o registro de fechamento via POST /terc/ciclo/fechar.
+ */
+async function abrirModalFecharCiclo(onSuccess) {
+  // Busca o ciclo atual para mostrar o resumo
+  let ciclo = null;
+  try {
+    const r = await api('get', '/terc/ciclo-atual', null, { silent: true });
+    ciclo = r?.data || null;
+  } catch (e) {
+    toast('Não foi possível carregar o ciclo atual.', 'error');
+    return;
+  }
+  if (!ciclo) {
+    toast('Ciclo atual indisponível.', 'error');
+    return;
+  }
+
+  const fmtDt = (iso) => {
+    if (!iso) return '—';
+    const d2 = dayjs(iso);
+    return d2.isValid() ? d2.format('DD/MM/YYYY') : iso;
+  };
+
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-lg' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3">
+      <i class="fas fa-flag-checkered mr-2 text-amber-500"></i>Fechar Ciclo Atual
+    </h3>
+    <div class="rem-bulk-summary mb-3">
+      <div class="rem-bulk-summary__row">
+        <span class="rem-bulk-summary__lbl">Período</span>
+        <span class="rem-bulk-summary__val">${fmtDt(ciclo.dt_inicio)} → ${fmtDt(ciclo.dt_fim)}</span>
+      </div>
+      <div class="rem-bulk-summary__row">
+        <span class="rem-bulk-summary__lbl">Dias no ciclo</span>
+        <span class="rem-bulk-summary__val">${ciclo.dias || 0}</span>
+      </div>
+      <div class="rem-bulk-summary__row rem-bulk-summary__row--ok">
+        <span class="rem-bulk-summary__lbl"><i class="fas fa-truck-fast mr-1"></i>Remessas no ciclo</span>
+        <span class="rem-bulk-summary__val">${fmt.int(ciclo.kpis?.remessas || 0)}</span>
+      </div>
+      <div class="rem-bulk-summary__row">
+        <span class="rem-bulk-summary__lbl"><i class="fas fa-boxes mr-1"></i>Peças enviadas</span>
+        <span class="rem-bulk-summary__val">${fmt.int(ciclo.kpis?.pecas || 0)}</span>
+      </div>
+      <div class="rem-bulk-summary__row">
+        <span class="rem-bulk-summary__lbl"><i class="fas fa-dollar-sign mr-1"></i>Valor total</span>
+        <span class="rem-bulk-summary__val">${TERC.fmtBRL(fmt.safeNum(ciclo.kpis?.valor || 0))}</span>
+      </div>
+    </div>
+
+    <label class="block mb-3">
+      <span class="text-sm text-slate-600 mb-1 inline-block">Observação (opcional)</span>
+      <textarea id="ciclo-obs" rows="2" maxlength="500" class="w-full"
+        placeholder="Ex.: fechamento mensal, lote especial, etc."></textarea>
+    </label>
+
+    <div class="pay-confirm-banner mb-3">
+      <i class="fas fa-circle-info"></i>
+      <div>
+        Ao fechar, os indicadores do dashboard serão <b>zerados</b> e um novo ciclo
+        começará a partir de amanhã. Os dados de remessas e retornos
+        <b>NÃO serão alterados</b> — apenas a janela do dashboard muda.
+      </div>
+    </div>
+
+    <div class="flex justify-end gap-2">
+      <button id="ciclo-cancel" class="btn btn-secondary"><i class="fas fa-xmark mr-1"></i>Cancelar</button>
+      <button id="ciclo-ok" class="btn btn-warning"><i class="fas fa-flag-checkered mr-1"></i>Fechar Ciclo</button>
+    </div>
+  `;
+  m.appendChild(card);
+  document.body.appendChild(m);
+
+  document.getElementById('ciclo-cancel').onclick = () => m.remove();
+  document.getElementById('ciclo-ok').onclick = async () => {
+    const obs = (document.getElementById('ciclo-obs')?.value || '').trim();
+    const $ok = document.getElementById('ciclo-ok');
+    $ok.disabled = true;
+    $ok.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Fechando…';
+    try {
+      const r = await api('post', '/terc/ciclo/fechar',
+        { observacao: obs }, { silent: true });
+      const d = r?.data || {};
+      m.remove();
+      toast(`Ciclo encerrado: ${d.snapshot?.remessas || 0} remessas, ${d.snapshot?.pecas_enviadas || 0} peças.`, 'success');
+      if (typeof onSuccess === 'function') onSuccess();
+    } catch (e) {
+      $ok.disabled = false;
+      $ok.innerHTML = '<i class="fas fa-flag-checkered mr-1"></i>Tentar novamente';
+      const msg = e?.response?.data?.error || e?.message || 'Erro ao fechar ciclo';
+      toast(msg, 'error');
+    }
+  };
+}
+
+/**
+ * HOTFIX 0045 — Modal de listagem de CICLOS ANTERIORES
+ * Lista paginada (20/página) com snapshot resumido de cada ciclo fechado.
+ */
+async function abrirModalCiclosAnteriores() {
+  const m = el('div', { class: 'modal-backdrop' });
+  const card = el('div', { class: 'modal p-6 w-full max-w-3xl' });
+  card.innerHTML = `
+    <h3 class="text-lg font-semibold mb-3">
+      <i class="fas fa-clock-rotate-left mr-2 text-brand"></i>Ciclos Anteriores
+    </h3>
+    <div id="ciclos-lista" class="dash-ciclos-anteriores">
+      <p class="text-slate-500 text-sm py-4 text-center"><i class="fas fa-spinner fa-spin mr-1"></i>Carregando…</p>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="ciclos-close" class="btn btn-primary"><i class="fas fa-xmark mr-1"></i>Fechar</button>
+    </div>
+  `;
+  m.appendChild(card);
+  document.body.appendChild(m);
+  document.getElementById('ciclos-close').onclick = () => m.remove();
+
+  const fmtDt = (iso) => {
+    if (!iso) return '—';
+    const d2 = dayjs(iso);
+    return d2.isValid() ? d2.format('DD/MM/YYYY') : iso;
+  };
+  const fmtDtH = (iso) => {
+    if (!iso) return '—';
+    const d2 = dayjs(iso);
+    return d2.isValid() ? d2.format('DD/MM/YYYY HH:mm') : iso;
+  };
+
+  try {
+    const r = await api('get', '/terc/ciclos?page=1&size=50', null, { silent: true });
+    const items = (r?.data) || [];
+    const total = r?.total || 0;
+    const $list = document.getElementById('ciclos-lista');
+    if (!$list) return;
+    if (items.length === 0) {
+      $list.innerHTML = '<p class="text-slate-500 text-sm py-6 text-center"><i class="fas fa-circle-info mr-1"></i>Nenhum ciclo foi fechado ainda. Use "Fechar Ciclo" para iniciar o histórico.</p>';
+      return;
+    }
+    $list.innerHTML = `
+      <div class="text-xs text-slate-500 mb-2">Mostrando ${items.length} de ${total} ciclo(s) fechado(s)</div>
+      <div class="dash-ciclos-anteriores__list">
+        ${items.map(it => `
+          <div class="dash-ciclos-anteriores__item">
+            <div class="dash-ciclos-anteriores__head">
+              <span class="dash-ciclos-anteriores__period">
+                <i class="fas fa-calendar-check mr-1"></i>
+                ${fmtDt(it.dt_inicio)} → ${fmtDt(it.dt_fim)}
+              </span>
+              <span class="dash-ciclos-anteriores__date">
+                Fechado em ${fmtDtH(it.dt_fechamento)} por <b>${escapeHtml(it.fechado_por)}</b>
+              </span>
+            </div>
+            <div class="dash-ciclos-anteriores__kpis">
+              <span><i class="fas fa-truck-fast mr-1 text-brand"></i><b>${fmt.int(it.total_remessas)}</b> remessas</span>
+              <span><i class="fas fa-boxes mr-1 text-indigo-500"></i><b>${fmt.int(it.total_pecas)}</b> peças</span>
+              <span><i class="fas fa-dollar-sign mr-1 text-emerald-500"></i><b>${TERC.fmtBRL(it.valor_total)}</b></span>
+              ${(it.snapshot?.em_aberto != null) ? `<span><i class="fas fa-clock mr-1 text-amber-500"></i>${fmt.int(it.snapshot.em_aberto)} em aberto</span>` : ''}
+              ${(it.snapshot?.concluidas != null) ? `<span><i class="fas fa-check-circle mr-1 text-emerald-500"></i>${fmt.int(it.snapshot.concluidas)} concluídas</span>` : ''}
+              ${(it.snapshot?.atrasadas != null && it.snapshot.atrasadas > 0) ? `<span><i class="fas fa-triangle-exclamation mr-1 text-red-500"></i>${fmt.int(it.snapshot.atrasadas)} atrasadas</span>` : ''}
+            </div>
+            ${it.observacao ? `<div class="dash-ciclos-anteriores__obs"><i class="fas fa-comment-dots mr-1"></i>${escapeHtml(it.observacao)}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch (e) {
+    const $list = document.getElementById('ciclos-lista');
+    if ($list) $list.innerHTML = '<p class="text-red-500 text-sm py-4 text-center"><i class="fas fa-triangle-exclamation mr-1"></i>Falha ao carregar ciclos.</p>';
+  }
+}
 
 /* ---------- RESUMO de Terceirizações ---------- */
 ROUTES.terc_terceirizados = async (main) => {

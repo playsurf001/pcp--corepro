@@ -3633,14 +3633,344 @@ app.get('/terc/resumo', async (c) => {
 });
 
 /* =================================================================
+ * HOTFIX 0045 — CICLOS DE PRODUÇÃO (Competências)
+ *
+ * Conceito:
+ *  - "Ciclo atual" = janela entre o último fechamento (ou primeiro
+ *    dia do mês atual se nunca fechou) e a data de hoje.
+ *  - Cada fechamento gera 1 registro em terc_ciclos_producao com
+ *    snapshot dos KPIs no momento. Zero alteração em remessas/retornos.
+ *
+ * Multi-tenant: TODAS as queries filtram por id_empresa.
+ * ================================================================= */
+
+/** Retorna YYYY-MM-DD de hoje (UTC — alinhado com o resto do sistema). */
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Retorna YYYY-MM-DD do primeiro dia do mês atual. */
+function firstDayOfCurrentMonth(): string {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
+/** Soma 1 dia a uma data YYYY-MM-DD. */
+function addDaysISO(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Resolve o ciclo ATUAL (aberto) de uma empresa.
+ *
+ * Regra:
+ *  - Se existe pelo menos 1 fechamento → ciclo_atual.dt_inicio =
+ *    dia seguinte ao último dt_fim fechado.
+ *  - Se NUNCA fechou → ciclo_atual.dt_inicio = primeiro dia do mês corrente.
+ *  - dt_fim = hoje (sempre — o ciclo aberto vai até "agora").
+ *
+ * Retorna SEMPRE um objeto válido (mesmo p/ tenant novo sem fechamentos).
+ */
+async function resolveCicloAtual(db: D1Database, id_empresa: number) {
+  let ultimo: any = null;
+  try {
+    ultimo = await db.prepare(
+      `SELECT id_ciclo, dt_inicio, dt_fim, dt_fechamento, fechado_por
+         FROM terc_ciclos_producao
+        WHERE id_empresa = ?
+        ORDER BY dt_fim DESC, id_ciclo DESC
+        LIMIT 1`
+    ).bind(id_empresa).first<any>();
+  } catch (e) {
+    // Tabela pode não existir ainda — fallback silencioso para mês atual.
+    ultimo = null;
+  }
+
+  const dt_inicio = ultimo?.dt_fim
+    ? addDaysISO(String(ultimo.dt_fim), 1)
+    : firstDayOfCurrentMonth();
+  const dt_fim = todayISO();
+
+  // Garante coerência: se dt_inicio > dt_fim (último fechamento foi hoje
+  // ou no futuro por algum motivo), trava em hoje (ciclo "vazio").
+  const dt_inicio_safe = dt_inicio > dt_fim ? dt_fim : dt_inicio;
+
+  // Calcula dias decorridos
+  const [iy, im, id] = dt_inicio_safe.split('-').map(Number);
+  const [fy, fm, fd] = dt_fim.split('-').map(Number);
+  const diasDecorridos = Math.max(0, Math.round(
+    (Date.UTC(fy, fm - 1, fd) - Date.UTC(iy, im - 1, id)) / 86400000
+  )) + 1;
+
+  // Label amigável: "Junho/2026" se o ciclo todo cai num único mês,
+  // senão "01/06/2026 — Hoje".
+  const mesIni = dt_inicio_safe.slice(0, 7);
+  const mesFim = dt_fim.slice(0, 7);
+  const meses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const label = mesIni === mesFim
+    ? `Competência ${meses[parseInt(mesFim.slice(5, 7), 10) - 1]}/${mesFim.slice(0, 4)}`
+    : `Ciclo ${dt_inicio_safe.split('-').reverse().join('/')} — Hoje`;
+
+  return {
+    dt_inicio: dt_inicio_safe,
+    dt_fim,
+    dias: diasDecorridos,
+    label,
+    nunca_fechou: !ultimo,
+    ultimo_fechamento: ultimo ? {
+      id_ciclo: Number(ultimo.id_ciclo),
+      dt_inicio: String(ultimo.dt_inicio),
+      dt_fim: String(ultimo.dt_fim),
+      dt_fechamento: String(ultimo.dt_fechamento),
+      fechado_por: String(ultimo.fechado_por),
+    } : null,
+  };
+}
+
+/**
+ * Resolve a janela de período do dashboard com base no parâmetro `periodo`.
+ *
+ * Aceita:
+ *  - 'ciclo' (default) → ciclo atual
+ *  - 'mes'             → primeiro dia do mês atual até hoje
+ *  - '30d'             → hoje-30d até hoje
+ *  - 'custom'          → usa q.de / q.ate (precisa de ambos)
+ *
+ * Retorna { de, ate, periodo_resolvido } — sempre datas YYYY-MM-DD válidas.
+ *
+ * COMPATIBILIDADE: se o cliente NÃO passar periodo MAS passar de+ate,
+ * mantemos o comportamento antigo (custom implícito). Isso preserva
+ * qualquer integração antiga que já chamava /terc/dashboard?de=&ate=.
+ */
+async function resolvePeriodo(
+  db: D1Database,
+  id_empresa: number,
+  q: Record<string, string>
+): Promise<{ de: string; ate: string; periodo: string; ciclo?: any }> {
+  const periodo = String(q.periodo || '').toLowerCase();
+
+  // Modo CUSTOM (explícito ou implícito por compatibilidade)
+  if (periodo === 'custom' || (!periodo && (q.de || q.ate))) {
+    return {
+      de: q.de || addDaysISO(todayISO(), -30),
+      ate: q.ate || todayISO(),
+      periodo: 'custom',
+    };
+  }
+
+  // Modo MÊS ATUAL
+  if (periodo === 'mes' || periodo === 'mes_atual') {
+    return {
+      de: firstDayOfCurrentMonth(),
+      ate: todayISO(),
+      periodo: 'mes',
+    };
+  }
+
+  // Modo ÚLTIMOS 30 DIAS
+  if (periodo === '30d' || periodo === 'ultimos_30d') {
+    return {
+      de: addDaysISO(todayISO(), -30),
+      ate: todayISO(),
+      periodo: '30d',
+    };
+  }
+
+  // Default: CICLO ATUAL
+  const ciclo = await resolveCicloAtual(db, id_empresa);
+  return {
+    de: ciclo.dt_inicio,
+    ate: ciclo.dt_fim,
+    periodo: 'ciclo',
+    ciclo,
+  };
+}
+
+/* -----------------------------------------------------------------
+ * GET /terc/ciclo-atual
+ *  Devolve o ciclo aberto (sem fechá-lo).
+ * ----------------------------------------------------------------- */
+app.get('/terc/ciclo-atual', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const ciclo = await resolveCicloAtual(c.env.DB, id_empresa);
+
+  // KPIs rápidos do ciclo (apenas o essencial para o card)
+  let totRem = 0, totPecas = 0, totValor = 0;
+  try {
+    const r = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(qtd_total), 0) AS p,
+              COALESCE(SUM(valor_total), 0) AS v
+         FROM terc_remessas
+        WHERE id_empresa = ?
+          AND dt_saida BETWEEN ? AND ?`
+    ).bind(id_empresa, ciclo.dt_inicio, ciclo.dt_fim).first<any>();
+    totRem = Number(r?.n) || 0;
+    totPecas = Number(r?.p) || 0;
+    totValor = Number(r?.v) || 0;
+  } catch {/* falha silenciosa — card ainda mostra a janela */}
+
+  return c.json(ok({
+    ...ciclo,
+    kpis: {
+      remessas: totRem,
+      pecas: totPecas,
+      valor: totValor,
+    },
+  }));
+});
+
+/* -----------------------------------------------------------------
+ * POST /terc/ciclo/fechar
+ *  Fecha o ciclo atual, gravando um snapshot dos KPIs.
+ *  Body opcional: { observacao?: string }
+ * ----------------------------------------------------------------- */
+app.post('/terc/ciclo/fechar', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const user = c.get('user') as any;
+  const usuario = user?.login || 'sistema';
+
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* body opcional */ }
+  const observacao = String(body?.observacao || '').slice(0, 500);
+
+  const ciclo = await resolveCicloAtual(c.env.DB, id_empresa);
+
+  // Calcula snapshot completo dos KPIs no momento do fechamento.
+  const snap = await c.env.DB.prepare(
+    `SELECT
+        COUNT(*) AS remessas,
+        COALESCE(SUM(qtd_total), 0) AS pecas_enviadas,
+        COALESCE(SUM(valor_total), 0) AS valor_total,
+        SUM(CASE WHEN status IN ('AguardandoEnvio','Enviado','EmProducao','Parcial') THEN 1 ELSE 0 END) AS em_aberto,
+        SUM(CASE WHEN status IN ('Concluido','Retornado','Pago') THEN 1 ELSE 0 END) AS concluidas,
+        SUM(CASE WHEN status='Atrasado' THEN 1 ELSE 0 END) AS atrasadas,
+        SUM(CASE WHEN status_fin='Pago' THEN COALESCE(valor_pago,0) ELSE 0 END) AS valor_pago_total,
+        SUM(CASE WHEN status_fin='PendentePagamento' THEN (valor_total - COALESCE(valor_pago,0)) ELSE 0 END) AS valor_a_pagar
+       FROM terc_remessas
+      WHERE id_empresa = ? AND dt_saida BETWEEN ? AND ?`
+  ).bind(id_empresa, ciclo.dt_inicio, ciclo.dt_fim).first<any>();
+
+  const snapshotJson = JSON.stringify({
+    remessas: Number(snap?.remessas) || 0,
+    pecas_enviadas: Number(snap?.pecas_enviadas) || 0,
+    valor_total: Number(snap?.valor_total) || 0,
+    em_aberto: Number(snap?.em_aberto) || 0,
+    concluidas: Number(snap?.concluidas) || 0,
+    atrasadas: Number(snap?.atrasadas) || 0,
+    valor_pago_total: Number(snap?.valor_pago_total) || 0,
+    valor_a_pagar: Number(snap?.valor_a_pagar) || 0,
+    dias_no_ciclo: ciclo.dias,
+  }).slice(0, 4000);
+
+  const ins = await c.env.DB.prepare(
+    `INSERT INTO terc_ciclos_producao
+       (id_empresa, dt_inicio, dt_fim, fechado_por,
+        snapshot_json, total_remessas, total_pecas, valor_total, observacao)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    id_empresa,
+    ciclo.dt_inicio,
+    ciclo.dt_fim,
+    usuario,
+    snapshotJson,
+    Number(snap?.remessas) || 0,
+    Number(snap?.pecas_enviadas) || 0,
+    Number(snap?.valor_total) || 0,
+    observacao || null,
+  ).run();
+
+  // Auditoria
+  await audit(
+    c, MOD, 'FECHAR_CICLO',
+    `ciclo:${ins.meta.last_row_id}`,
+    'periodo', '', `${ciclo.dt_inicio}→${ciclo.dt_fim}`,
+    usuario,
+  ).catch(() => {});
+
+  return c.json(ok({
+    id_ciclo: Number(ins.meta.last_row_id),
+    dt_inicio: ciclo.dt_inicio,
+    dt_fim: ciclo.dt_fim,
+    fechado_por: usuario,
+    snapshot: JSON.parse(snapshotJson),
+    observacao: observacao || null,
+  }));
+});
+
+/* -----------------------------------------------------------------
+ * GET /terc/ciclos
+ *  Lista paginada dos ciclos fechados (histórico).
+ *  Query: ?page=1&size=20
+ * ----------------------------------------------------------------- */
+app.get('/terc/ciclos', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const q = c.req.query();
+  const page = Math.max(1, toInt(q.page, 1));
+  const size = Math.min(100, Math.max(1, toInt(q.size, 20)));
+  const offset = (page - 1) * size;
+
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM terc_ciclos_producao WHERE id_empresa = ?`
+  ).bind(id_empresa).first<any>();
+  const total = Number(totalRow?.c) || 0;
+
+  const rows = (await c.env.DB.prepare(
+    `SELECT id_ciclo, dt_inicio, dt_fim, fechado_por, dt_fechamento,
+            total_remessas, total_pecas, valor_total, observacao, snapshot_json
+       FROM terc_ciclos_producao
+      WHERE id_empresa = ?
+      ORDER BY dt_fim DESC, id_ciclo DESC
+      LIMIT ? OFFSET ?`
+  ).bind(id_empresa, size, offset).all()).results as any[];
+
+  // Parseia snapshot_json em cada linha
+  const items = rows.map(r => ({
+    id_ciclo: Number(r.id_ciclo),
+    dt_inicio: String(r.dt_inicio),
+    dt_fim: String(r.dt_fim),
+    fechado_por: String(r.fechado_por),
+    dt_fechamento: String(r.dt_fechamento),
+    total_remessas: Number(r.total_remessas) || 0,
+    total_pecas: Number(r.total_pecas) || 0,
+    valor_total: Number(r.valor_total) || 0,
+    observacao: r.observacao || '',
+    snapshot: (() => {
+      try { return JSON.parse(r.snapshot_json || '{}'); } catch { return {}; }
+    })(),
+  }));
+
+  return c.json(ok(items, { total, page, size }));
+});
+
+/* =================================================================
  * DASHBOARD DE TERCEIRIZAÇÃO
+ *
+ * HOTFIX 0045: aceita ?periodo=ciclo|mes|30d|custom
+ *   - ciclo (default): janela do ciclo atual aberto
+ *   - mes:   primeiro dia do mês atual até hoje
+ *   - 30d:   últimos 30 dias
+ *   - custom: usa ?de=&ate=
+ *
+ * Compatibilidade: se cliente não passar `periodo` mas passar `de`/`ate`,
+ * comportamento antigo é preservado (custom implícito).
+ *
+ * Painéis "agora" (atrasadas / em produção / próximos vencimentos /
+ * valores a pagar) NÃO filtram por ciclo — mostram a realidade atual
+ * independente do período, para não esconder problemas reais.
  * ================================================================= */
 
 app.get('/terc/dashboard', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const q = c.req.query();
-  const ini = q.de || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-  const fim = q.ate || new Date().toISOString().slice(0, 10);
+
+  // HOTFIX 0045: resolve a janela conforme o filtro selecionado
+  const { de: ini, ate: fim, periodo, ciclo } = await resolvePeriodo(
+    c.env.DB, id_empresa, q
+  );
 
   // KPIs
   const kpiRem = await c.env.DB.prepare(`
@@ -3761,7 +4091,13 @@ app.get('/terc/dashboard', async (c) => {
     ORDER BY r.dt_recebimento ASC, r.dt_saida ASC LIMIT 30`).bind(id_empresa).all()).results;
 
   return c.json(ok({
-    periodo: { de: ini, ate: fim },
+    // HOTFIX 0045: período agora carrega tipo + ciclo (quando aplicável)
+    periodo: {
+      de: ini,
+      ate: fim,
+      tipo: periodo, // 'ciclo' | 'mes' | '30d' | 'custom'
+      ciclo: ciclo || null, // só preenchido quando tipo='ciclo'
+    },
     kpis: { remessas: kpiRem, retornos: kpiRet },
     top_terceirizados: topTerc,
     por_servico: porServico,

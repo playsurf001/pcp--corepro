@@ -2266,6 +2266,103 @@ Mapeadas **11 tabelas filhas** de `terc_remessas` — todas tratadas explicitame
 
 ---
 
+## 🆕 HOTFIX 0045 (2026-06-02) — Dashboard por Ciclo de Produção (Competências)
+
+### Contexto
+O Dashboard mostrava **dados acumulados** das remessas dentro do período filtrado (default = últimos 30 dias). Resultado: ao iniciar um novo ciclo de produção, o usuário via 66 remessas no dashboard mas grande parte pertencia ao ciclo anterior — sem forma clara de separar "o que pertence ao ciclo atual" de "histórico". Isso atrapalhava análise de produtividade, controle financeiro e visão real da operação.
+
+### Conceito implementado — Ciclo Atual
+- **Ciclo atual** = janela entre o último fechamento (ou primeiro dia do mês corrente se nunca fechou) e a data de hoje
+- **Fechar Ciclo** = grava um snapshot dos KPIs e dispara o início do próximo ciclo (no dia seguinte)
+- **Zero alteração em dados históricos** — remessas e retornos NÃO são alterados; apenas a janela do dashboard muda
+- **Multi-tenant**: cada empresa tem seus próprios ciclos, isolados via `id_empresa`
+
+### Nova tabela `terc_ciclos_producao` (migration 0045)
+```
+id_ciclo, id_empresa, dt_inicio, dt_fim,
+fechado_por, dt_fechamento,
+snapshot_json (KPIs no momento do fechamento),
+total_remessas, total_pecas, valor_total (denormalizado para listagem rápida),
+observacao
+```
++ 2 índices: `(id_empresa, dt_fim DESC)` e `(id_empresa, dt_fechamento DESC)`.
+
+### Endpoints novos
+| Método | Rota | Descrição |
+|---|---|---|
+| GET  | `/terc/ciclo-atual` | Retorna `{ dt_inicio, dt_fim, dias, label, kpis: { remessas, pecas, valor }, nunca_fechou, ultimo_fechamento }` |
+| POST | `/terc/ciclo/fechar` | Body: `{ observacao? }`. Captura snapshot dos KPIs e insere registro. Auditoria automática. |
+| GET  | `/terc/ciclos?page=1&size=20` | Lista paginada dos ciclos fechados, com snapshot expandido |
+
+### Dashboard endpoint estendido — `GET /terc/dashboard`
+Novo query param `?periodo=` aceita:
+- **`ciclo`** (padrão) — janela do ciclo atual aberto
+- **`mes`** — primeiro dia do mês atual até hoje
+- **`30d`** — últimos 30 dias (compatibilidade com o default antigo)
+- **`custom`** — usa `de` / `ate` (modo legado)
+
+**Compatibilidade total**: se cliente NÃO passar `periodo` mas passar `de`/`ate`, comportamento antigo é mantido (custom implícito). Nenhum cliente antigo quebra.
+
+Response agora inclui:
+```json
+{
+  "periodo": {
+    "de": "2026-06-01",
+    "ate": "2026-06-02",
+    "tipo": "ciclo",
+    "ciclo": { "dt_inicio": "...", "label": "Competência Junho/2026", "dias": 2, "nunca_fechou": false, "ultimo_fechamento": {...} }
+  },
+  "kpis": {...}, "top_terceirizados": [...], ...
+}
+```
+
+### Frontend — alterações no `ROUTES.dashboard`
+1. **Card "CICLO ATUAL"** no topo (gradiente azul) com:
+   - Label dinâmico (`Competência Junho/2026` ou `Ciclo 01/06/2026 — Hoje`)
+   - Subtítulo com período + dias decorridos + flag "nunca fechado" quando aplicável
+   - Botões `Fechar Ciclo` (warning) e `Anteriores` (secondary)
+2. **Seletor de período** com 4 radio buttons estilizados (Ciclo Atual / Mês Atual / Últimos 30 dias / Personalizado)
+   - Padrão = Ciclo Atual
+   - Seleção persistida em `localStorage` por chave `dashboard.periodo`
+   - Troca de radio recarrega o dashboard automaticamente (sem precisar clicar "Atualizar")
+   - Campos `De` / `Até` só aparecem em "Personalizado"
+3. **Modal "Fechar Ciclo"** com:
+   - Resumo do ciclo (período, dias, remessas, peças, valor)
+   - Campo opcional de observação (até 500 chars)
+   - Banner informativo deixando claro que **dados NÃO são alterados**
+4. **Modal "Ciclos Anteriores"** com lista paginada (50/página):
+   - Cada ciclo mostra: período, fechado_por, data de fechamento, totais (remessas/peças/valor), em_aberto/concluídas/atrasadas do snapshot, observação
+
+### Painéis que NÃO seguem o filtro de período (estado "agora")
+Por design, esses painéis sempre mostram a **realidade atual** independente do filtro selecionado, para não esconder problemas operacionais reais:
+- **Remessas em Atraso** (tabela bottom) — uma remessa do ciclo passado que ainda está atrasada precisa aparecer
+- **Em Produção Agora** — estado "neste momento", não tem ciclo
+- **Próximos Vencimentos 7 dias** — janela futura
+- **Valores a Pagar** — dívida acumulada não some ao virar o mês
+
+### CSS adicionado (+223 linhas)
+- `.dash-ciclo-card` + variações dark / responsivas
+- `.dash-periodo-seletor` + `.dash-periodo-opt[.is-active]` (radios estilizados)
+- `.dash-ciclos-anteriores__*` (modal de histórico)
+
+### Métricas pós-deploy
+- **Build**: `dist/_worker.js 338.32 kB` (+5.5 kB vs HOTFIX 0044)
+- **Deploy PROD**: `9de33653` em **https://corepro-confeccao.pages.dev**
+- **Migration aplicada**: LOCAL (4 comandos) + REMOTE (4 comandos) ✅
+- **Smoke PROD**: HTTP 200 + v=53 + 3 endpoints novos respondem 401 limpo + 14 funções JS novas + 34 classes CSS novas + tabela `terc_ciclos_producao` queryable em PROD
+- **Multi-tenant**: PROD com 1 empresa ativa (68 remessas, id_empresa=1); todas as queries filtram por `id_empresa` (isolamento garantido)
+- **Zero breaking changes**: dashboard mantém comportamento antigo se cliente passar `?de=&ate=` sem `periodo`
+
+### Garantias
+- ✅ **Não altera dados históricos** (apenas adiciona tabela `terc_ciclos_producao`)
+- ✅ **Tenant novo já funciona no dia 1** (fallback automático para "primeiro dia do mês atual")
+- ✅ **Multi-tenant isolado** (cada empresa tem seus próprios ciclos, snapshots e janelas)
+- ✅ **Reversível** (drop da tabela volta ao comportamento de períodos manuais)
+- ✅ **Auditoria automática** ao fechar (módulo TERC, ação `FECHAR_CICLO`)
+- ✅ **Compatibilidade backward**: chamadas antigas a `/terc/dashboard?de=&ate=` continuam funcionando
+
+---
+
 ## Roadmap / Não implementado
 - [x] ~~Autenticação~~ ✅ **Implementado** (login + senha hasheada + tokens de sessão 12h + RBAC)
 - [x] ~~Importador de OPs antigas~~ ✅ **Implementado** (SheetJS no browser + API robusta)
@@ -2277,6 +2374,7 @@ Mapeadas **11 tabelas filhas** de `terc_remessas` — todas tratadas explicitame
 - [x] ~~Rodapé financeiro do Retorno com baixa legibilidade~~ ✅ **Implementado HOTFIX 0041** (componente `.tc-rsf` dark premium + grid responsivo + variantes coloridas + destaque "Total pago" + ações separadas, zero impacto em cálculos/lógica)
 - [x] ~~Módulo financeiro / pagamento de terceirizados (sem gestão de "quando pagou / como / comprovante")~~ ✅ **Implementado HOTFIX 0042** (módulo Financeiro → Pagamentos completo: checkbox + painel financeiro por terceirizado + barra flutuante + modal de pagamento em lote + 7 formas + comprovante PDF (jsPDF + autoTable) + histórico paginado + estorno admin-only + auditoria com IP + 2 novas tabelas multi-tenant + backward-compat com `dt_pagamento`)
 - [x] ~~Exclusão em lote de remessas (até hoje só dava 1 por vez)~~ ✅ **Implementado HOTFIX 0043** (checkbox + check-all + barra flutuante + modal com pre-check + validações de bloqueio: status_fin='Pago' / retorno pago / cross-tenant; cascata hard-delete + auditoria 2 entradas + multi-tenant scoping + lixeira individual 100% intacta) + ✅ **Corrigido HOTFIX 0044** (causa raiz: limite de ~100 parâmetros bindados por statement do D1 — agora chunking de 80 IDs + `DB.batch()` atômico + DELETEs defensivos para `terc_consertos`/`terc_alertas` + per-chunk error capture + modal de resultado rico com excluídas/bloqueadas/falhadas + handler global expõe `hint` técnico em PROD)
+- [x] ~~Dashboard mostrando dados acumulados em vez do ciclo atual de produção~~ ✅ **Implementado HOTFIX 0045** (conceito de ciclo de produção com fechamento manual + nova tabela `terc_ciclos_producao` com snapshot + 3 endpoints novos `/terc/ciclo-atual`, `/terc/ciclo/fechar`, `/terc/ciclos` + dashboard aceita `?periodo=ciclo|mes|30d|custom` + card CICLO ATUAL no topo + seletor de período persistido em localStorage + modal "Fechar Ciclo" com observação + modal "Ciclos Anteriores" com histórico paginado + painéis "agora" mantêm visão real independente do filtro + multi-tenant isolado + zero alteração em dados históricos)
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)
