@@ -2448,6 +2448,94 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0048 (2026-06-05) — Separação correta entre Remessa, CTRL e OP
+
+### Contexto
+Logo após a publicação do HOTFIX 0047, o usuário criou uma remessa com 2 produtos (referências diferentes, OPs diferentes) e identificou um **bug regressivo introduzido pelo próprio 0047**:
+
+| CTRL gerado | Referência | OP **gravada no banco** | OP **correta** |
+|-------------|------------|-------------------------|----------------|
+| 337 | `04-01-26-70` | `405-26` ✅ | `405-26` |
+| 338 | `04-01-26-71` | `405-26` ❌ (herdada) | `404-26` |
+
+Listagem, modal de edição e romaneio exibiam a **OP errada** no CTRL 338 — sistema estava "herdando" a OP do último item da remessa para todos os CTRLs do lote.
+
+### Causa raiz
+O helper interno `persistirRemessaUnitaria()` em `POST /terc/remessas` ignorava o `it.num_op` (OP do item) ao inserir o **header** da nova remessa em `terc_remessas` — sempre usava `b.num_op` (campo global `#m-op` do formulário). Como no caminho **multi-CTRL** (HOTFIX 0047) o `b.num_op` reflete apenas o último valor digitado no campo geral (ou o do 1º item), TODAS as remessas do lote acabavam gravadas com o **mesmo `num_op`** no header — mesmo quando cada item tinha sua OP própria correta em `terc_remessa_itens.num_op`.
+
+```typescript
+// ANTES (BUG):
+.bind(num_controle, b.num_op || null, ...)  // ← sempre b.num_op global
+
+// DEPOIS (HOTFIX 0048):
+.bind(num_controle, resolvedNumOp, ...)     // ← it.num_op > b.num_op > NULL
+```
+
+### Decisão arquitetural
+> **OP pertence ao produto/referência, não à remessa.**
+> **CTRL é o identificador da remessa, sempre único.**
+> **1 OP pode ter múltiplos CTRLs** (404-26 → CTRLs 338, 341, 345…).
+> **OP nunca é herdada entre remessas distintas — apenas entre itens da MESMA remessa**.
+
+### O que mudou
+
+#### Backend — `src/routes/terceirizacao.ts`
+- **`persistirRemessaUnitaria()`**: ganhou parâmetro opcional `num_op_remessa`. Resolução hierárquica:
+  1. `opts.num_op_remessa` explícito (caller informou) → usa
+  2. `opts.num_op_remessa === null` (explicitamente null) → respeita
+  3. Fallback: `item.num_op` → `b.num_op` → `NULL`
+- **Caminho legado (1 item)**: passa `num_op_remessa: head.num_op || b.num_op` — comportamento idêntico ao anterior
+- **Caminho multi-CTRL (N itens)** [`fix crítico`]: passa `num_op_remessa: it.num_op || b.num_op` em cada iteração → **cada CTRL grava a OP do seu próprio item**
+- **PUT `/terc/remessas/:id`**: header agora sincroniza com `head.num_op` (item editado), não com `b.num_op` global — garante coerência ao editar uma remessa de lote
+
+#### Frontend — `public/static/app.js`
+- **Modal "Editar Remessa"**: ao carregar uma remessa cujo `it.num_op` divirja de `r.num_op` (caso comum em dados pré-correção), marca automaticamente `_num_op_manual=true` no item → UI exibe "manual" em vez de "herda", refletindo a realidade do dado.
+
+#### Migration `0048_fix_remessa_num_op.sql` (data-fix idempotente)
+Sincroniza `terc_remessas.num_op` com `terc_remessa_itens.num_op` **somente quando**:
+- `lote_remessa_id IS NOT NULL` (remessa do multi-CTRL, criada pós-0047)
+- A remessa tem **exatamente 1 item ativo** (regra do multi-CTRL: 1:1)
+- O `item.num_op` está preenchido (não-nulo, não-vazio)
+- Há **divergência** entre `item.num_op` e `header.num_op`
+
+**Aplicação em PROD**: `"changes": 1` — corrigiu exatamente 1 remessa (a do CTRL afetado pelo bug). Demais 3 remessas do lote já estavam coerentes (header_op = item_op). Validação posterior: 4/4 remessas dos lotes 1 e 2 com `header_op == item_op` ✅.
+
+### O que NÃO mudou (escopo cirúrgico)
+- ❌ Remessas pré-HOTFIX 0047 (`lote_remessa_id IS NULL`) — preservadas intactas
+- ❌ CTRLs (`num_controle`) — nenhum renumerado
+- ❌ `terc_remessa_itens.num_op` — já estava correto desde HOTFIX 0047
+- ❌ Retornos, pagamentos, alertas, relatórios, dashboard — preservados
+- ❌ Validação cross-check referência↔OP — **descartada**: `terc_produtos` não tem campo `num_op`; a relação "referência pertence a OP" é dinâmica por contexto de produção, não dado catalogado. Forçar uma regra arbitrária ("a última OP daquela ref vence") geraria falsos warnings em produção real.
+
+### Critérios de aceitação verificados
+- ✅ Cada remessa possui CTRL único
+- ✅ Cada OP permanece vinculada ao produto correto (via `terc_remessa_itens.num_op`)
+- ✅ OP não é herdada de outra remessa
+- ✅ Edição carrega a OP real do registro (e marca "manual" se divergir do header)
+- ✅ Romaneios exibem OP correta (já usavam `it.num_op` desde HOTFIX 0047)
+- ✅ Geração em lote não altera OPs (multi-CTRL agora respeita `it.num_op`)
+- ✅ Banco mantém separação entre CTRL (`num_controle`) e OP (`num_op`) como campos independentes
+- ✅ Não impacta remessas antigas cadastradas (`lote_remessa_id IS NULL` ignorado)
+- ✅ Não quebra retornos, pagamentos, relatórios ou dashboard
+
+### Métricas
+- **Build**: `dist/_worker.js 342.90 kB` (+610 bytes vs. HOTFIX 0047)
+- **Migration LOCAL**: 1 cmd ✅ (0 changes — banco local não tinha o bug)
+- **Migration REMOTE/PROD**: 1 cmd ✅ (1 change — exatamente a remessa afetada)
+- **Smoke local**: `/` 200, `/static/*.js?v=56` 200, `/api/terc/remessas` 401, `/api/terc/remessas/lote/1` 401 ✅
+- **Smoke PROD** (`corepro-confeccao.pages.dev`): mesmos códigos ✅
+- **Deploy PROD**: `7b6a5343` (branch `main`)
+- **Cache bust**: `v=55 → v=56`
+
+### Arquivos alterados
+- `src/routes/terceirizacao.ts` — `persistirRemessaUnitaria()` + chamadas legado/multi-CTRL + `PUT /terc/remessas/:id`
+- `public/static/app.js` — modal Editar marca `_num_op_manual=true` quando item↔header divergem na carga
+- `src/index.tsx` — cache bust `v=55 → v=56`
+- `migrations/0048_fix_remessa_num_op.sql` — data-fix idempotente
+- `README.md` — esta seção
+
+---
+
 ## 🆕 HOTFIX 0047 (2026-06-05) — CTRL Único por Referência (Opção C — Híbrida com `lote_remessa_id`)
 
 ### Contexto
@@ -2599,6 +2687,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Dashboard mostrando dados acumulados em vez do ciclo atual de produção~~ ✅ **Implementado HOTFIX 0045** (conceito de ciclo de produção com fechamento manual + nova tabela `terc_ciclos_producao` com snapshot + 3 endpoints novos `/terc/ciclo-atual`, `/terc/ciclo/fechar`, `/terc/ciclos` + dashboard aceita `?periodo=ciclo|mes|30d|custom` + card CICLO ATUAL no topo + seletor de período persistido em localStorage + modal "Fechar Ciclo" com observação + modal "Ciclos Anteriores" com histórico paginado + painéis "agora" mantêm visão real independente do filtro + multi-tenant isolado + zero alteração em dados históricos)
 - [x] ~~Sidebar empurrando o menu do usuário para fora da viewport quando havia muitos módulos expandidos~~ ✅ **Implementado HOTFIX 0046** (refatoração CSS-only com flexbox 3-zonas: logo fixo no topo via `flex-shrink:0`, área de menus rolável via `flex:1 + min-height:0 + overflow-y:auto`, menu do usuário fixo no rodapé via `flex-shrink:0`, container raiz com `height:100vh + overflow:hidden`, scrollbar moderna 6px hover-revealed; **HTML 100% intacto**, **JS 100% intacto**, `_worker.js` 338.32 kB **idêntico**; funciona em desktop/notebook/tablet/mobile)
 - [x] ~~Múltiplas referências numa remessa compartilhando o mesmo CTRL~~ ✅ **Implementado HOTFIX 0047** (Opção C híbrida — `lote_remessa_id` nullable em `terc_remessas` + 2 índices; backend roteia por contagem: 1 item = legado intacto, N itens = N remessas independentes com N CTRLs sequenciais + mesmo `lote_remessa_id` via MAX+1; novo endpoint `GET /terc/remessas/lote/:id` para romaneio agrupado; toast inteligente exibindo lista de CTRLs; expansão automática do lote no PDF; cada CTRL ganha retorno/pagamento/status próprios — granularidade total; **108 remessas PROD pré-existentes ZERO alteradas**, 0 CTRLs renumerados, compat. backward 100%)
+- [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
+- [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

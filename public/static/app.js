@@ -4305,6 +4305,12 @@ async function TERC_openRemModal(id, onSave) {
     // ✅ Caminho normal — backend devolveu itens (incluindo casos sintetizados/resolvidos)
     // 🛡️ HOTFIX 0036: Para cada item sem id_produto, tenta resolver pelo cod_ref antes do newItem.
     // O backend já faz isso, mas mantemos como dupla proteção (defense in depth).
+    //
+    // 🆕 HOTFIX 0048 — Detectar divergência entre OP do item e OP do cabeçalho na carga.
+    // Se o backend devolveu um item cuja num_op é diferente do r.num_op (caso comum em
+    // dados pré-HOTFIX 0048 que ficaram desalinhados), marcamos _num_op_manual=true para
+    // que a UI exiba "manual" em vez de "herda" — refletindo a realidade do dado.
+    const headerOp = (r.num_op != null ? String(r.num_op).trim() : '');
     itens = r.itens.map(it => {
       if (!it.id_produto && it.cod_ref && TERC.findProdutoByRef) {
         const prod = TERC.findProdutoByRef(it.cod_ref, r.id_colecao);
@@ -4312,6 +4318,11 @@ async function TERC_openRemModal(id, onSave) {
           console.log('[remessa.edit] frontend resolved id_produto:', { cod_ref: it.cod_ref, id_produto: prod.id_produto });
           it = { ...it, id_produto: prod.id_produto, _resolved_id_produto: true };
         }
+      }
+      // Divergência item↔header → marca manual para o UI mostrar "manual" ao invés de "herda"
+      const itOp = (it.num_op != null ? String(it.num_op).trim() : '');
+      if (itOp && headerOp && itOp !== headerOp) {
+        it = { ...it, _num_op_manual: true };
       }
       return newItem(it);
     });

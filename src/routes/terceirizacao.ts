@@ -2209,8 +2209,32 @@ app.post('/terc/remessas', async (c) => {
     qtd_total: number;
     valor_total: number;
     tempo_max: number;
+    // 🆕 HOTFIX 0048 — Nº OP explícito do header da remessa (uma remessa, uma OP).
+    //    Quando ausente, faz fallback para item.num_op → b.num_op → NULL.
+    //    Garante que multi-CTRL NUNCA usa a OP do formulário global como fonte
+    //    de verdade — cada remessa carrega a OP do seu próprio item.
+    num_op_remessa?: string | null;
   }): Promise<{ id_remessa: number; num_controle: number; dt_previsao: string; prazo_dias: number }> {
     const { item: head, num_controle, lote_remessa_id, qtd_total, valor_total, tempo_max } = opts;
+
+    // 🛡️ HOTFIX 0048 — Resolver OP do header da remessa:
+    //  1) Se chamador passou num_op_remessa explícito → usa
+    //  2) Senão, item.num_op (se vier preenchido)
+    //  3) Senão, b.num_op (form global — fallback final do modo legado)
+    //  4) Senão, NULL
+    const resolvedNumOp = (() => {
+      if (typeof opts.num_op_remessa === 'string' && opts.num_op_remessa.trim()) {
+        return opts.num_op_remessa.trim();
+      }
+      if (opts.num_op_remessa === null) {
+        // explicitamente NULL — não cai em fallback (preserva intenção do chamador)
+        return null;
+      }
+      if (typeof head.num_op === 'string' && head.num_op.trim()) {
+        return head.num_op.trim();
+      }
+      return (b.num_op && String(b.num_op).trim()) ? String(b.num_op).trim() : null;
+    })();
 
     // Prazo / previsão (calculado por remessa — cada CTRL tem seu próprio prazo)
     let dt_prev: string;
@@ -2232,7 +2256,7 @@ app.post('/terc/remessas', async (c) => {
          prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
          status, status_fin, modo, observacao, criado_por, id_empresa, lote_remessa_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
+      .bind(num_controle, resolvedNumOp, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
         head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
         qtd_total, head._preco, valor_total, toInt(b.id_colecao) || null,
         dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
@@ -2293,6 +2317,11 @@ app.post('/terc/remessas', async (c) => {
       await persistirRemessaUnitaria({
         item: head, num_controle, lote_remessa_id: null,
         qtd_total: totQtd, valor_total: totValor, tempo_max: tempoMaxItem,
+        // HOTFIX 0048 — caminho legado (1 item): OP do header = OP do único item
+        // (com fallback para o b.num_op do form se o item não tiver OP própria).
+        num_op_remessa: (typeof head.num_op === 'string' && head.num_op.trim())
+          ? head.num_op.trim()
+          : (b.num_op && String(b.num_op).trim() ? String(b.num_op).trim() : null),
       });
 
     await persistirItem(idR, head, 0);
@@ -2367,6 +2396,14 @@ app.post('/terc/remessas', async (c) => {
       qtd_total: it._qtd,
       valor_total: it._valor,
       tempo_max: it._tempo,
+      // 🛡️ HOTFIX 0048 — CRÍTICO: cada CTRL deve gravar a OP DO SEU ITEM,
+      // nunca a OP global do formulário (b.num_op). Anteriormente o helper
+      // usava b.num_op para TODAS as remessas do lote, fazendo com que CTRLs
+      // distintos (ex: 337 ref 04-01-26-70 OP 405-26 e 338 ref 04-01-26-71
+      // OP 404-26) acabassem com o mesmo num_op no header.
+      num_op_remessa: (typeof it.num_op === 'string' && it.num_op.trim())
+        ? it.num_op.trim()
+        : (b.num_op && String(b.num_op).trim() ? String(b.num_op).trim() : null),
     });
 
     await persistirItem(idR, it, 0);
@@ -2549,13 +2586,21 @@ app.put('/terc/remessas/:id', async (c) => {
   const head = itensValidos[0];
   const headIdCor = await resolveColorId(c.env.DB, head.cor, id_empresa);
 
+  // 🛡️ HOTFIX 0048 — Nº OP do header reflete a OP do item editado.
+  // Esta remessa representa 1 CTRL = 1 OP. Se o usuário alterou a OP do item
+  // no modal, o header tem que sincronizar (o frontend já garante que o cartão
+  // do item tem a OP correta — _num_op_manual=true significa override explícito).
+  const headNumOp = (typeof head.num_op === 'string' && head.num_op.trim())
+    ? head.num_op.trim()
+    : (b.num_op && String(b.num_op).trim() ? String(b.num_op).trim() : null);
+
   // ---- UPDATE cabeçalho (com agregados do 1º item p/ compat) ----
   await c.env.DB.prepare(`
     UPDATE terc_remessas SET num_op=?, id_terc=?, id_setor=?, cod_ref=?, desc_ref=?, id_servico=?, cor=?, id_cor=?, grade=?,
       qtd_total=?, preco_unit=?, valor_total=?, id_colecao=?, dt_saida=?, dt_inicio=?, dt_previsao=?, prazo_dias=?,
       tempo_peca=?, efic_pct=?, qtd_pessoas=?, min_trab_dia=?, status=?, observacao=?, alterado_por=?, dt_alteracao=datetime('now')
     WHERE id_remessa=? AND id_empresa=?`)
-    .bind(b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || null,
+    .bind(headNumOp, toInt(b.id_terc), toInt(b.id_setor) || null,
       head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
       totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       b.dt_saida, b.dt_inicio || b.dt_saida, dt_prev, prazo > 0 ? prazo : dias,
