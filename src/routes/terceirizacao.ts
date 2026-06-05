@@ -1752,6 +1752,70 @@ app.get('/terc/remessas/next-num', async (c) => {
   return c.json(ok({ num_controle: r?.n || 1 }));
 });
 
+/* =================================================================
+ * 🆕 HOTFIX 0047 — GET /terc/remessas/lote/:id
+ * Retorna todas as remessas que pertencem a um determinado lote
+ * (lote_remessa_id), com seus itens — usado pelo Romaneio PDF agrupado.
+ *
+ * Multi-tenant: filtro estrito por id_empresa.
+ * Compatibilidade: se o lote_remessa_id não existir ou for de outro
+ * tenant, retorna 404. Lotes legados (lote_remessa_id=NULL) NUNCA
+ * batem nessa rota — registros antigos seguem intactos.
+ * ================================================================= */
+app.get('/terc/remessas/lote/:id', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const loteId = toInt(c.req.param('id'));
+  if (!loteId) return fail('lote_remessa_id inválido', 400);
+
+  // 1) Carrega todas as remessas do lote (tenant-scoped)
+  const remessas = (await c.env.DB.prepare(`
+    SELECT r.*,
+           t.nome_terc, st.nome_setor, sv.desc_servico, co.nome_colecao
+      FROM terc_remessas r
+      LEFT JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      LEFT JOIN terc_setores st ON st.id_setor=r.id_setor AND st.id_empresa=r.id_empresa
+      LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
+      LEFT JOIN terc_colecoes co ON co.id_colecao=r.id_colecao AND co.id_empresa=r.id_empresa
+     WHERE r.lote_remessa_id=? AND r.id_empresa=?
+     ORDER BY r.num_controle ASC`).bind(loteId, id_empresa).all()).results as any[];
+
+  if (!remessas.length) return fail('Lote não encontrado', 404);
+
+  // 2) Para cada remessa do lote, carrega seus itens + grade
+  const ids = remessas.map(r => r.id_remessa);
+  const placeholders = ids.map(() => '?').join(',');
+  const itens = (await c.env.DB.prepare(`
+    SELECT i.*, sv.desc_servico,
+      (SELECT json_group_array(json_object('tamanho', tamanho, 'qtd', qtd))
+         FROM terc_remessa_item_grade WHERE id_item=i.id_item AND id_empresa=i.id_empresa) AS grade_json
+    FROM terc_remessa_itens i
+    LEFT JOIN terc_servicos sv ON sv.id_servico=i.id_servico AND sv.id_empresa=i.id_empresa
+    WHERE i.id_empresa=? AND i.id_remessa IN (${placeholders}) AND i.ativo=1
+    ORDER BY i.id_remessa ASC, i.ordem ASC, i.id_item ASC`)
+    .bind(id_empresa, ...ids).all()).results as any[];
+
+  // Indexa itens por id_remessa + parse grade_json
+  const itensByRem: Record<number, any[]> = {};
+  for (const it of itens) {
+    let g: any[] = [];
+    try { g = JSON.parse(it.grade_json || '[]'); } catch {}
+    (itensByRem[it.id_remessa] ||= []).push({ ...it, grade: g });
+  }
+
+  // 3) Anexa itens em cada remessa
+  for (const r of remessas) {
+    r.itens = itensByRem[r.id_remessa] || [];
+  }
+
+  return c.json(ok({
+    lote_remessa_id: loteId,
+    remessas,
+    qtd_remessas: remessas.length,
+    qtd_total: remessas.reduce((a, r) => a + (Number(r.qtd_total) || 0), 0),
+    valor_total: remessas.reduce((a, r) => a + (Number(r.valor_total) || 0), 0),
+  }));
+});
+
 // Lista (atualiza status Atrasado automaticamente conforme dt_previsao)
 app.get('/terc/remessas', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
@@ -2036,7 +2100,18 @@ async function lookupPrecoHier(
  *  (B) LEGADO: { cod_ref, id_servico, cor, grade:[{tamanho,qtd}], preco_unit, ... }
  *
  * Em (B), o body é convertido para 1 único item antes da persistência.
- * O cabeçalho terc_remessas guarda os totais agregados (compatibilidade com telas antigas).
+ *
+ * 🆕 HOTFIX 0047 — CTRL ÚNICO POR REFERÊNCIA (Opção C — Híbrida):
+ *   • Se `itens.length === 1` (ou modo legado): comportamento IDÊNTICO ao
+ *     anterior — 1 remessa, 1 CTRL, lote_remessa_id = NULL.
+ *   • Se `itens.length >= 2`: cria N remessas independentes (N CTRLs
+ *     sequenciais MAX+1, MAX+2, MAX+3...) — todas com o mesmo
+ *     `lote_remessa_id` (MAX(lote_remessa_id)+1 escopado por id_empresa).
+ *     Cada CTRL é uma linha independente em terc_remessas, com seu próprio
+ *     retorno, pagamento, status, evento e auditoria.
+ *
+ *   ZERO impacto em remessas legadas (todas terão lote_remessa_id NULL).
+ *   ZERO renumeração de CTRLs antigos.
  * ================================================================= */
 app.post('/terc/remessas', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
@@ -2095,9 +2170,7 @@ app.post('/terc/remessas', async (c) => {
   const min_dia = toInt(b.min_trab_dia, t.min_trab_dia || 480);
   const efic = toNum(b.efic_pct, t.efic_padrao || 0.8);
 
-  // ---- Auto-fill de preço por item (lookup hierárquico) + agregados ----
-  let totQtd = 0, totValor = 0;
-  let tempoMaxItem = 0; // usaremos o maior tempo/peça para o cálculo de prazo
+  // ---- Auto-fill de preço por item (lookup hierárquico) ----
   for (const it of itensValidos) {
     let preco = toNum(it.preco_unit);
     let tempo = toNum(it.tempo_peca);
@@ -2116,55 +2189,63 @@ app.post('/terc/remessas', async (c) => {
     it._tempo = tempo;
     it._desc = descRef;
     it._valor = it._qtd * preco;
-    totQtd += it._qtd;
-    totValor += it._valor;
-    if (tempo > tempoMaxItem) tempoMaxItem = tempo;
   }
 
-  // ---- Prazo / previsão ----
-  const prazo = toInt(b.prazo_dias, t.prazo_padrao || 0);
   const dt_saida = b.dt_saida || new Date().toISOString().slice(0, 10);
-  let dt_prev: string;
-  let diasFinal = prazo;
-  if (prazo > 0) {
-    const d = new Date(dt_saida + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + prazo);
-    dt_prev = d.toISOString().slice(0, 10);
-  } else {
-    const rPrev = calcPrevisao(dt_saida, totQtd, tempoMaxItem, pess, min_dia, efic);
-    diasFinal = rPrev.dias; dt_prev = rPrev.dt_prev;
+  const status_inicial = b.dt_envio ? 'Enviado' : (b.status || 'AguardandoEnvio');
+  const prazoUsuario = toInt(b.prazo_dias, t.prazo_padrao || 0);
+
+  /* ============================================================
+   * HELPER INTERNO — Persiste UMA remessa (1 CTRL + 1 item)
+   * Reutilizado tanto pelo fluxo "1 item" quanto pelo fluxo "N itens".
+   * Recebe o número de controle JÁ alocado (não consulta MAX).
+   * ============================================================ */
+  async function persistirRemessaUnitaria(opts: {
+    item: any;
+    num_controle: number;
+    lote_remessa_id: number | null;
+    // Para o modo "1 CTRL por item" (multi), agregados refletem APENAS este item.
+    // Para o modo legado "1 CTRL com N itens", agregados ainda batem com o head.
+    qtd_total: number;
+    valor_total: number;
+    tempo_max: number;
+  }): Promise<{ id_remessa: number; num_controle: number; dt_previsao: string; prazo_dias: number }> {
+    const { item: head, num_controle, lote_remessa_id, qtd_total, valor_total, tempo_max } = opts;
+
+    // Prazo / previsão (calculado por remessa — cada CTRL tem seu próprio prazo)
+    let dt_prev: string;
+    let diasFinal = prazoUsuario;
+    if (prazoUsuario > 0) {
+      const d = new Date(dt_saida + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + prazoUsuario);
+      dt_prev = d.toISOString().slice(0, 10);
+    } else {
+      const rPrev = calcPrevisao(dt_saida, qtd_total, tempo_max, pess, min_dia, efic);
+      diasFinal = rPrev.dias; dt_prev = rPrev.dt_prev;
+    }
+
+    const headIdCor = await resolveColorId(c.env.DB, head.cor, id_empresa);
+    const r = await c.env.DB.prepare(`
+      INSERT INTO terc_remessas
+        (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
+         qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
+         prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
+         status, status_fin, modo, observacao, criado_por, id_empresa, lote_remessa_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
+        head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
+        qtd_total, head._preco, valor_total, toInt(b.id_colecao) || null,
+        dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
+        diasFinal, tempo_max, efic, pess, min_dia,
+        status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa,
+        lote_remessa_id).run();
+    return { id_remessa: r.meta.last_row_id as number, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal };
   }
 
-  // ---- Número de controle (escopado por empresa) ----
-  const nextN = await c.env.DB.prepare(
-    'SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas WHERE id_empresa=?'
-  ).bind(id_empresa).first<any>();
-  const num_controle = toInt(b.num_controle) || nextN?.n || 1;
-
-  // ---- Cabeçalho: usa o 1º item como "principal" para compat. com tela legada ----
-  const head = itensValidos[0];
-  const status_inicial = b.dt_envio ? 'Enviado' : (b.status || 'AguardandoEnvio');
-
-  const headIdCor = await resolveColorId(c.env.DB, head.cor, id_empresa);
-  const r = await c.env.DB.prepare(`
-    INSERT INTO terc_remessas
-      (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
-       qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
-       prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
-       status, status_fin, modo, observacao, criado_por, id_empresa)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(num_controle, b.num_op || null, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
-      head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
-      totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
-      dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
-      diasFinal, tempoMaxItem, efic, pess, min_dia,
-      status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa).run();
-
-  const idR = r.meta.last_row_id as number;
-
-  // ---- Persistir cada item + sua grade independente ----
-  let ordem = 0;
-  for (const it of itensValidos) {
-    // Nº OP por item: usa o do item; se faltar, herda do cabeçalho da remessa
+  /* ============================================================
+   * HELPER INTERNO — Persiste 1 item (terc_remessa_itens + grade)
+   * ============================================================ */
+  async function persistirItem(idR: number, it: any, ordem: number): Promise<number> {
     const itemNumOp = (typeof it.num_op === 'string' && it.num_op.trim())
       ? it.num_op.trim()
       : (b.num_op || null);
@@ -2176,7 +2257,7 @@ app.post('/terc/remessas', async (c) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
       .bind(idR, toInt(it.id_produto) || null, it.cod_ref || '', it._desc, it._idServ,
         it.cor || null, itIdCor, toInt(it.grade_num, 1),
-        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem++,
+        it._qtd, it._preco, it._valor, it._tempo, it.observacao || null, ordem,
         toInt(it.id_grade_tamanho) || null, itemNumOp, id_empresa).run();
     const idItem = ri.meta.last_row_id as number;
     for (const g of it._grade) {
@@ -2186,37 +2267,182 @@ app.post('/terc/remessas', async (c) => {
         ).bind(idItem, g.tamanho, toInt(g.qtd), id_empresa).run();
       }
     }
+    return idItem;
   }
 
-  // ---- Compatibilidade legada: grade do 1º item replicada no terc_remessa_grade ----
-  // (telas antigas leem terc_remessa_grade direto)
-  for (const g of head._grade) {
-    if (toInt(g.qtd) > 0) {
-      await c.env.DB.prepare(
-        'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
-      ).bind(idR, g.tamanho, toInt(g.qtd), id_empresa).run();
+  // ============================================================
+  // 🛣️ ROTEAMENTO: 1 item → caminho legado / N itens → caminho multi-CTRL
+  // ============================================================
+  if (itensValidos.length === 1) {
+    /* -----------------------------------------------------------
+     * CAMINHO LEGADO — 1 ITEM, 1 CTRL, lote_remessa_id = NULL
+     * Mantém comportamento idêntico ao pré-HOTFIX 0047.
+     * ----------------------------------------------------------- */
+    const head = itensValidos[0];
+    const totQtd = head._qtd;
+    const totValor = head._valor;
+    const tempoMaxItem = head._tempo;
+
+    // Número de controle (escopado por empresa)
+    const nextN = await c.env.DB.prepare(
+      'SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas WHERE id_empresa=?'
+    ).bind(id_empresa).first<any>();
+    const num_controle = toInt(b.num_controle) || nextN?.n || 1;
+
+    const { id_remessa: idR, dt_previsao: dt_prev, prazo_dias: diasFinal } =
+      await persistirRemessaUnitaria({
+        item: head, num_controle, lote_remessa_id: null,
+        qtd_total: totQtd, valor_total: totValor, tempo_max: tempoMaxItem,
+      });
+
+    await persistirItem(idR, head, 0);
+
+    // Compatibilidade legada: grade do 1º item replicada no terc_remessa_grade
+    for (const g of head._grade) {
+      if (toInt(g.qtd) > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
+        ).bind(idR, g.tamanho, toInt(g.qtd), id_empresa).run();
+      }
     }
+
+    // Evento + auditoria
+    await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, 'CRIADA', ?, ?, ?)`)
+      .bind(idR, `Remessa ${num_controle} criada — 1 item, ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c), id_empresa).run();
+    await audit(c, MOD, 'INS_REM', `remessa:${idR}`, 'num_controle', '', String(num_controle));
+
+    logTenant(c, 'remessa.create.success', {
+      id_remessa: idR, num_controle, itens: 1, qtd: totQtd, valor: totValor,
+    });
+
+    return c.json(ok({
+      id: idR, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal,
+      qtd_total: totQtd, valor_total: totValor,
+      preco_unit: head._preco, tempo_peca: head._tempo, status: status_inicial,
+      itens_count: 1,
+      auto: { itens_processados: 1 },
+      // HOTFIX 0047: campos novos (NULL no caminho legado)
+      lote_remessa_id: null,
+      num_controles: [num_controle],
+    }));
   }
 
-  // Evento + auditoria
-  await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, 'CRIADA', ?, ?, ?)`)
-    .bind(idR, `Remessa ${num_controle} criada — ${itensValidos.length} item(ns), ${totQtd} pç, R$ ${totValor.toFixed(2)}`, getUser(c), id_empresa).run();
-  await audit(c, MOD, 'INS_REM', `remessa:${idR}`, 'num_controle', '', String(num_controle));
+  /* -----------------------------------------------------------
+   * 🆕 CAMINHO MULTI-CTRL (HOTFIX 0047) — N ITENS, N CTRLs, 1 LOTE
+   * Cada item vira UMA remessa independente com seu próprio CTRL,
+   * todas amarradas pelo mesmo lote_remessa_id.
+   * ----------------------------------------------------------- */
 
-  logTenant(c, 'remessa.create.success', {
-    id_remessa: idR,
-    num_controle,
-    itens: itensValidos.length,
-    qtd: totQtd,
-    valor: totValor,
+  // 1) Alocar lote_remessa_id (próximo escopado por empresa)
+  const nextLote = await c.env.DB.prepare(
+    'SELECT COALESCE(MAX(lote_remessa_id),0)+1 AS n FROM terc_remessas WHERE id_empresa=?'
+  ).bind(id_empresa).first<any>();
+  const lote_remessa_id = nextLote?.n || 1;
+
+  // 2) Alocar bloco contíguo de CTRLs (MAX+1 ... MAX+N)
+  const nextCtrl = await c.env.DB.prepare(
+    'SELECT COALESCE(MAX(num_controle),0)+1 AS n FROM terc_remessas WHERE id_empresa=?'
+  ).bind(id_empresa).first<any>();
+  const baseCtrl = nextCtrl?.n || 1;
+  const ctrlList: number[] = itensValidos.map((_, i) => baseCtrl + i);
+
+  // 3) Para cada item: criar 1 remessa (1 CTRL próprio) + 1 item + grade
+  //    Agregados (qtd_total/valor_total) refletem APENAS o item desta remessa.
+  const remessasCriadas: Array<{
+    id_remessa: number; num_controle: number; cod_ref: string;
+    qtd_total: number; valor_total: number; dt_previsao: string; prazo_dias: number;
+  }> = [];
+
+  let totalLoteQtd = 0;
+  let totalLoteValor = 0;
+
+  for (let i = 0; i < itensValidos.length; i++) {
+    const it = itensValidos[i];
+    const ctrlAtual = ctrlList[i];
+
+    const { id_remessa: idR, dt_previsao, prazo_dias } = await persistirRemessaUnitaria({
+      item: it,
+      num_controle: ctrlAtual,
+      lote_remessa_id,
+      qtd_total: it._qtd,
+      valor_total: it._valor,
+      tempo_max: it._tempo,
+    });
+
+    await persistirItem(idR, it, 0);
+
+    // Compatibilidade legada: grade do item replicada em terc_remessa_grade
+    for (const g of it._grade) {
+      if (toInt(g.qtd) > 0) {
+        await c.env.DB.prepare(
+          'INSERT INTO terc_remessa_grade (id_remessa, tamanho, qtd, id_empresa) VALUES (?, ?, ?, ?)'
+        ).bind(idR, g.tamanho, toInt(g.qtd), id_empresa).run();
+      }
+    }
+
+    // Evento individual por CTRL
+    await c.env.DB.prepare(`INSERT INTO terc_eventos (id_remessa, tipo, descricao, usuario, id_empresa) VALUES (?, 'CRIADA', ?, ?, ?)`)
+      .bind(idR,
+        `Remessa ${ctrlAtual} criada (lote #${lote_remessa_id}) — ${it.cod_ref || '—'} ${it.cor || ''}, ${it._qtd} pç, R$ ${(it._valor || 0).toFixed(2)}`,
+        getUser(c), id_empresa).run();
+
+    remessasCriadas.push({
+      id_remessa: idR,
+      num_controle: ctrlAtual,
+      cod_ref: it.cod_ref || '',
+      qtd_total: it._qtd,
+      valor_total: it._valor,
+      dt_previsao,
+      prazo_dias,
+    });
+
+    totalLoteQtd += it._qtd;
+    totalLoteValor += it._valor;
+  }
+
+  // 4) Auditoria do lote (1 entrada agregada)
+  await audit(c, MOD, 'INS_REM_LOTE',
+    `lote:${lote_remessa_id}`,
+    'ctrls', '',
+    `[${ctrlList.join(',')}] N=${ctrlList.length}`
+  );
+
+  logTenant(c, 'remessa.create.success.lote', {
+    lote_remessa_id,
+    ctrls: ctrlList,
+    n_remessas: remessasCriadas.length,
+    qtd_total: totalLoteQtd,
+    valor_total: totalLoteValor,
   });
 
+  // 5) Resposta: estrutura compatível com chamadas antigas (id, num_controle do
+  //    primeiro CTRL) + campos novos (lote_remessa_id, num_controles[], remessas[])
+  const primeira = remessasCriadas[0];
   return c.json(ok({
-    id: idR, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal,
-    qtd_total: totQtd, valor_total: totValor,
-    preco_unit: head._preco, tempo_peca: head._tempo, status: status_inicial,
+    // Campos clássicos (compat com clients antigos) — referem-se à PRIMEIRA remessa do lote
+    id: primeira.id_remessa,
+    num_controle: primeira.num_controle,
+    dt_previsao: primeira.dt_previsao,
+    prazo_dias: primeira.prazo_dias,
+    qtd_total: totalLoteQtd,           // soma do lote (informacional)
+    valor_total: totalLoteValor,        // soma do lote (informacional)
+    preco_unit: itensValidos[0]._preco,
+    tempo_peca: itensValidos[0]._tempo,
+    status: status_inicial,
     itens_count: itensValidos.length,
     auto: { itens_processados: itensValidos.length },
+    // 🆕 Campos novos (HOTFIX 0047)
+    lote_remessa_id,
+    num_controles: ctrlList,
+    remessas: remessasCriadas.map(r => ({
+      id: r.id_remessa,
+      num_controle: r.num_controle,
+      cod_ref: r.cod_ref,
+      qtd_total: r.qtd_total,
+      valor_total: r.valor_total,
+      dt_previsao: r.dt_previsao,
+      prazo_dias: r.prazo_dias,
+    })),
   }));
 });
 

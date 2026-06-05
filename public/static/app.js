@@ -1705,6 +1705,57 @@ const TERC_PRINT = {
     if (!Array.isArray(remessas)) remessas = [remessas];
     if (remessas.length === 0) { toast('Sem remessas', 'warning'); return; }
 
+    // 🆕 HOTFIX 0047 — Expansão automática de LOTE
+    // Se o usuário pediu romaneio de UMA remessa que pertence a um lote
+    // multi-CTRL (lote_remessa_id != null), buscamos todas as remessas do
+    // lote para gerar 1 PDF agrupado com todos os CTRLs corretos por linha.
+    // Caso o lote já esteja pré-expandido (ex: romaneio em lote do terc),
+    // a chamada é idempotente — IDs duplicados são deduplicados.
+    try {
+      const lotesParaExpandir = new Set();
+      for (const r of remessas) {
+        if (r && r.lote_remessa_id) lotesParaExpandir.add(r.lote_remessa_id);
+      }
+      // Só expande se temos lote(s) E o conjunto atual NÃO já contém todas as
+      // remessas desses lotes (heurística: se já temos >1 remessa do mesmo
+      // lote, presumimos que veio expandido — ex: romaneio em lote).
+      const remessasPorLote = {};
+      for (const r of remessas) {
+        const k = r?.lote_remessa_id;
+        if (k) (remessasPorLote[k] ||= []).push(r);
+      }
+      const lotesNaoExpandidos = [...lotesParaExpandir].filter(
+        l => (remessasPorLote[l] || []).length === 1
+      );
+      if (lotesNaoExpandidos.length > 0) {
+        const expandidas = [];
+        const idsJaPresentes = new Set(remessas.map(r => r.id_remessa));
+        for (const loteId of lotesNaoExpandidos) {
+          try {
+            const resp = await api('get', '/terc/remessas/lote/' + loteId, null, { silent: true });
+            const lst = (resp?.data?.remessas || []);
+            for (const rm of lst) {
+              if (!idsJaPresentes.has(rm.id_remessa)) {
+                expandidas.push(rm);
+                idsJaPresentes.add(rm.id_remessa);
+              }
+            }
+          } catch (e) {
+            console.warn('[romaneio] falha expandindo lote ' + loteId, e);
+          }
+        }
+        if (expandidas.length > 0) {
+          // Mantém remessas que não eram de lote OU que vieram de lotes já expandidos,
+          // adiciona as recém-buscadas do mesmo lote.
+          remessas = [...remessas, ...expandidas];
+          toast(`Lote expandido — ${expandidas.length + lotesNaoExpandidos.length} remessas no romaneio`, 'info');
+        }
+      }
+    } catch (e) {
+      // Falha na expansão NUNCA bloqueia o romaneio — segue com o que tem.
+      console.warn('[romaneio] expansão de lote ignorada:', e);
+    }
+
     // ───────── Achata em "candidatos" (linhas selecionáveis) ─────────
     // Cada candidato = referência a um item específico de uma remessa
     // (ou à remessa legado completa quando não há itens).
@@ -5336,9 +5387,31 @@ async function TERC_openRemModal(id, onSave) {
     };
 
     try {
-      if (edit) await api('put', '/terc/remessas/' + id, body);
-      else await api('post', '/terc/remessas', body);
-      toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
+      if (edit) {
+        await api('put', '/terc/remessas/' + id, body);
+        toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
+      } else {
+        // 🆕 HOTFIX 0047: backend pode retornar { num_controles: [...], lote_remessa_id }
+        // quando múltiplos itens — cada item vira 1 CTRL independente.
+        const resp = await api('post', '/terc/remessas', body);
+        const data = resp?.data || {};
+        const ctrls = Array.isArray(data.num_controles) ? data.num_controles : null;
+        const lote = data.lote_remessa_id || null;
+
+        if (ctrls && ctrls.length > 1 && lote) {
+          // Múltiplos CTRLs gerados — mostra a lista para o usuário
+          const ctrlsStr = ctrls.length <= 5
+            ? ctrls.join(', ')
+            : `${ctrls.slice(0, 3).join(', ')}…${ctrls[ctrls.length - 1]}`;
+          toast(
+            `${ctrls.length} remessas criadas (CTRLs ${ctrlsStr}) — Lote #${lote}`,
+            'success'
+          );
+        } else {
+          // Comportamento clássico (1 item = 1 CTRL)
+          toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
+        }
+      }
       m.remove();
       if (onSave) onSave();
     } catch {}
