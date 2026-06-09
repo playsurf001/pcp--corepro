@@ -2448,6 +2448,101 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0049 (2026-06-09) — Padronização Multi-Tenant de Serviços
+
+### Contexto
+O usuário relatou que, em ambiente multiempresa, **duas empresas distintas não conseguiam cadastrar serviços com o mesmo nome** (ex.: empresa 2 e empresa 4 acabavam usando workarounds como "APARAR PEÇA" vs "Aparar peça"). Além disso, durante auditoria do módulo de serviços, foram identificados 4 bugs reais:
+
+| # | Bug | Severidade |
+|---|-----|------------|
+| 1 | `terc_servicos.desc_servico` tem `UNIQUE` **global** (sem `id_empresa`) | 🔴 Crítico |
+| 2 | `optServicos()` no app.js **não filtra** `s.ativo !== 0` (mostra inativos nos selects) | 🟡 Médio |
+| 3 | 6 JOINs em `relatorios_detalhados.ts` esqueciam `AND s.id_empresa = r.id_empresa` | 🟡 Médio |
+| 4 | POST/PUT `/terc/remessas` validava `id_servico` só por *truthiness* (aceitava payload manipulado) | 🟠 Segurança |
+
+### Limitação técnica do D1 documentada (Bug #1)
+A solução ideal seria **remover** a `UNIQUE` global via rebuild físico da tabela. Porém o **D1 (Cloudflare)** tem 3 restrições que tornam esse rebuild inviável sem refactoring massivo:
+
+1. **`PRAGMA foreign_keys=OFF` é ignorado** em migrations (sempre permanece `ON`).
+2. **`BEGIN`/`COMMIT` explícitos são bloqueados** (D1 exige `state.storage.transaction()` API).
+3. **`PRAGMA writable_schema=1` retorna `SQLITE_AUTH`**.
+
+Como **4 tabelas têm FK para `terc_servicos(id_servico)`** (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`), o `DROP TABLE terc_servicos` necessário ao rebuild falha com `FOREIGN KEY constraint failed`. A migration 0037 documenta exatamente o mesmo dilema para `terc_setores`.
+
+**Decisão pragmática (mesma da 0037)**: ao invés de rebuild físico (que exigiria refactoring de 5 tabelas em janela de manutenção), a 0049 **adiciona um índice UNIQUE composto** `(id_empresa, LOWER(desc_servico))` que **coexiste** com o `UNIQUE` global. Empresas distintas ainda esbarram no UNIQUE global ao tentar usar nomes idênticos — o backend retorna 409 com mensagem clara sugerindo variação. O rebuild físico completo fica para uma sprint dedicada com janela de downtime planejada.
+
+### Mudanças aplicadas
+
+**1) Migration 0049 — UNIQUE composto por empresa**
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS ux_terc_servicos_emp_desc
+  ON terc_servicos(id_empresa, LOWER(desc_servico));
+```
+Dentro da MESMA empresa, agora "Aparar" e "APARAR" são tratados como duplicata (antes só batia caso-sensitive).
+
+**2) Bug #2 — `optServicos()` filtra inativos** (`public/static/app.js`)
+```js
+// ANTES: this.servicos.map(s => `<option ...>${s.desc_servico}</option>`)
+// DEPOIS:
+const ativos = this.servicos.filter(s => s.ativo !== 0);
+// Exceção: se 'sel' aponta para serviço inativo (registro histórico),
+// mantém-no na lista com sufixo "(inativo)" para não exibir "—" em remessa antiga.
+```
+
+**3) Bug #3 — 6 JOINs em `relatorios_detalhados.ts` corrigidos**
+```sql
+-- ANTES:
+LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico
+-- DEPOIS:
+LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
+```
+Linhas afetadas: 108, 189, 220, 255, 507, 534.
+
+**4) Bug #4 — Validação batch de `id_servico` em POST + PUT remessa** (`src/routes/terceirizacao.ts`)
+```ts
+const idsUnicos = Array.from(new Set(itensValidos.map(x => x._idServ)));
+const placeholders = idsUnicos.map(() => '?').join(',');
+const rs = await c.env.DB.prepare(
+  `SELECT id_servico FROM terc_servicos WHERE id_empresa=? AND id_servico IN (${placeholders})`
+).bind(id_empresa, ...idsUnicos).all<any>();
+const encontrados = new Set((rs.results || []).map((r: any) => r.id_servico));
+const faltantes = idsUnicos.filter(id => !encontrados.has(id));
+if (faltantes.length > 0) {
+  return fail(`Serviço(s) inválido(s) ou pertencente(s) a outra empresa: ${faltantes.join(', ')}`);
+}
+```
+Aplicado em ambos endpoints (POST `/terc/remessas` e PUT `/terc/remessas/:id`).
+
+**5) Bônus — Mensagem amigável quando não há serviço ativo** (`public/static/app.js` modal preços)
+```html
+<div class="text-xs text-amber-700 mt-1">
+  <i class="fas fa-exclamation-triangle"></i>
+  Nenhum serviço ativo cadastrado. <a href="#terc-servicos">Cadastre um serviço primeiro</a>.
+</div>
+```
+
+**6) Cache bust** `v=56 → v=57` em `src/index.tsx`.
+
+### O que NÃO foi feito (e por quê)
+- ❌ **Rebuild físico de `terc_servicos`** — bloqueio técnico do D1 (ver acima). Fica para sprint dedicada.
+- ❌ **Refactoring massivo das 4 tabelas dependentes** — fora do escopo de hotfix.
+- ❌ **Trigger SQL para impedir UPDATE atravessar empresa** — over-engineering para o cenário; validação a nível de aplicação cobre.
+
+### Migration aplicada
+- LOCAL: ✅ índice `ux_terc_servicos_emp_desc` criado, 4 serviços preservados, 5 índices originais mantidos
+- REMOTE/PROD: ✅ índice criado, **7 serviços preservados** (3 empresa 1 + 3 empresa 2 + 1 empresa 4), 5 índices originais mantidos
+
+### Smoke tests
+- LOCAL: `/` 200, `/static/app.js?v=57` 200, `/static/styles.css?v=57` 200, `/api/terc/servicos` 401
+- PROD: mesmos códigos + `/api/terc/remessas` 401 ✅
+
+### Status
+- **Build**: `dist/_worker.js 343.85 kB` (+0.95 kB vs HOTFIX 0048)
+- **Deploy PROD**: ✅ `https://corepro-confeccao.pages.dev`
+- **Migration 0049**: ✅ aplicada LOCAL + REMOTE
+
+---
+
 ## 🆕 HOTFIX 0048 (2026-06-05) — Separação correta entre Remessa, CTRL e OP
 
 ### Contexto
@@ -2688,7 +2783,9 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Sidebar empurrando o menu do usuário para fora da viewport quando havia muitos módulos expandidos~~ ✅ **Implementado HOTFIX 0046** (refatoração CSS-only com flexbox 3-zonas: logo fixo no topo via `flex-shrink:0`, área de menus rolável via `flex:1 + min-height:0 + overflow-y:auto`, menu do usuário fixo no rodapé via `flex-shrink:0`, container raiz com `height:100vh + overflow:hidden`, scrollbar moderna 6px hover-revealed; **HTML 100% intacto**, **JS 100% intacto**, `_worker.js` 338.32 kB **idêntico**; funciona em desktop/notebook/tablet/mobile)
 - [x] ~~Múltiplas referências numa remessa compartilhando o mesmo CTRL~~ ✅ **Implementado HOTFIX 0047** (Opção C híbrida — `lote_remessa_id` nullable em `terc_remessas` + 2 índices; backend roteia por contagem: 1 item = legado intacto, N itens = N remessas independentes com N CTRLs sequenciais + mesmo `lote_remessa_id` via MAX+1; novo endpoint `GET /terc/remessas/lote/:id` para romaneio agrupado; toast inteligente exibindo lista de CTRLs; expansão automática do lote no PDF; cada CTRL ganha retorno/pagamento/status próprios — granularidade total; **108 remessas PROD pré-existentes ZERO alteradas**, 0 CTRLs renumerados, compat. backward 100%)
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
+- [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
+- [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).
 - [ ] **[Multi-tenant]** Rebuild do índice `ux_terc_produtos_ref_col` em `terc_produtos` para incluir `id_empresa` no UNIQUE (atualmente é `(cod_ref, COALESCE(id_colecao, 0))` — bloqueia mesmo cod_ref entre empresas distintas). Padrão da migration 0033 já está documentado.
 - [ ] **[Multi-tenant]** Rebuild do `autoindex_terc_setores_1` (UNIQUE global em `nome_setor`) para `(id_empresa, nome_setor)`. Hoje a validação tenant-scoped é feita no backend; UNIQUE composto via `codigo` já cobre garantia de DB. Rebuild requer remoção temporária da FK `terc_terceirizados.id_setor`.
 - [ ] Exportação Excel dos relatórios (hoje usamos impressão/PDF nativo do browser)

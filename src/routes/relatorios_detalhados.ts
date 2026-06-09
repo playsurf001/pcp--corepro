@@ -105,7 +105,7 @@ app.get('/relatorios-det/dashboard', async (c) => {
               COALESCE(SUM(r.qtd_total),0) AS qtd,
               COALESCE(SUM(r.valor_total),0) AS valor
        FROM terc_remessas r
-       LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        WHERE r.dt_saida BETWEEN ? AND ? ${f.where}
        GROUP BY r.id_servico ORDER BY qtd DESC LIMIT 10`
     ).bind(ini, fim, ...f.binds).all();
@@ -186,7 +186,7 @@ app.get('/relatorios-det/remessas', async (c) => {
               r.dt_saida, r.dt_previsao, r.dt_recebimento, r.status, r.status_fin,
               s.desc_servico, t.nome_terc, c.nome_colecao
        FROM terc_remessas r
-       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        LEFT JOIN terc_terceirizados t ON t.id_terc   = r.id_terc
        LEFT JOIN terc_colecoes     c ON c.id_colecao = r.id_colecao
        WHERE r.dt_saida BETWEEN ? AND ? ${f.where}
@@ -217,7 +217,7 @@ app.get('/relatorios-det/retornos', async (c) => {
        FROM terc_retornos rt
        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
        LEFT JOIN terc_terceirizados t ON t.id_terc   = r.id_terc
-       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        WHERE rt.dt_retorno BETWEEN ? AND ? ${f.where}
        ORDER BY rt.dt_retorno DESC, rt.id_retorno DESC`
     ).bind(ini, fim, ...f.binds).all();
@@ -252,7 +252,7 @@ app.get('/relatorios-det/financeiro', async (c) => {
               COALESCE(SUM(r.valor_total),0) AS valor,
               COALESCE(SUM(r.valor_pago),0)  AS pago
        FROM terc_remessas r
-       LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        WHERE r.dt_saida BETWEEN ? AND ? ${f.where}
        GROUP BY r.id_servico ORDER BY valor DESC`
     ).bind(ini, fim, ...f.binds).all();
@@ -504,7 +504,7 @@ app.get('/relatorios-det/faltas', async (c) => {
        FROM terc_retornos rt
        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
        LEFT JOIN terc_terceirizados t ON t.id_terc   = r.id_terc
-       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        WHERE rt.dt_retorno BETWEEN ? AND ? AND rt.qtd_refugo > 0 ${f.where}
        ORDER BY rt.dt_retorno DESC, rt.qtd_refugo DESC`
     ).bind(ini, fim, ...f.binds).all();
@@ -531,7 +531,7 @@ app.get('/relatorios-det/conserto', async (c) => {
        FROM terc_retornos rt
        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
        LEFT JOIN terc_terceirizados t ON t.id_terc   = r.id_terc
-       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico
+       LEFT JOIN terc_servicos     s ON s.id_servico = r.id_servico AND s.id_empresa = r.id_empresa
        WHERE rt.dt_retorno BETWEEN ? AND ? AND rt.qtd_conserto > 0 ${f.where}
        ORDER BY rt.dt_retorno DESC, rt.qtd_conserto DESC`
     ).bind(ini, fim, ...f.binds).all();

@@ -1196,7 +1196,18 @@ const TERC = {
     const opts = includeEmpty ? ['<option value="">—</option>'] : [];
     return opts.concat(ativos.map(s => `<option value="${s.id_setor}" ${sel == s.id_setor ? 'selected' : ''}>${s.nome_setor}</option>`)).join('');
   },
-  optServicos(sel) { return ['<option value="">—</option>'].concat(this.servicos.map(s => `<option value="${s.id_servico}" ${sel == s.id_servico ? 'selected' : ''}>${s.desc_servico}</option>`)).join(''); },
+  optServicos(sel) {
+    // 🛡️ HOTFIX 0049: filtra serviços inativos do select.
+    // Exceção: se 'sel' aponta para um serviço inativo (registro histórico),
+    // mantém esse específico na lista para não exibir "—" em remessa antiga.
+    const ativos = this.servicos.filter(s => s.ativo !== 0);
+    const list = (sel && !ativos.some(s => s.id_servico == sel))
+      ? ativos.concat(this.servicos.filter(s => s.id_servico == sel && s.ativo === 0))
+      : ativos;
+    return ['<option value="">—</option>']
+      .concat(list.map(s => `<option value="${s.id_servico}" ${sel == s.id_servico ? 'selected' : ''}>${s.desc_servico}${s.ativo === 0 ? ' (inativo)' : ''}</option>`))
+      .join('');
+  },
   optColecoes(sel) { return ['<option value="">Todas</option>'].concat(this.colecoes.map(s => `<option value="${s.id_colecao}" ${sel == s.id_colecao ? 'selected' : ''}>${s.nome_colecao}</option>`)).join(''); },
   optTerc(sel, onlyAtivos = false) {
     const list = onlyAtivos ? this.terceirizados.filter(t => t.ativo) : this.terceirizados;
@@ -8501,7 +8512,13 @@ async function TERC_openPrecoModal(id, onSave) {
         <input id="m-tam" value="${(p.tamanho || '').replace(/"/g, '&quot;')}" list="m-tam-dl" placeholder="Ex: M (vazio = todos)" />
         <datalist id="m-tam-dl">${tamsPadrao.map(t => `<option value="${t}">`).join('')}</datalist>
       </div>
-      <div><label>Serviço *</label><select id="m-serv">${TERC.optServicos(p.id_servico)}</select></div>
+      <div>
+        <label>Serviço *</label>
+        <select id="m-serv">${TERC.optServicos(p.id_servico)}</select>
+        ${(TERC.servicos || []).filter(s => s.ativo !== 0).length === 0
+          ? `<div class="text-xs text-amber-700 mt-1"><i class="fas fa-exclamation-triangle mr-1"></i>Nenhum serviço ativo cadastrado. <a href="#terc-servicos" class="underline">Cadastre um serviço primeiro</a>.</div>`
+          : ''}
+      </div>
       <div><label>Coleção</label><select id="m-col">${TERC.optColecoes(p.id_colecao)}</select></div>
       <div><label>Grade num. (1=única)</label><input id="m-grade" type="number" min="1" value="${p.grade || 1}" /></div>
       <div><label>Preço (R$) *</label><input id="m-preco" type="number" step="0.01" value="${p.preco || 0}" /></div>

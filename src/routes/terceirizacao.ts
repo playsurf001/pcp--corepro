@@ -2160,6 +2160,21 @@ app.post('/terc/remessas', async (c) => {
   }
   if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
 
+  // 🛡️ HOTFIX 0049 — Bug #4: validar que todo id_servico existe na empresa atual
+  // (impede payload manipulado tentando referenciar serviço de outra empresa).
+  {
+    const idsUnicos = Array.from(new Set(itensValidos.map(x => x._idServ)));
+    const placeholders = idsUnicos.map(() => '?').join(',');
+    const rs = await c.env.DB.prepare(
+      `SELECT id_servico FROM terc_servicos WHERE id_empresa=? AND id_servico IN (${placeholders})`
+    ).bind(id_empresa, ...idsUnicos).all<any>();
+    const encontrados = new Set((rs.results || []).map((r: any) => r.id_servico));
+    const faltantes = idsUnicos.filter(id => !encontrados.has(id));
+    if (faltantes.length > 0) {
+      return fail(`Serviço(s) inválido(s) ou pertencente(s) a outra empresa: ${faltantes.join(', ')}`);
+    }
+  }
+
   // ---- Terceirizado (tenant-scoped) ----
   const t = await c.env.DB.prepare(
     'SELECT id_setor, qtd_pessoas, min_trab_dia, efic_padrao, prazo_padrao FROM terc_terceirizados WHERE id_terc=? AND id_empresa=?'
@@ -2539,6 +2554,21 @@ app.put('/terc/remessas/:id', async (c) => {
     itensValidos.push({ ...it, cor: corVal, _grade: grade, _qtd: qtdItem, _idServ: idServ });
   }
   if (itensValidos.length === 0) return fail('Informe ao menos 1 item com quantidade > 0');
+
+  // 🛡️ HOTFIX 0049 — Bug #4: validar que todo id_servico existe na empresa atual
+  // (impede payload manipulado tentando referenciar serviço de outra empresa).
+  {
+    const idsUnicos = Array.from(new Set(itensValidos.map(x => x._idServ)));
+    const placeholders = idsUnicos.map(() => '?').join(',');
+    const rs = await c.env.DB.prepare(
+      `SELECT id_servico FROM terc_servicos WHERE id_empresa=? AND id_servico IN (${placeholders})`
+    ).bind(id_empresa, ...idsUnicos).all<any>();
+    const encontrados = new Set((rs.results || []).map((r: any) => r.id_servico));
+    const faltantes = idsUnicos.filter(id => !encontrados.has(id));
+    if (faltantes.length > 0) {
+      return fail(`Serviço(s) inválido(s) ou pertencente(s) a outra empresa: ${faltantes.join(', ')}`);
+    }
+  }
 
   // ---- Auto-fill por item + agregados ----
   let totQtd = 0, totValor = 0, tempoMaxItem = 0;
