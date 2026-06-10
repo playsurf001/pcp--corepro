@@ -2448,6 +2448,99 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0050 (2026-06-10) — Central de Suporte e Treinamento (v1)
+
+### Contexto
+O usuário solicitou uma área completa de suporte dentro do sistema para que cada empresa consiga aprender a utilizar todas as funcionalidades sem depender de atendimento manual. A especificação original cobria 10 itens (tutoriais, FAQ, busca, vídeos, ajuda contextual, tour guiado, CRUD de artigos, progresso de treinamento etc.).
+
+Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a **v1** com 80% do valor prometido sem dependências de banco/migration. Tour guiado e CRUD ficam para HOTFIXes futuras (0051, 0052).
+
+### Mudanças aplicadas
+
+**1) Novo módulo no menu lateral** (`public/static/app.js`)
+- Adicionada entrada `Central de Suporte` (ícone `fa-circle-question`) no grupo "Ajuda"
+- Visível a **todos os usuários autenticados** (sem restrição de perfil) — incluído em `podeAcessar()`
+- Grupo "Ajuda" registrado em `GROUP_ICONS` com ícone `fa-life-ring`
+
+**2) Conteúdo estático versionado** (`public/static/support_content.js` — novo arquivo, ~30 KB)
+- **8 tópicos completos** com tutoriais, dicas e avisos:
+  1. Primeiros Passos — sequência 8 passos para configurar a empresa do zero
+  2. Cadastro de Produtos — referências, coleções, grades, cores
+  3. Cadastro de Serviços — criar/editar/inativar + uso em produtos/preços
+  4. Remessas — multi-CTRL, romaneio, status, prazo previsto
+  5. Retornos — peças boas/faltas/consertos, retornos parciais, pagamento
+  6. Pagamentos — individual, em lote, comprovante PDF, cancelamento
+  7. Relatórios — 6 tipos (Produção, Por Terceirizado, Financeiro, Atrasos, Produtividade, Por Serviço)
+  8. Backup e Restauração — gerar, baixar, restaurar com segurança
+- **12 perguntas frequentes** em FAQ com referência cruzada aos tutoriais
+- **Mapeamento de ajuda contextual** (`SUPPORT_HELP_MAP`): 13 telas associadas aos tópicos correspondentes
+- **Função de busca** com scoring multi-campo (título=10pts, keywords=6pts, conteúdo=2pts, FAQ pergunta=12pts, FAQ corpo=4pts), normalização de acentos, máximo 20 resultados
+
+**3) `ROUTES.suporte`** (`public/static/app.js`)
+- Layout responsivo 2 colunas: sidebar de navegação (260px) + conteúdo
+- Sub-rotas via hash: `#suporte` (home/índice), `#suporte:remessas` (tópico), `#suporte:faq`, `#suporte:search:termo`
+- 4 estados de tela: Home (grid de cards), Tópico (artigo formatado), FAQ (accordion), Resultados de busca (com `<mark>` highlight nos termos)
+- Busca com debounce 350ms + atalho Enter
+
+**4) Botão `❓` de ajuda contextual** (`public/static/app.js`)
+- `MutationObserver` injeta automaticamente o botão ao lado de `<h1>` dentro de `.page-header` quando a rota está mapeada em `SUPPORT_HELP_MAP`
+- Ao clicar → abre **drawer lateral** (modal lateral 580px) com o conteúdo do tópico relacionado
+- Footer do drawer: "Abrir Central de Suporte" (vai para tópico completo) + "Fechar"
+- Escape key + clique fora também fecham
+- **Não toca em nenhum arquivo individual de tela** — injeção automática via MutationObserver
+
+**5) Roteamento adaptado para sub-rotas** (`public/static/app.js`)
+- `hashchange` listener agora extrai a base da rota (parte antes do `:`): `suporte:remessas` → base `suporte`
+- Re-renderiza quando subroute muda dentro da mesma rota base
+- `navigate()` preserva sub-rota quando a base é a mesma
+
+**6) CSS responsivo** (`public/static/styles.css` — ~370 linhas adicionadas)
+- Layout 2 colunas → empilha em mobile (`max-width: 900px`); sidebar vira scroll horizontal
+- Suporte completo a dark mode (`[data-theme="dark"]`)
+- Componentes: `.sup-nav-item`, `.sup-card`, `.sup-article`, `.sup-step`, `.sup-tip`, `.sup-warn`, `.sup-faq-item`, `.sup-result`, `.sup-help-btn`, `.sup-drawer-*`
+- Highlight de busca via `<mark>` com background amarelo translúcido
+
+**7) Cache bust** `v=57 → v=58` em `src/index.tsx` (incluindo novo `support_content.js?v=58`)
+
+### Cobertura dos critérios de aceitação
+
+| Critério | Status |
+|----------|:-:|
+| ✅ Nova Central de Suporte no menu lateral | ✅ |
+| ✅ Tutoriais organizados por módulos | ✅ 8 seções |
+| ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
+| ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
+| ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0051 |
+| ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
+| ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
+| ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
+| ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0052 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0051 |
+
+### Decisões de escopo (aprovadas pelo usuário)
+- **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
+- **Conteúdo escrito por mim** baseado em conhecimento do código; usuário revisará e solicitará ajustes depois.
+- **Vídeos como placeholders** ("Vídeo em produção. Em breve disponível neste local."); usuário gravará com calma e me passará URLs YouTube depois.
+- **Tour guiado, CRUD de artigos e progresso por empresa** ficam para HOTFIXes 0051 e 0052 (entrega faseada).
+
+### Smoke tests
+- LOCAL: `/` 200, `/static/app.js?v=58` 200, `/static/styles.css?v=58` 200, `/static/support_content.js?v=58` 200
+- PROD: mesmos códigos ✅
+- Playwright console: 0 erros JS (apenas warning padrão do Tailwind CDN)
+
+### Status
+- **Build**: `dist/_worker.js 343.91 kB` (+0.06 kB vs HOTFIX 0049 — incremento mínimo porque tudo novo é frontend)
+- **Deploy PROD**: ✅ `https://corepro-confeccao.pages.dev` (deploy `1960ea97`)
+- **Sem migration** (nenhuma alteração de schema)
+
+### Próximas HOTFIXes planejadas
+- **HOTFIX 0051**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0052**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+
+---
+
 ## 🆕 HOTFIX 0049 (2026-06-09) — Padronização Multi-Tenant de Serviços
 
 ### Contexto
@@ -2783,6 +2876,9 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Sidebar empurrando o menu do usuário para fora da viewport quando havia muitos módulos expandidos~~ ✅ **Implementado HOTFIX 0046** (refatoração CSS-only com flexbox 3-zonas: logo fixo no topo via `flex-shrink:0`, área de menus rolável via `flex:1 + min-height:0 + overflow-y:auto`, menu do usuário fixo no rodapé via `flex-shrink:0`, container raiz com `height:100vh + overflow:hidden`, scrollbar moderna 6px hover-revealed; **HTML 100% intacto**, **JS 100% intacto**, `_worker.js` 338.32 kB **idêntico**; funciona em desktop/notebook/tablet/mobile)
 - [x] ~~Múltiplas referências numa remessa compartilhando o mesmo CTRL~~ ✅ **Implementado HOTFIX 0047** (Opção C híbrida — `lote_remessa_id` nullable em `terc_remessas` + 2 índices; backend roteia por contagem: 1 item = legado intacto, N itens = N remessas independentes com N CTRLs sequenciais + mesmo `lote_remessa_id` via MAX+1; novo endpoint `GET /terc/remessas/lote/:id` para romaneio agrupado; toast inteligente exibindo lista de CTRLs; expansão automática do lote no PDF; cada CTRL ganha retorno/pagamento/status próprios — granularidade total; **108 remessas PROD pré-existentes ZERO alteradas**, 0 CTRLs renumerados, compat. backward 100%)
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
+- [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0051 e 0052** — entrega faseada combinada com o usuário.)
+- [ ] **HOTFIX 0051 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0052 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).

@@ -437,6 +437,10 @@ const NAV = [
   { id: 'minha_assinatura',      label: 'Assinatura & Plano',icon: 'fa-credit-card',      group: 'Configurações', collapsible: true, ownerOnly: true },
   { id: 'configuracoes',         label: 'Configurações',     icon: 'fa-sliders-h',        group: 'Configurações', collapsible: true, adminOnly: true },
   { id: 'backup',                label: 'Backup & Restauração', icon: 'fa-database',      group: 'Configurações', collapsible: true, adminOnly: true },
+
+  // ==== AJUDA — sempre visível a todos os usuários ====
+  // HOTFIX 0050: Central de Suporte e Treinamento
+  { id: 'suporte',               label: 'Central de Suporte',icon: 'fa-circle-question',   group: 'Ajuda' },
 ];
 
 /** Lista de grupos colapsáveis (precisa estar sincronizado com NAV) */
@@ -448,6 +452,7 @@ const GROUP_ICONS = {
   'Terceirização': 'fa-truck-fast',
   'Financeiro': 'fa-hand-holding-dollar',
   'Análises': 'fa-chart-pie',
+  'Ajuda': 'fa-life-ring',
 };
 
 /**
@@ -461,6 +466,8 @@ function podeAcessar(item) {
   if (!item) return false;
   // 'perfil' é sempre acessível ao usuário autenticado
   if (item && item.id === 'perfil') return true;
+  // HOTFIX 0050: 'suporte' é acessível a todos os usuários autenticados
+  if (item && item.id === 'suporte') return true;
   // ownerOnly: apenas o dono da empresa (is_owner=1 + admin) vê
   if (item.ownerOnly) return isOwner();
   if (isAdmin()) return true;
@@ -992,7 +999,12 @@ function navigate(route) {
   if (!route) route = rotaInicial();
 
   state.route = route;
-  location.hash = route;
+  // HOTFIX 0050: preserva sub-rota existente quando a base é a mesma (ex.: #suporte:remessas)
+  const currentHash = location.hash.slice(1);
+  const currentBase = currentHash.split(':')[0];
+  if (currentBase !== route) {
+    location.hash = route;
+  }
   $$('[data-route]').forEach((a) => a.classList.toggle('active', a.dataset.route === route));
   const navResolved = NAV.find((n) => n.id === route);
   const titleEl = $('#page-title');
@@ -12519,6 +12531,374 @@ ROUTES.backup = async (main) => {
   await loadLogs();
 };
 
+/* ============================================================
+ * HOTFIX 0050 — ROUTES.suporte — Central de Suporte e Treinamento
+ * ============================================================
+ * Layout 2 colunas (responsivo):
+ *   [ sidebar: tópicos + busca ] | [ conteúdo do tópico selecionado ]
+ *
+ * Sub-rotas via hash:
+ *   #suporte               → tela inicial (índice)
+ *   #suporte:remessas      → tópico específico
+ *   #suporte:faq           → FAQ
+ *   #suporte:search:foo    → busca pelo termo "foo"
+ *
+ * Sem dependência de banco — usa window.SUPPORT (support_content.js).
+ * ============================================================ */
+ROUTES.suporte = async (main) => {
+  if (!window.SUPPORT) {
+    main.innerHTML = `<div class="card p-6 text-red-600">Conteúdo de suporte não carregado. Recarregue a página (Ctrl+F5).</div>`;
+    return;
+  }
+  const { TOPICS, FAQ, search, findTopic } = window.SUPPORT;
+
+  // ----- parse subroute do hash (#suporte:topicId ou #suporte:search:termo) -----
+  function parseSub() {
+    const raw = (location.hash || '').slice(1); // remove #
+    if (!raw.startsWith('suporte')) return { kind: 'home' };
+    const rest = raw.slice('suporte'.length).replace(/^:/, '');
+    if (!rest) return { kind: 'home' };
+    if (rest === 'faq') return { kind: 'faq' };
+    if (rest.startsWith('search:')) return { kind: 'search', q: decodeURIComponent(rest.slice(7)) };
+    return { kind: 'topic', id: rest };
+  }
+
+  // ----- side-nav (lista de tópicos + FAQ + Início) -----
+  const sub = parseSub();
+  const activeTopic = sub.kind === 'topic' ? sub.id : null;
+  const isHome = sub.kind === 'home';
+  const isFaq = sub.kind === 'faq';
+  const isSearch = sub.kind === 'search';
+
+  const navItems = `
+    <a class="sup-nav-item ${isHome ? 'is-active' : ''}" href="#suporte" data-sup="home">
+      <i class="fas fa-house"></i><span>Início</span>
+    </a>
+    ${TOPICS.map(t => `
+      <a class="sup-nav-item ${activeTopic === t.id ? 'is-active' : ''}" href="#suporte:${t.id}" data-sup="topic" data-id="${t.id}">
+        <i class="fas ${t.icon}"></i><span>${t.title}</span>
+      </a>`).join('')}
+    <a class="sup-nav-item ${isFaq ? 'is-active' : ''}" href="#suporte:faq" data-sup="faq">
+      <i class="fas fa-circle-question"></i><span>Perguntas Frequentes</span>
+    </a>
+  `;
+
+  // ----- conteúdo principal por estado -----
+  let bodyHtml = '';
+  if (isHome) {
+    bodyHtml = renderHome();
+  } else if (isFaq) {
+    bodyHtml = renderFaq();
+  } else if (isSearch) {
+    bodyHtml = renderSearch(sub.q);
+  } else if (activeTopic) {
+    const t = findTopic(activeTopic);
+    bodyHtml = t ? renderTopic(t) : renderNotFound(activeTopic);
+  }
+
+  main.innerHTML = `
+    <div class="page-header mb-4">
+      <h1 class="text-xl font-bold">
+        <i class="fas fa-circle-question mr-2 text-brand"></i>Central de Suporte e Treinamento
+      </h1>
+      <p class="text-sm text-slate-500 mt-1">
+        Tutoriais, FAQ e ajuda em todas as funcionalidades. Use a busca para encontrar respostas rapidamente.
+      </p>
+    </div>
+
+    <div class="card p-3 mb-4">
+      <div class="sup-search-wrap">
+        <i class="fas fa-search text-slate-400"></i>
+        <input id="sup-search" type="search" placeholder="🔍 Pesquisar ajuda… ex.: como criar remessa, pagar terceirizado, restaurar backup"
+               value="${isSearch ? String(sub.q || '').replace(/"/g, '&quot;') : ''}"
+               autocomplete="off" autocorrect="off" spellcheck="false" />
+        ${isSearch ? `<a href="#suporte" class="text-xs text-slate-500 hover:underline ml-2"><i class="fas fa-times"></i> Limpar</a>` : ''}
+      </div>
+    </div>
+
+    <div class="sup-layout">
+      <aside class="sup-sidebar card">
+        ${navItems}
+      </aside>
+      <section class="sup-content card">
+        ${bodyHtml}
+      </section>
+    </div>
+  `;
+
+  // ------ bind busca ------
+  const $search = document.getElementById('sup-search');
+  if ($search) {
+    let debounceT = null;
+    $search.addEventListener('input', (e) => {
+      clearTimeout(debounceT);
+      const v = e.target.value.trim();
+      debounceT = setTimeout(() => {
+        if (!v) return;
+        location.hash = 'suporte:search:' + encodeURIComponent(v);
+      }, 350);
+    });
+    $search.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const v = $search.value.trim();
+        if (v) location.hash = 'suporte:search:' + encodeURIComponent(v);
+      }
+    });
+    // foco automático na home
+    if (isHome) setTimeout(() => $search.focus(), 100);
+  }
+
+  // ------ render functions ------
+  function renderHome() {
+    return `
+      <div class="sup-home">
+        <div class="sup-hero">
+          <i class="fas fa-graduation-cap text-5xl text-brand mb-3"></i>
+          <h2 class="text-2xl font-bold mb-1">Bem-vindo à Central de Suporte</h2>
+          <p class="text-slate-600">Aprenda a usar todas as funcionalidades do sistema. Escolha um tópico ou pesquise acima.</p>
+        </div>
+        <div class="sup-grid">
+          ${TOPICS.map(t => `
+            <a class="sup-card" href="#suporte:${t.id}">
+              <div class="sup-card-icon"><i class="fas ${t.icon}"></i></div>
+              <div class="sup-card-body">
+                <div class="sup-card-title">${t.title}</div>
+                <div class="sup-card-summary">${t.summary}</div>
+              </div>
+              <i class="fas fa-chevron-right sup-card-arrow"></i>
+            </a>
+          `).join('')}
+          <a class="sup-card sup-card-faq" href="#suporte:faq">
+            <div class="sup-card-icon"><i class="fas fa-circle-question"></i></div>
+            <div class="sup-card-body">
+              <div class="sup-card-title">Perguntas Frequentes</div>
+              <div class="sup-card-summary">${FAQ.length} respostas rápidas para as dúvidas mais comuns.</div>
+            </div>
+            <i class="fas fa-chevron-right sup-card-arrow"></i>
+          </a>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTopic(t) {
+    return `
+      <article class="sup-article">
+        <header class="sup-article-header">
+          <div class="sup-article-icon"><i class="fas ${t.icon}"></i></div>
+          <div>
+            <h2 class="sup-article-title">${t.title}</h2>
+            <p class="sup-article-summary">${t.summary}</p>
+          </div>
+        </header>
+        <div class="sup-article-body">${t.content}</div>
+        <footer class="sup-article-footer">
+          <a href="#suporte" class="btn btn-secondary"><i class="fas fa-arrow-left mr-1"></i>Voltar ao índice</a>
+          <a href="#suporte:faq" class="btn btn-secondary"><i class="fas fa-circle-question mr-1"></i>Ver FAQ</a>
+        </footer>
+      </article>
+    `;
+  }
+
+  function renderFaq() {
+    return `
+      <div class="sup-faq">
+        <h2 class="text-2xl font-bold mb-2"><i class="fas fa-circle-question mr-2 text-brand"></i>Perguntas Frequentes</h2>
+        <p class="text-sm text-slate-500 mb-4">As ${FAQ.length} dúvidas mais comuns dos usuários, agrupadas por tema.</p>
+        <div class="sup-faq-list">
+          ${FAQ.map((f, i) => `
+            <details class="sup-faq-item">
+              <summary>
+                <i class="fas fa-chevron-right sup-faq-chevron"></i>
+                <span>${f.q}</span>
+              </summary>
+              <div class="sup-faq-body">
+                ${f.a}
+                ${f.topic ? `<div class="mt-2"><a class="text-xs text-brand hover:underline" href="#suporte:${f.topic}"><i class="fas fa-book-open mr-1"></i>Ver tutorial completo</a></div>` : ''}
+              </div>
+            </details>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSearch(q) {
+    const results = search(q);
+    if (results.length === 0) {
+      return `
+        <div class="sup-empty">
+          <i class="fas fa-search text-4xl text-slate-300 mb-3"></i>
+          <div class="text-lg font-semibold">Nenhum resultado para "${escapeHtml(q)}"</div>
+          <p class="text-sm text-slate-500 mt-2">Tente termos mais gerais (ex.: <i>remessa</i>, <i>retorno</i>, <i>preço</i>) ou volte ao <a href="#suporte" class="text-brand underline">índice</a>.</p>
+        </div>`;
+    }
+    return `
+      <div class="sup-search-results">
+        <h2 class="text-xl font-bold mb-1"><i class="fas fa-search mr-2 text-brand"></i>${results.length} resultado${results.length === 1 ? '' : 's'} para "${escapeHtml(q)}"</h2>
+        <p class="text-sm text-slate-500 mb-4">Ordenados por relevância. Clique para abrir.</p>
+        <div class="sup-result-list">
+          ${results.map(r => {
+            if (r.kind === 'topic') {
+              return `
+                <a class="sup-result" href="#suporte:${r.id}">
+                  <i class="fas ${r.icon} sup-result-icon"></i>
+                  <div>
+                    <div class="sup-result-title">${highlight(r.title, q)}</div>
+                    <div class="sup-result-summary">${highlight(r.summary, q)}</div>
+                  </div>
+                  <span class="sup-result-tag">Tutorial</span>
+                </a>`;
+            } else {
+              return `
+                <a class="sup-result" href="#suporte:${r.topic || 'primeiros-passos'}">
+                  <i class="fas fa-circle-question sup-result-icon"></i>
+                  <div>
+                    <div class="sup-result-title">${highlight(r.title, q)}</div>
+                  </div>
+                  <span class="sup-result-tag sup-result-tag-faq">FAQ</span>
+                </a>`;
+            }
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderNotFound(id) {
+    return `
+      <div class="sup-empty">
+        <i class="fas fa-question-circle text-4xl text-slate-300 mb-3"></i>
+        <div class="text-lg font-semibold">Tópico não encontrado: "${escapeHtml(id)}"</div>
+        <a href="#suporte" class="btn btn-secondary mt-4"><i class="fas fa-arrow-left mr-1"></i>Voltar ao índice</a>
+      </div>`;
+  }
+
+  function escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function highlight(text, q) {
+    if (!text || !q) return escapeHtml(text);
+    const safe = escapeHtml(text);
+    try {
+      const terms = q.trim().split(/\s+/).filter(t => t.length >= 2).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      if (terms.length === 0) return safe;
+      const re = new RegExp('(' + terms.join('|') + ')', 'gi');
+      return safe.replace(re, '<mark>$1</mark>');
+    } catch { return safe; }
+  }
+};
+
+/* ============================================================
+ * HOTFIX 0050 — Ajuda Contextual: botão ❓ ao lado dos títulos
+ * ============================================================
+ * Estratégia: MutationObserver injeta um botão ❓ ao lado do <h1>
+ * dentro de .page-header SEMPRE que uma rota mapeada em SUPPORT_HELP_MAP
+ * for renderizada. Não requer modificar cada ROUTES.xxx individualmente.
+ *
+ * Ao clicar: abre um drawer (modal lateral) com o conteúdo do tópico.
+ * ============================================================ */
+(function setupContextualHelp() {
+  if (window.__supportHelpInit) return;
+  window.__supportHelpInit = true;
+
+  function getCurrentHelpTopicId() {
+    if (!window.SUPPORT) return null;
+    const route = (window.state && window.state.route) || (location.hash.slice(1).split(':')[0]) || '';
+    return window.SUPPORT.HELP_MAP[route] || null;
+  }
+
+  function buildButton(topicId) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sup-help-btn';
+    btn.title = 'Ajuda sobre esta tela';
+    btn.setAttribute('aria-label', 'Abrir ajuda contextual');
+    btn.innerHTML = '<i class="fas fa-circle-question"></i>';
+    btn.dataset.supHelp = '1';
+    btn.dataset.topicId = topicId;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openHelpDrawer(topicId);
+    });
+    return btn;
+  }
+
+  function injectHelpButton() {
+    const topicId = getCurrentHelpTopicId();
+    if (!topicId) return;
+    // procura o primeiro <h1> dentro de .page-header (padrão das telas)
+    const h1 = document.querySelector('#main-content .page-header h1');
+    if (!h1) return;
+    if (h1.querySelector('.sup-help-btn')) return; // já injetado
+    h1.appendChild(buildButton(topicId));
+  }
+
+  function openHelpDrawer(topicId) {
+    const t = window.SUPPORT && window.SUPPORT.findTopic(topicId);
+    if (!t) return;
+    // remove drawer anterior se existir
+    document.querySelectorAll('.sup-drawer-backdrop').forEach(el => el.remove());
+    const html = `
+      <div class="sup-drawer-backdrop">
+        <div class="sup-drawer">
+          <div class="sup-drawer-header">
+            <div class="font-bold text-lg flex items-center gap-2">
+              <i class="fas ${t.icon} text-brand"></i>${t.title}
+            </div>
+            <button class="sup-drawer-close" type="button" aria-label="Fechar ajuda">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+          <div class="sup-drawer-body">
+            <p class="sup-article-summary mb-3">${t.summary}</p>
+            ${t.content}
+          </div>
+          <div class="sup-drawer-footer">
+            <a class="btn btn-brand" href="#suporte:${t.id}" data-sup-close="1">
+              <i class="fas fa-expand-arrows-alt mr-1"></i>Abrir Central de Suporte
+            </a>
+            <button class="btn btn-secondary" data-sup-close="1">Fechar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html.trim();
+    const node = wrap.firstChild;
+    document.body.appendChild(node);
+    document.body.classList.add('modal-open');
+
+    const close = () => {
+      node.remove();
+      // se não há outros modais, remove a classe
+      if (!document.querySelector('.modal-backdrop, .sup-drawer-backdrop')) {
+        document.body.classList.remove('modal-open');
+      }
+    };
+    node.querySelector('.sup-drawer-close')?.addEventListener('click', close);
+    node.addEventListener('click', (e) => { if (e.target === node) close(); });
+    node.querySelectorAll('[data-sup-close]').forEach(b => b.addEventListener('click', close));
+    document.addEventListener('keydown', function escClose(ev) {
+      if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', escClose); }
+    });
+  }
+
+  // observa mudanças no main-content para re-injetar quando rota muda
+  function startObserver() {
+    const main = document.getElementById('main-content');
+    if (!main) { setTimeout(startObserver, 500); return; }
+    const mo = new MutationObserver(() => injectHelpButton());
+    mo.observe(main, { childList: true, subtree: true });
+    // inject imediato
+    injectHelpButton();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startObserver);
+  } else {
+    startObserver();
+  }
+})();
+
 (async function init() {
   // Recupera mensagem de logout vinda do hard reload (se houver)
   let logoutMsg = null;
@@ -12568,8 +12948,15 @@ ROUTES.backup = async (main) => {
       renderLogin(logoutMsg || 'Faça login para continuar.');
       return;
     }
-    const r = location.hash.slice(1) || 'dashboard';
-    if (r !== state.route) navigate(r);
+    const raw = location.hash.slice(1) || 'dashboard';
+    // HOTFIX 0050: rota base é a parte antes de ':' (suporte:remessas → suporte)
+    const r = raw.split(':')[0];
+    if (r !== state.route) {
+      navigate(r);
+    } else if (r === 'suporte') {
+      // mesma rota base mas subroute mudou → re-render
+      render();
+    }
   });
 
   // Tem token? Valida com /auth/me
