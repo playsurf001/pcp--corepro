@@ -283,6 +283,207 @@
     .sublog-meta { font-size: .72rem; color: #64748b; margin-top: 2px; font-family: 'Menlo', monospace; }
     .sublog-det { margin-top: 6px; font-size: .72rem; color: #94a3b8; }
     .sublog-det code { background: rgba(124,58,237,.1); border: 1px solid rgba(124,58,237,.25); padding: 1px 6px; border-radius: 4px; margin-right: 4px; color: #cbd5e1; }
+
+    /* ============================================================
+     * HOTFIX 0051 — Responsividade Mobile do Painel MASTER
+     * Escopo: regras válidas apenas dentro de #master-app
+     * Não impacta app.js principal (este arquivo só carrega em #master)
+     * Breakpoints oficiais: 1024 (tablet), 768 (mobile), 480 (small)
+     * ============================================================ */
+
+    /* Hambúrguer (oculto no desktop, exibido <=1024) */
+    #master-app .master-hamburger {
+      display: none;
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      z-index: 9500;
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #fff;
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      font-size: 1.15rem;
+      cursor: pointer;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,.35);
+      transition: background .15s, transform .15s;
+    }
+    #master-app .master-hamburger:hover { background: #334155; }
+    #master-app .master-hamburger:active { transform: scale(.94); }
+
+    /* Overlay (oculto no desktop) */
+    #master-app .master-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.6);
+      z-index: 8800;
+      backdrop-filter: blur(2px);
+      animation: masterFadeIn .2s ease-out;
+    }
+    @keyframes masterFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    /* ===== TABLET (<=1024px) — sidebar vira off-canvas ===== */
+    @media (max-width: 1024px) {
+      #master-app .master-hamburger { display: inline-flex; }
+
+      /* Sidebar: posiciona como drawer lateral, oculta por padrão */
+      #master-app .master-sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 280px;
+        max-width: 80vw;
+        z-index: 9000;
+        transform: translateX(-105%);
+        transition: transform .25s ease-out;
+        box-shadow: 4px 0 24px rgba(0,0,0,.5);
+        overflow-y: auto;
+        padding-top: 64px; /* reserva espaço para o ☰ flutuante */
+      }
+      /* Estado aberto */
+      #master-app.is-menu-open .master-sidebar { transform: translateX(0); }
+      #master-app.is-menu-open .master-overlay { display: block; }
+
+      /* Content ganha 100% e respiro no topo para o ☰ */
+      #master-app .master-content {
+        padding: 64px 20px 24px;
+        width: 100%;
+        min-width: 0;
+        overflow-x: hidden;
+      }
+
+      /* Header da tela: empilha título + ação */
+      #master-app .master-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      #master-app .master-header > button,
+      #master-app .master-header .master-btn { width: 100%; justify-content: center; }
+      #master-app .master-header h2 { font-size: 1.35rem; }
+
+      /* KPIs: 2 por linha em tablet */
+      #master-app .master-kpi,
+      #master-app .master-kpi[style*="repeat(5"] {
+        grid-template-columns: repeat(2, 1fr) !important;
+      }
+      #master-app .master-kpi .value { font-size: 1.6rem; }
+
+      /* Cards de planos / jobs: 1 por linha */
+      #master-app .plans-grid,
+      #master-app .jobs-grid { grid-template-columns: 1fr !important; }
+
+      /* Form do plano: 1 coluna */
+      #master-app .plan-form-grid { grid-template-columns: 1fr !important; }
+      #master-app .plan-form-section .grid-2,
+      #master-app .plan-form-section .grid-3,
+      #master-app .master-form .grid-2,
+      #master-app .master-form .grid-3 { grid-template-columns: 1fr 1fr !important; }
+
+      /* Filtros de empresas: 2 colunas no tablet */
+      #master-app .m-emp-filters { grid-template-columns: 1fr 1fr !important; }
+
+      /* Tabela: scroll horizontal apenas no container, nunca na página */
+      #master-app .master-card:has(> .master-table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      #master-app .master-table { min-width: 720px; }
+
+      /* Modais ocupam quase toda a tela */
+      #master-app .master-modal-bg { padding: 12px; }
+      #master-app .master-modal {
+        width: 95%;
+        max-width: 95%;
+        max-height: 90vh;
+        padding: 22px 18px;
+        border-radius: 14px;
+      }
+      #master-app .master-modal .actions { flex-direction: column-reverse; gap: 8px; }
+      #master-app .master-modal .actions .master-btn { width: 100%; justify-content: center; }
+    }
+
+    /* ===== MOBILE (<=768px) — cards 1 por linha + filtros empilhados ===== */
+    @media (max-width: 768px) {
+      #master-app .master-kpi,
+      #master-app .master-kpi[style*="repeat(5"] {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+      }
+      #master-app .master-kpi .value { font-size: 1.8rem; }
+
+      /* Filtros: um abaixo do outro */
+      #master-app .m-emp-filters {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 12px !important;
+      }
+      #master-app .m-emp-filters > * { width: 100%; }
+
+      /* Forms do master ficam em 1 coluna */
+      #master-app .master-form .grid-2,
+      #master-app .master-form .grid-3,
+      #master-app .plan-form-section .grid-2,
+      #master-app .plan-form-section .grid-3 { grid-template-columns: 1fr !important; }
+      #master-app .plan-feats-grid { grid-template-columns: 1fr !important; }
+
+      /* Inputs ocupam 100% */
+      #master-app .master-input,
+      #master-app .master-select,
+      #master-app .master-textarea { width: 100%; }
+
+      /* Botões de ação em tabela: esconde texto, mostra só ícone */
+      #master-app .master-table .master-btn,
+      #master-app .master-table .master-btn-icon {
+        padding: 8px 10px !important;
+      }
+      #master-app .master-table .master-btn-label { display: none; }
+      /* Reduz padding das células */
+      #master-app .master-table th,
+      #master-app .master-table td { padding: 10px 12px; font-size: .82rem; }
+
+      /* Cards (planos): ações em coluna */
+      #master-app .plan-actions { flex-direction: column; }
+      #master-app .plan-actions .master-btn { width: 100%; justify-content: center; }
+
+      /* Header da tela: título menor */
+      #master-app .master-content { padding: 60px 14px 20px; }
+      #master-app .master-header h2 { font-size: 1.2rem; }
+      #master-app .master-header .subtitle { font-size: .78rem; }
+
+      /* Reduz padding interno de cards */
+      #master-app .master-card { padding: 16px; }
+
+      /* Modal de senha: linhas viram coluna */
+      #master-app .m-pwd-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+      #master-app .m-pwd-label { min-width: 0; }
+      #master-app .m-pwd-value { width: 100%; }
+
+      /* Login: card menor */
+      #master-app .master-login-card { padding: 26px 20px; }
+      #master-app .master-login-card .logo h1 { font-size: 1.3rem; }
+    }
+
+    /* ===== iPHONE / SMALL (<=480px) — ajustes finos ===== */
+    @media (max-width: 480px) {
+      #master-app .master-hamburger {
+        top: 10px; left: 10px;
+        width: 40px; height: 40px;
+      }
+      #master-app .master-content { padding: 56px 10px 18px; }
+      #master-app .master-header h2 { font-size: 1.1rem; }
+      #master-app .master-kpi .value { font-size: 1.5rem; }
+      #master-app .master-modal { padding: 18px 14px; }
+      #master-app .master-modal h3 { font-size: 1.05rem; }
+      #master-app .master-table th,
+      #master-app .master-table td { padding: 8px 10px; font-size: .78rem; }
+
+      /* Toast não sai da tela */
+      #master-toast { left: 10px !important; right: 10px !important; top: 70px !important; }
+      #master-toast > div { min-width: 0 !important; max-width: 100% !important; }
+    }
     `;
     const s = document.createElement('style');
     s.id = 'master-css';
@@ -371,6 +572,8 @@
     document.body.innerHTML = '<div id="master-app"></div>';
     const app = $('#master-app');
     app.innerHTML = `
+    <button class="master-hamburger" id="m-hamburger" aria-label="Abrir menu" type="button"><i class="fas fa-bars"></i></button>
+    <div class="master-overlay" id="m-overlay"></div>
     <div class="master-shell">
       <aside class="master-sidebar">
         <h1><i class="fas fa-crown" style="color:#fbbf24"></i> CorePro <span class="tag">MASTER</span></h1>
@@ -392,8 +595,30 @@
       </main>
     </div>`;
 
+    // HOTFIX 0051 — Sidebar mobile retrátil
+    const appEl = app;
+    const openMenu  = () => appEl.classList.add('is-menu-open');
+    const closeMenu = () => appEl.classList.remove('is-menu-open');
+    $('#m-hamburger').onclick = (e) => {
+      e.preventDefault();
+      appEl.classList.toggle('is-menu-open');
+    };
+    $('#m-overlay').onclick = closeMenu;
+    // Fecha ao redimensionar para desktop (>1024)
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 1024) closeMenu();
+    });
+    // Fecha com ESC
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && appEl.classList.contains('is-menu-open')) closeMenu();
+    });
+
     $$('.master-nav a').forEach((a) => {
-      a.onclick = (e) => { e.preventDefault(); navigate(a.dataset.r); };
+      a.onclick = (e) => {
+        e.preventDefault();
+        navigate(a.dataset.r);
+        closeMenu(); // HOTFIX 0051 — fecha ao selecionar item
+      };
     });
     $('#m-logout').onclick = async () => {
       try { await api('post', '/master/auth/logout'); } catch {}

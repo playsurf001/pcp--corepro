@@ -2448,12 +2448,108 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0051 (2026-06-10) — Responsividade Mobile do Painel MASTER
+
+### Contexto
+A área **MASTER** (super-admin SaaS, acessível via `/#master`) estava com layout quebrado em mobile: sidebar ocupando quase metade da tela, cards/filtros cortados, scroll horizontal na página, formulários sem adaptação. Spec do usuário cobriu 12 itens com critérios de aceitação precisos.
+
+### Decisão de design
+Trabalho **100% isolado em `public/static/master.js`** — esse arquivo só é injetado quando o hash inicia com `#master`, garantindo zero impacto no app principal. Todas as regras CSS escopadas em `#master-app .master-*` como defesa em profundidade.
+
+Sem mudanças de banco, sem migrations — apenas CSS responsivo + ~25 linhas de JS para sidebar off-canvas (toggle/overlay/auto-close).
+
+### Mudanças aplicadas
+
+**1) Breakpoints oficiais** (≤1024 tablet, ≤768 mobile, ≤480 iPhone) — ~200 linhas de CSS adicionadas ao bloco `injectCSS()`.
+
+**2) Sidebar mobile retrátil (≤1024px)**
+- `position: fixed; width: 280px; max-width: 80vw; transform: translateX(-105%)` por padrão
+- Estado aberto via classe `is-menu-open` no `#master-app` → `transform: translateX(0)`
+- Transição 250ms ease-out + box-shadow
+
+**3) Botão hambúrguer (☰) flutuante**
+- Renderizado em `renderShell()` — visível apenas ≤1024px via CSS (`display: none` no desktop)
+- `top:14px; left:14px; z-index:9500` (40×40 no iPhone)
+
+**4) Overlay escuro**
+- `rgba(0,0,0,.6)` com `backdrop-filter: blur(2px)`
+- Click no overlay fecha o menu
+
+**5) Auto-close inteligente**
+- Click em item da nav fecha o menu
+- Tecla `Escape` fecha
+- Resize para >1024px fecha
+
+**6) Cards do Dashboard**
+- Desktop: auto-fit minmax(220px, 1fr)
+- ≤1024px: 2 colunas
+- ≤768px: 1 coluna
+- Sobrescreve o style inline `repeat(5,...)` da tela de Empresas
+
+**7) Filtros responsivos (Empresas)**
+- ≤1024px: 2 colunas; ≤768px: `flex-direction: column; gap: 12px` (um abaixo do outro)
+
+**8) Tabelas com scroll interno**
+- Wrapper `.master-card:has(> .master-table)` ganha `overflow-x: auto`
+- Tabela com `min-width: 720px` força scroll *interno*, nunca na página
+
+**9) Botões de ação na tabela (≤768px)**
+- Padding reduzido para `8px 10px`; classe `.master-btn-label` preparada para tooltip futuro
+
+**10) Modais (≤1024px)**
+- `width: 95%; max-width: 95%; max-height: 90vh; padding: 22px 18px`
+- Botões de ação viram coluna full-width
+
+**11) Formulários (≤768px)**
+- Todos os grids (`.grid-2`, `.grid-3`, `.plan-form-grid`, `.plan-feats-grid`) viram `1fr`
+- Inputs/selects/textareas com `width: 100%`
+
+**12) Header de tela (≤1024px)**
+- `flex-direction: column` (título empilha sobre botão)
+- Botão de ação com `width: 100%`
+- Títulos reduzem progressivamente (1.6 → 1.35 → 1.2 → 1.1 rem)
+
+**13) Tela de Login e Toast** também adaptados em mobile/iPhone
+
+### Cobertura dos critérios de aceitação
+| # | Critério | Status |
+|---|----------|--------|
+| 1 | Sidebar retrátil no mobile | ✅ off-canvas via `translateX` |
+| 2 | Nenhum conteúdo cortado | ✅ padding + `overflow-x: hidden` |
+| 3 | Nenhum scroll horizontal na página | ✅ apenas tabela tem scroll interno |
+| 4 | Cards empilhados (4/2/1) | ✅ por breakpoint |
+| 5 | Filtros responsivos | ✅ flex column em mobile |
+| 6 | Tabelas scroll interno | ✅ overflow-x + min-width 720px |
+| 7 | Modais adaptados | ✅ 95% width, 90vh height |
+| 8 | Formulários 100% largura | ✅ todos grids viram 1fr |
+| 9 | Compatível com todo módulo MASTER | ✅ regras universais |
+| 10 | Não impactar empresas clientes | ✅ master.js só em `#master` + `#master-app` |
+| 11 | Breakpoints 1024/768/480 | ✅ implementados |
+| 12 | Layout otimizado para uma mão | ✅ hambúrguer top-left, overlay fácil |
+
+### Cache busting
+- `master.js`: `v=5` → **`v=6`**
+- `app.js`: `v=58` → **`v=59`** (que referencia o novo master.js)
+
+### Validação
+- Build: `dist/_worker.js 343.91 kB` (sem alteração — código novo no .js estático)
+- 15 verificações estruturais via grep: ✅ todas passaram
+- Playwright LOCAL + PROD: 0 erros JS
+- Smoke PROD: `/`, `app.js?v=59`, `master.js?v=6`, `support_content.js?v=58`, `styles.css?v=58` → todos `200`
+- Escopo `#master-app` confirmado em 49 ocorrências
+
+### Próximos passos sugeridos
+- Validação visual real em iPhone SE / iPhone 13 / Samsung / iPad pelo usuário
+- Ajustes finos via 0051.x se necessário
+
+---
+
 ## 🆕 HOTFIX 0050 (2026-06-10) — Central de Suporte e Treinamento (v1)
 
 ### Contexto
 O usuário solicitou uma área completa de suporte dentro do sistema para que cada empresa consiga aprender a utilizar todas as funcionalidades sem depender de atendimento manual. A especificação original cobria 10 itens (tutoriais, FAQ, busca, vídeos, ajuda contextual, tour guiado, CRUD de artigos, progresso de treinamento etc.).
 
-Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a **v1** com 80% do valor prometido sem dependências de banco/migration. Tour guiado e CRUD ficam para HOTFIXes futuras (0051, 0052).
+Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a **v1** com 80% do valor prometido sem dependências de banco/migration. Tour guiado e CRUD ficam para HOTFIXes futuras (0052, 0053).
 
 ### Mudanças aplicadas
 
@@ -2511,19 +2607,19 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0051 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0052 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0052 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0051 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0053 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0052 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
 - **Conteúdo escrito por mim** baseado em conhecimento do código; usuário revisará e solicitará ajustes depois.
 - **Vídeos como placeholders** ("Vídeo em produção. Em breve disponível neste local."); usuário gravará com calma e me passará URLs YouTube depois.
-- **Tour guiado, CRUD de artigos e progresso por empresa** ficam para HOTFIXes 0051 e 0052 (entrega faseada).
+- **Tour guiado, CRUD de artigos e progresso por empresa** ficam para HOTFIXes 0052 e 0053 (entrega faseada).
 
 ### Smoke tests
 - LOCAL: `/` 200, `/static/app.js?v=58` 200, `/static/styles.css?v=58` 200, `/static/support_content.js?v=58` 200
@@ -2536,8 +2632,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0051**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0052**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0052**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0053**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -2876,9 +2972,10 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Sidebar empurrando o menu do usuário para fora da viewport quando havia muitos módulos expandidos~~ ✅ **Implementado HOTFIX 0046** (refatoração CSS-only com flexbox 3-zonas: logo fixo no topo via `flex-shrink:0`, área de menus rolável via `flex:1 + min-height:0 + overflow-y:auto`, menu do usuário fixo no rodapé via `flex-shrink:0`, container raiz com `height:100vh + overflow:hidden`, scrollbar moderna 6px hover-revealed; **HTML 100% intacto**, **JS 100% intacto**, `_worker.js` 338.32 kB **idêntico**; funciona em desktop/notebook/tablet/mobile)
 - [x] ~~Múltiplas referências numa remessa compartilhando o mesmo CTRL~~ ✅ **Implementado HOTFIX 0047** (Opção C híbrida — `lote_remessa_id` nullable em `terc_remessas` + 2 índices; backend roteia por contagem: 1 item = legado intacto, N itens = N remessas independentes com N CTRLs sequenciais + mesmo `lote_remessa_id` via MAX+1; novo endpoint `GET /terc/remessas/lote/:id` para romaneio agrupado; toast inteligente exibindo lista de CTRLs; expansão automática do lote no PDF; cada CTRL ganha retorno/pagamento/status próprios — granularidade total; **108 remessas PROD pré-existentes ZERO alteradas**, 0 CTRLs renumerados, compat. backward 100%)
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
-- [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0051 e 0052** — entrega faseada combinada com o usuário.)
-- [ ] **HOTFIX 0051 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0052 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0052 e 0053** — entrega faseada combinada com o usuário.)
+- [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
+- [ ] **HOTFIX 0052 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0053 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).

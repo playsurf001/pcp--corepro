@@ -279,7 +279,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
   <script src="/static/support_content.js?v=58"></script>
-  <script src="/static/app.js?v=58"></script>
+  <script src="/static/app.js?v=59"></script>
   <script src="/static/relatorios_det.js?v=6"></script>
 </body>
 </html>`;
