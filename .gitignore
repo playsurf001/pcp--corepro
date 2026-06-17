@@ -35,6 +35,6 @@ lerna-debug.log*
 # Backups de banco D1 (não versionar)
 backups/
 
-# Core dumps
+# workerd core dumps
 core
 core.*

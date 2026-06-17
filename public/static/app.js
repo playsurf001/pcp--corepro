@@ -11401,11 +11401,21 @@ ROUTES.minha_assinatura = async (main) => {
 /** Modal com QR code PIX + copia-e-cola */
 function mostrarModalPix(pay) {
   const fmtBRL = (v) => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
-  const qr = pay.qr_code_base64 || '';
-  const qrText = pay.qr_code || '';
+  // HOTFIX 0052 — aceita ambos os aliases para compatibilidade
+  // (backend retorna qr_code + qr_base64 + qr_code_base64 + pix_copia_cola)
+  const qr = pay.qr_code_base64 || pay.qr_base64 || '';
+  const qrText = pay.qr_code || pay.pix_copia_cola || '';
   const valor = pay.valor || pay.transaction_amount || 0;
   const ref = pay.referencia || pay.id_payment || '—';
-  const expira = pay.dt_expiracao ? new Date(pay.dt_expiracao).toLocaleString('pt-BR') : '';
+  const expira = pay.dt_expiracao || pay.expires_at;
+  const expiraStr = expira ? new Date(expira).toLocaleString('pt-BR') : '';
+
+  // HOTFIX 0052 — validação defensiva: se backend retornou payload incompleto,
+  // mostra erro claro em vez de modal "vazio".
+  if (!qr && !qrText) {
+    toast('Falha ao gerar cobrança PIX. Tente novamente ou entre em contato com o suporte.', 'error');
+    return;
+  }
 
   const existing = document.getElementById('pix-modal');
   if (existing) existing.remove();
@@ -11449,7 +11459,7 @@ function mostrarModalPix(pay) {
           </div>
         </div>` : ''}
 
-      ${expira ? `<div style="font-size:11px;color:#64748b;text-align:center;margin-bottom:14px"><i class="fas fa-clock mr-1"></i>Expira em ${expira}</div>` : ''}
+      ${expiraStr ? `<div style="font-size:11px;color:#64748b;text-align:center;margin-bottom:14px"><i class="fas fa-clock mr-1"></i>Expira em ${expiraStr}</div>` : ''}
 
       <!-- SPRINT D: indicador de status com polling automático -->
       <div id="pix-status" style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;font-size:12px;color:#065f46;text-align:center">
@@ -11458,10 +11468,17 @@ function mostrarModalPix(pay) {
       </div>
 
       <div style="margin-top:14px;display:flex;gap:8px">
-        <button id="pix-refresh" style="flex:1;padding:12px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-weight:600;cursor:pointer">
+        <button id="pix-refresh"
+                ${pay.mp_payment_id ? '' : 'disabled'}
+                title="${pay.mp_payment_id ? 'Verifica status do pagamento no gateway' : 'Cobrança PIX ainda não foi criada no gateway'}"
+                style="flex:1;padding:12px;background:${pay.mp_payment_id ? '#3b82f6' : '#94a3b8'};color:#fff;border:none;border-radius:10px;font-weight:600;cursor:${pay.mp_payment_id ? 'pointer' : 'not-allowed'};opacity:${pay.mp_payment_id ? '1' : '.6'}">
           <i class="fas fa-rotate mr-1"></i>Já paguei (verificar agora)
         </button>
       </div>
+      ${!pay.mp_payment_id ? `
+        <div style="margin-top:10px;padding:10px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:#991b1b;text-align:center">
+          <i class="fas fa-exclamation-triangle mr-1"></i> Cobrança PIX ainda não foi criada corretamente no gateway. Feche este modal e tente novamente, ou entre em contato com o suporte.
+        </div>` : ''}
     </div>`;
   document.body.appendChild(modal);
 
@@ -12914,7 +12931,7 @@ ROUTES.suporte = async (main) => {
   if (isMasterRoute()) {
     // Injeta master.js dinamicamente
     const s = document.createElement('script');
-    s.src = '/static/master.js?v=6';
+    s.src = '/static/master.js?v=7';
     s.onerror = () => {
       $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar área Master.</p></div>';
     };

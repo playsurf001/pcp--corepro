@@ -1863,7 +1863,11 @@
             <h2>Financeiro</h2>
             <div class="subtitle">Cobranças, pagamentos PIX e receita consolidada</div>
           </div>
-          <button class="master-btn master-btn-primary" id="m-fin-cobrar"><i class="fas fa-file-invoice-dollar"></i> Nova cobrança</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="master-btn master-btn-secondary" id="m-fin-logs" title="Ver logs de pagamento"><i class="fas fa-clipboard-list"></i> Logs PIX</button>
+            <button class="master-btn master-btn-secondary" id="m-fin-diag" title="Diagnosticar integração PIX/Mercado Pago"><i class="fas fa-stethoscope"></i> Diagnosticar PIX</button>
+            <button class="master-btn master-btn-primary" id="m-fin-cobrar"><i class="fas fa-file-invoice-dollar"></i> Nova cobrança</button>
+          </div>
         </div>
 
         <!-- KPIs -->
@@ -1978,6 +1982,8 @@
 
       // Ação: Nova cobrança
       $('#m-fin-cobrar').onclick = () => openCriarCobrancaModal(empresas);
+      $('#m-fin-diag').onclick   = () => openDiagnosticoPixModal();
+      $('#m-fin-logs').onclick   = () => openLogsPixModal();
 
       bindPaymentActions();
     } catch (e) {
@@ -2106,6 +2112,237 @@
         btn.innerHTML = '<i class="fas fa-paper-plane"></i> Gerar PIX';
       }
     };
+  }
+
+  /* ============================================================
+   * HOTFIX 0052 — DIAGNÓSTICO PIX (admin only)
+   * Roda bateria de 5 testes contra o Mercado Pago e mostra resultado.
+   * ============================================================ */
+  function openDiagnosticoPixModal() {
+    const m = modal(`
+      <h3 style="font-size:1.1rem;font-weight:700;color:#fff;margin-bottom:6px;">
+        <i class="fas fa-stethoscope" style="color:#34d399"></i> Diagnóstico PIX / Mercado Pago
+      </h3>
+      <div style="color:#94a3b8;font-size:.85rem;margin-bottom:18px;">
+        Roda 5 testes contra a integração: credenciais, validação de token, conectividade, criação de PIX de teste (R$ 0,01) e consulta do PIX criado.
+      </div>
+      <div id="m-diag-body" style="min-height:120px;">
+        <div class="master-loading" style="color:#94a3b8;text-align:center;padding:24px;">
+          <i class="fas fa-spinner fa-spin"></i> Executando diagnóstico…
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="master-btn master-btn-secondary" id="m-diag-rerun"><i class="fas fa-rotate"></i> Rodar novamente</button>
+        <button type="button" class="master-btn master-btn-primary" id="m-diag-close">Fechar</button>
+      </div>
+    `);
+
+    const body = m.querySelector('#m-diag-body');
+    m.querySelector('#m-diag-close').onclick = () => m.remove();
+    m.querySelector('#m-diag-rerun').onclick = () => runDiag();
+
+    async function runDiag() {
+      body.innerHTML = `<div class="master-loading" style="color:#94a3b8;text-align:center;padding:24px;">
+        <i class="fas fa-spinner fa-spin"></i> Executando diagnóstico…
+      </div>`;
+      try {
+        const r = await api('get', '/master/billing/diagnostico-pix');
+        const data = r.data || {};
+        const tests = Array.isArray(data.testes) ? data.testes : [];
+        const resumo = data.resumo || { total: 0, sucesso: 0, falha: 0 };
+        const modo = data.modo || 'desconhecido';
+
+        // Backend retorna { nome, sucesso: boolean, detalhe: object }
+        // Vamos derivar status: pulado se detalhe.aviso, ok se sucesso, error caso contrário
+        const statusOf = (t) => {
+          if (t.detalhe && (t.detalhe.aviso || /pulado|skip/i.test(t.detalhe.aviso || ''))) return 'skip';
+          return t.sucesso ? 'ok' : 'error';
+        };
+
+        const iconOf = (st) => st === 'ok'
+          ? '<i class="fas fa-circle-check" style="color:#34d399"></i>'
+          : (st === 'skip' ? '<i class="fas fa-circle-minus" style="color:#94a3b8"></i>'
+                           : '<i class="fas fa-circle-xmark" style="color:#f87171"></i>');
+
+        const renderDetalhe = (d) => {
+          if (!d) return '';
+          if (typeof d === 'string') return d;
+          return Object.entries(d).map(([k, v]) => {
+            const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+            return `<div><span style="color:#cbd5e1;font-weight:600;">${k}:</span> ${val}</div>`;
+          }).join('');
+        };
+
+        const rowsHtml = tests.map(t => {
+          const st = statusOf(t);
+          const dica = t.detalhe && t.detalhe.diagnostico_provavel ? t.detalhe.diagnostico_provavel : null;
+          return `
+            <div style="display:flex;gap:12px;padding:12px;border:1px solid #334155;border-radius:8px;background:#0f172a;margin-bottom:8px;">
+              <div style="font-size:1.2rem;">${iconOf(st)}</div>
+              <div style="flex:1;min-width:0;">
+                <div style="color:#fff;font-weight:600;font-size:.92rem;text-transform:capitalize;">${(t.nome || '').replace(/_/g, ' ')}</div>
+                <div style="color:#94a3b8;font-size:.78rem;margin-top:4px;word-break:break-word;font-family:monospace;">
+                  ${renderDetalhe(t.detalhe)}
+                </div>
+                ${dica ? `<div style="color:#fbbf24;font-size:.78rem;margin-top:6px;"><i class="fas fa-lightbulb"></i> ${dica}</div>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        const errCount = resumo.falha || 0;
+        const okCount  = resumo.sucesso || 0;
+        const bannerColor = errCount > 0 ? '#7f1d1d' : '#064e3b';
+        const bannerText  = errCount > 0
+          ? `${errCount} de ${resumo.total} teste(s) com falha — veja detalhes abaixo.`
+          : `Todos os ${okCount} testes passaram.`;
+
+        const modoBadge = modo === 'producao'
+          ? '<span style="color:#34d399;">PRODUÇÃO</span>'
+          : (modo === 'mock' ? '<span style="color:#fbbf24;">MOCK (forçado por MP_USE_MOCK)</span>'
+                             : '<span style="color:#fbbf24;">MOCK (sem MP_ACCESS_TOKEN)</span>');
+
+        body.innerHTML = `
+          <div style="background:${bannerColor};border-radius:8px;padding:12px 14px;margin-bottom:14px;color:#fff;font-weight:600;font-size:.9rem;">
+            ${errCount > 0 ? '<i class="fas fa-triangle-exclamation"></i>' : '<i class="fas fa-circle-check"></i>'} ${bannerText}
+          </div>
+          <div style="font-size:.78rem;color:#94a3b8;margin-bottom:10px;display:flex;gap:14px;flex-wrap:wrap;">
+            <span><b style="color:#e2e8f0;">Modo:</b> ${modoBadge}</span>
+            ${data.executado_por ? `<span><b style="color:#e2e8f0;">Por:</b> ${data.executado_por}</span>` : ''}
+            ${data.iniciado_em ? `<span><b style="color:#e2e8f0;">Em:</b> ${new Date(data.iniciado_em).toLocaleString('pt-BR')}</span>` : ''}
+          </div>
+          ${rowsHtml || '<div style="color:#94a3b8;padding:20px;text-align:center;">Nenhum teste retornado.</div>'}
+        `;
+      } catch (e) {
+        body.innerHTML = `
+          <div style="background:#7f1d1d;color:#fff;padding:14px;border-radius:8px;font-weight:600;">
+            <i class="fas fa-triangle-exclamation"></i> Erro ao rodar diagnóstico: ${e.message || e}
+          </div>`;
+      }
+    }
+
+    runDiag();
+  }
+
+  /* ============================================================
+   * HOTFIX 0052 — LOGS DE PAGAMENTO (admin only)
+   * Lista últimos eventos de criação/consulta/webhook de PIX.
+   * ============================================================ */
+  function openLogsPixModal() {
+    const m = modal(`
+      <h3 style="font-size:1.1rem;font-weight:700;color:#fff;margin-bottom:6px;">
+        <i class="fas fa-clipboard-list" style="color:#a78bfa"></i> Logs de pagamento PIX
+      </h3>
+      <div style="color:#94a3b8;font-size:.85rem;margin-bottom:14px;">
+        Eventos recentes de integração com Mercado Pago (criação, consulta, webhook, diagnóstico).
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <select id="m-logs-acao" style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:7px 10px;border-radius:8px;font-size:.82rem;">
+          <option value="">Todas as ações</option>
+          <option value="create">create (criação)</option>
+          <option value="consult">consult (consulta)</option>
+          <option value="webhook">webhook</option>
+          <option value="diagnostico">diagnóstico</option>
+        </select>
+        <select id="m-logs-status" style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:7px 10px;border-radius:8px;font-size:.82rem;">
+          <option value="">Todos status</option>
+          <option value="success">success</option>
+          <option value="error">error</option>
+        </select>
+        <input type="number" id="m-logs-empresa" placeholder="id_empresa" min="1"
+               style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:7px 10px;border-radius:8px;font-size:.82rem;width:130px;"/>
+        <button type="button" class="master-btn master-btn-secondary" id="m-logs-buscar" style="padding:7px 14px;font-size:.82rem;">
+          <i class="fas fa-magnifying-glass"></i> Buscar
+        </button>
+      </div>
+      <div id="m-logs-body" style="max-height:55vh;overflow:auto;border:1px solid #334155;border-radius:8px;background:#0f172a;">
+        <div class="master-loading" style="color:#94a3b8;text-align:center;padding:24px;">
+          <i class="fas fa-spinner fa-spin"></i> Carregando…
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
+        <button type="button" class="master-btn master-btn-primary" id="m-logs-close">Fechar</button>
+      </div>
+    `);
+
+    const body = m.querySelector('#m-logs-body');
+    m.querySelector('#m-logs-close').onclick = () => m.remove();
+
+    async function loadLogs() {
+      body.innerHTML = `<div class="master-loading" style="color:#94a3b8;text-align:center;padding:24px;">
+        <i class="fas fa-spinner fa-spin"></i> Carregando…
+      </div>`;
+      try {
+        const params = new URLSearchParams();
+        params.set('limit', '100');
+        const ac = m.querySelector('#m-logs-acao').value;
+        const st = m.querySelector('#m-logs-status').value;
+        const ie = m.querySelector('#m-logs-empresa').value;
+        if (ac) params.set('acao', ac);
+        if (st) params.set('status', st);
+        if (ie) params.set('id_empresa', ie);
+
+        const r = await api('get', `/master/billing/payment-logs?${params.toString()}`);
+        const logs = (r.data?.list || r.data || []);
+
+        if (!logs.length) {
+          body.innerHTML = `<div class="master-empty" style="padding:30px;text-align:center;color:#94a3b8;">
+            <i class="fas fa-folder-open" style="font-size:1.8rem;display:block;margin-bottom:6px;"></i>
+            Nenhum log encontrado com esses filtros.
+          </div>`;
+          return;
+        }
+
+        const statusBadge = (st) => st === 'success'
+          ? '<span style="background:rgba(52,211,153,.2);color:#34d399;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:600;">SUCCESS</span>'
+          : '<span style="background:rgba(248,113,113,.2);color:#f87171;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:600;">ERROR</span>';
+
+        const acaoBadge = (ac) => {
+          const colors = {
+            create: ['#a78bfa', 'rgba(167,139,250,.15)'],
+            consult: ['#60a5fa', 'rgba(96,165,250,.15)'],
+            webhook: ['#fbbf24', 'rgba(251,191,36,.15)'],
+            diagnostico: ['#34d399', 'rgba(52,211,153,.15)'],
+          };
+          const [fg, bg] = colors[ac] || ['#94a3b8', 'rgba(148,163,184,.15)'];
+          return `<span style="background:${bg};color:${fg};padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:600;">${ac || '—'}</span>`;
+        };
+
+        body.innerHTML = logs.map(l => `
+          <details style="border-bottom:1px solid #1e293b;">
+            <summary style="cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:.82rem;">
+              <span style="color:#64748b;font-family:monospace;font-size:.72rem;min-width:140px;">${l.dt_criacao ? new Date(l.dt_criacao + 'Z').toLocaleString('pt-BR') : '—'}</span>
+              ${acaoBadge(l.acao)}
+              ${statusBadge(l.status)}
+              <span style="color:#e2e8f0;">Empresa #${l.id_empresa}</span>
+              ${l.id_payment ? `<span style="color:#94a3b8;">pay #${l.id_payment}</span>` : ''}
+              ${l.mp_payment_id ? `<span style="color:#94a3b8;font-family:monospace;font-size:.72rem;">mp:${l.mp_payment_id}</span>` : ''}
+              ${l.http_status ? `<span style="color:${l.http_status >= 400 ? '#f87171' : '#94a3b8'};">HTTP ${l.http_status}</span>` : ''}
+              ${l.valor ? `<span style="color:#34d399;font-weight:600;">R$ ${Number(l.valor).toFixed(2)}</span>` : ''}
+              ${l.erro_curto ? `<span style="color:#fca5a5;font-style:italic;">${l.erro_curto}</span>` : ''}
+            </summary>
+            <div style="padding:0 14px 12px 14px;font-family:monospace;font-size:.72rem;color:#94a3b8;">
+              ${l.usuario_login ? `<div><b style="color:#e2e8f0;">Usuário:</b> ${l.usuario_login}</div>` : ''}
+              ${l.ip_origem ? `<div><b style="color:#e2e8f0;">IP:</b> ${l.ip_origem}</div>` : ''}
+              ${l.user_agent ? `<div style="word-break:break-all;"><b style="color:#e2e8f0;">UA:</b> ${l.user_agent}</div>` : ''}
+              ${l.payload_req ? `<div style="margin-top:6px;"><b style="color:#e2e8f0;">Request:</b><pre style="background:#020617;padding:8px;border-radius:4px;margin-top:4px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto;">${escapeHtml(l.payload_req)}</pre></div>` : ''}
+              ${l.payload_res ? `<div style="margin-top:6px;"><b style="color:#e2e8f0;">Response:</b><pre style="background:#020617;padding:8px;border-radius:4px;margin-top:4px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto;">${escapeHtml(l.payload_res)}</pre></div>` : ''}
+            </div>
+          </details>
+        `).join('');
+      } catch (e) {
+        body.innerHTML = `<div style="padding:20px;color:#f87171;text-align:center;">
+          <i class="fas fa-triangle-exclamation"></i> Erro: ${e.message || e}
+        </div>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    m.querySelector('#m-logs-buscar').onclick = loadLogs;
+    loadLogs();
   }
 
   /* ============================================================

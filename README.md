@@ -2448,6 +2448,168 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0052 (2026-06-17) — PIX Não Está Sendo Gerado (Cobrança sem QR)
+
+### Contexto
+O usuário enviou print do modal **"Pagar via PIX"** no ambiente PROD `corepro` exibindo o valor (R$ 25,00) e a referência, mas **sem QR Code** e **sem o texto Copia e Cola**. O botão **"Já paguei"** ainda aparecia ativo, levando o usuário a clicar em algo que jamais consultaria o gateway (porque nenhum `mp_payment_id` havia sido criado no Mercado Pago). Sem logs nem mecanismo de diagnóstico, era impossível saber se o erro estava no token, na chave PIX, na resposta do gateway ou no contrato frontend↔backend.
+
+Investigação descobriu **três causas independentes** atuando em conjunto:
+
+| # | Causa raiz | Severidade |
+|---|---|---|
+| 1 | **Inconsistência de nomes de campo** entre backend e frontend | 🔴 Crítico |
+| 2 | **Reúso de linhas órfãs** em `payments` (sem `mp_qr_code`) bloqueava novas tentativas | 🔴 Crítico |
+| 3 | **Botão "Já paguei" sempre clicável**, mesmo sem `mp_payment_id` para consultar | 🟡 Médio |
+
+**Causa 1 — Field name drift:** o frontend (`app.js → mostrarModalPix()`) lia `pay.qr_code_base64`. O backend retornava, dependendo do endpoint, `mp_qr_code`/`mp_qr_base64` (path reused) ou `qr_code`/`qr_base64` (path new). Nenhum dos três bate com `qr_code_base64`. Os dados estavam corretos no D1 (244 chars de payload PIX + 3052 chars de PNG base64 — inspecionado em `payments` #8), mas nunca chegavam à UI.
+
+**Causa 2 — Órfãos bloqueando:** a checagem `if (existePagamentoPendente) return existePagamentoPendente` reaproveitava qualquer linha de `payments` com status pendente, mesmo as 6 linhas órfãs (id 2-6) com `mp_qr_code IS NULL` deixadas por tentativas anteriores falhas. A cada nova tentativa o usuário recebia de volta o mesmo registro vazio.
+
+**Causa 3 — UX enganosa:** o botão `<button id="pix-refresh">Já paguei</button>` estava sempre ativo. Sem `mp_payment_id` no payload (porque a criação no MP falhou), nenhuma consulta era possível — o clique gerava silêncio ou erro genérico.
+
+### Mudanças aplicadas
+
+**1) Migration 0050 — `payment_logs` (auditoria de gateway)**
+```sql
+CREATE TABLE IF NOT EXISTS payment_logs (
+  id_log INTEGER PRIMARY KEY AUTOINCREMENT,
+  id_empresa INTEGER NOT NULL,
+  id_payment INTEGER,
+  usuario_login TEXT,
+  gateway TEXT NOT NULL DEFAULT 'mercadopago',
+  acao TEXT NOT NULL,         -- create | consult | webhook | diagnostico
+  status TEXT NOT NULL,       -- success | error
+  valor REAL,
+  mp_payment_id TEXT,
+  http_status INTEGER,
+  erro_curto TEXT,
+  payload_req TEXT, payload_res TEXT,
+  ip_origem TEXT, user_agent TEXT,
+  dt_criacao TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- + 4 índices (empresa+data, payment, status+data, acao+data)
+```
+Aplicada LOCAL ✅ + REMOTE ✅.
+
+**2) `logarPaymentEvent()` em `src/routes/billing.ts`**
+Função helper que registra todos os eventos de integração:
+- Sanitiza credenciais (regex global remove `"access_token":"…"`, `Authorization: Bearer …`, `"secret":"…"` dos payloads antes de gravar)
+- Trunca `payload_req`/`payload_res` a 2000 chars
+- Captura `IP origem` (header `cf-connecting-ip` → `x-forwarded-for` → fallback) e `User-Agent`
+- **Nunca lança exceção** (try/catch ignora qualquer erro de gravação para não quebrar a cobrança principal)
+
+**3) Payload normalizado em 3 endpoints (`billing.ts`)**
+Todos os endpoints de criação de PIX agora emitem **todos os aliases** para máxima compatibilidade:
+```typescript
+return c.json(ok({
+  id_payment, mp_payment_id, valor, status,
+  qr_code: mp.qr_code,
+  qr_base64: mp.qr_base64,
+  qr_code_base64: mp.qr_base64,  // ← alias esperado pelo frontend
+  pix_copia_cola: mp.qr_code,    // ← alias alternativo
+  ticket_url,
+  expires_at, dt_expiracao: expires_at,
+  referencia: id_payment,
+  reused: false|true,
+}));
+```
+Endpoints corrigidos:
+- `POST /master/billing/empresas/:id/cobrar` (master)
+- `POST /billing/gerar-cobranca` (usuário — path reused)
+- `POST /billing/gerar-cobranca` (usuário — path new)
+
+**4) Reúso seguro — só cobranças válidas**
+```typescript
+// ANTES: if (existePagamentoPendente) return existePagamentoPendente;
+// DEPOIS:
+if (existePagamentoPendente?.mp_qr_code?.length > 10 && existePagamentoPendente.mp_payment_id) {
+  return existePagamentoPendente;  // reúso seguro
+}
+// Caso contrário: cancela órfão e prossegue para criar novo
+await DB.prepare(`UPDATE payments SET status='cancelado', dt_cancelamento=datetime('now')
+                  WHERE id_payment=? AND (mp_qr_code IS NULL OR LENGTH(mp_qr_code) <= 10)`)
+        .bind(existePagamentoPendente.id_payment).run();
+```
+
+**5) Endpoint admin `GET /api/master/billing/diagnostico-pix` (5 testes)**
+Bateria automática contra Mercado Pago:
+1. **Credenciais** — verifica presença de `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY`, `MP_WEBHOOK_SECRET`, `MP_USE_MOCK`
+2. **Token válido** — chama `GET https://api.mercadopago.com/users/me`, exibe email/site_id/country_id da conta
+3. **Conexão API MP** — latência e HTTP status
+4. **Criação PIX teste** — cria cobrança real de R$ 0,01 marcada `external_reference=DIAG-{ts}` (segura para ignorar/cancelar)
+5. **Consulta PIX teste** — consulta o ID recém-criado para validar fluxo end-to-end
+
+Resposta inclui `modo` (`producao`/`mock`/`mock-fallback`), `resumo {total, sucesso, falha}` e detalhes por teste. Se modo mock estiver ativo, os 4 testes online retornam `pulado` graciosamente. Cada execução também grava entrada em `payment_logs` com `acao='diagnostico'`.
+
+**6) Endpoint admin `GET /api/master/billing/payment-logs`**
+Lista até 500 logs ordenados por `dt_criacao DESC`. Filtros via querystring:
+- `id_empresa` (inteiro)
+- `acao` (`create` | `consult` | `webhook` | `diagnostico`)
+- `status` (`success` | `error`)
+- `id_payment` (inteiro)
+- `limit` (default 100, máximo 500)
+
+Faz `LEFT JOIN companies` para incluir `empresa_nome`/`empresa_slug`.
+
+**7) UI do MASTER — botões "Diagnosticar PIX" e "Logs PIX"** (`master.js → viewFinanceiro()`)
+Header do Financeiro ganhou dois botões:
+- **Diagnosticar PIX** (verde, ícone estetoscópio) → modal com banner verde/vermelho + lista colorida dos 5 testes; cada teste exibe nome, detalhe (key/value monospace) e dica quando aplicável (ex.: "Conta MP sem chave PIX cadastrada — vá em mercadopago.com.br → Sua conta → PIX")
+- **Logs PIX** (lilás, ícone clipboard) → modal com filtros (ação/status/empresa) + lista de até 100 logs em `<details>`/`<summary>` expansíveis com payloads request/response sanitizados em `<pre>` monospace
+
+**8) Frontend defensivo — `app.js → mostrarModalPix()`**
+```js
+// Aceita múltiplos aliases (compatível com qualquer endpoint do backend)
+const qr     = pay.qr_code_base64 || pay.qr_base64 || '';
+const qrText = pay.qr_code || pay.pix_copia_cola || '';
+const expira = pay.dt_expiracao || pay.expires_at;
+
+// Defensivo: sem QR algum, exibe toast e não monta o modal vazio
+if (!qr && !qrText) {
+  toast('Falha ao gerar cobrança PIX. Tente novamente ou entre em contato com o suporte.', 'error');
+  return;
+}
+
+// Botão "Já paguei" desabilitado quando mp_payment_id ausente
+<button id="pix-refresh"
+        ${pay.mp_payment_id ? '' : 'disabled'}
+        title="${pay.mp_payment_id ? 'Verifica status…' : 'Cobrança PIX ainda não foi criada no gateway'}"
+        style="background:${pay.mp_payment_id ? '#3b82f6' : '#94a3b8'};
+               cursor:${pay.mp_payment_id ? 'pointer' : 'not-allowed'};
+               opacity:${pay.mp_payment_id ? '1' : '.6'}">
+```
+Banner amarelo de aviso aparece dentro do modal quando `mp_payment_id` está ausente, explicando ao usuário que a cobrança ainda não foi sincronizada com o gateway.
+
+### Cobertura dos 10 critérios do spec
+
+| # | Critério | Atendido |
+|---|---|---|
+| 1 | Validar criação do PIX antes de exibir o modal | ✅ Frontend valida QR + backend só reusa cobranças com `mp_qr_code` válido |
+| 2 | Validar resposta do gateway | ✅ Backend já checa `mp.ok && mp.qr_code` antes de persistir |
+| 3 | Exibir QR Code | ✅ `<img src="data:image/png;base64,${qr}">` aceita 3 aliases |
+| 4 | Exibir PIX Copia e Cola | ✅ Aceita `qr_code` ou `pix_copia_cola` |
+| 5 | Log de erros | ✅ Tabela `payment_logs` + `logarPaymentEvent()` |
+| 6 | Validar credenciais | ✅ Endpoint `diagnostico-pix` teste 1 |
+| 7 | Corrigir endpoint `/billing/gerar-cobranca` | ✅ Path reused + path new ambos normalizados |
+| 8 | Corrigir botão "Já paguei" | ✅ Desabilitado quando `!mp_payment_id` + tooltip + cor |
+| 9 | Validar webhook | ✅ Pré-existente (HMAC-SHA256 + idempotência via `payment_webhook_events`) |
+| 10 | Diagnóstico automático | ✅ Botão "Diagnosticar PIX" no MASTER → 5 testes |
+
+### Status
+- **Build**: `dist/_worker.js 349.79 kB` (+5.88 kB vs HOTFIX 0051 — devido a `logarPaymentEvent`, 2 novos endpoints master e payload normalization)
+- **Migration**: `0050_payment_logs.sql` aplicada LOCAL ✅ + REMOTE ✅
+- **Deploy PROD**: ✅ `https://corepro-confeccao.pages.dev` (deploy `7266db3b`)
+- **Smoke PROD**: `/` 200, `app.js?v=60` 200, `master.js?v=7` 200, `diagnostico-pix` 401, `payment-logs` 401 (todos esperados ✓)
+- **Cache busted**: `app.js?v=59→v=60`, `master.js?v=6→v=7`
+
+### Como diagnosticar PIX no MASTER (uso prático)
+1. Acessar `/#master` com login master
+2. Menu **Financeiro**
+3. Clicar em **"Diagnosticar PIX"** → modal abre rodando os 5 testes (~3 segundos com token configurado)
+4. Se algum teste falhar, ver coluna `detalhe` (ex.: erro retornado pelo MP) e `dica` (ex.: "sem chave PIX cadastrada")
+5. Para auditoria histórica, clicar em **"Logs PIX"** → filtrar por `acao=create + status=error` para ver todas as falhas das últimas N tentativas com payloads completos
+
+---
+
 ## 🆕 HOTFIX 0051 (2026-06-10) — Responsividade Mobile do Painel MASTER
 
 ### Contexto
@@ -2607,13 +2769,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0052 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0053 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0053 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0052 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0054 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0053 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -2632,8 +2794,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0052**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0053**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0053**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0054**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -2974,8 +3136,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
 - [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0052 e 0053** — entrega faseada combinada com o usuário.)
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
-- [ ] **HOTFIX 0052 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0053 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [ ] **HOTFIX 0053 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0054 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).
