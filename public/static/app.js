@@ -1850,6 +1850,23 @@ const TERC_PRINT = {
       // Listas únicas para filtros rápidos
       const coresUnicas = [...new Set(candidatos.map(c => c.cor).filter(Boolean))].sort();
       const servicosUnicos = [...new Set(candidatos.map(c => c.desc_servico).filter(Boolean))].sort();
+      // 🆕 HOTFIX 0053 — OPs únicas (para chip de filtro + validação anti-mistura)
+      const opsUnicas = [...new Set(candidatos.map(c => c.num_op).filter(Boolean))].sort();
+      const hasMultiplasOps = opsUnicas.length > 1;
+
+      // 🔬 LOG DE AUDITORIA — permite ao usuário inspecionar via F12 em caso de dúvida
+      if (hasMultiplasOps) {
+        console.group('[romaneio] Modal aberto com múltiplas OPs — auditoria');
+        console.log('Total de OPs detectadas:', opsUnicas.length);
+        console.log('OPs:', opsUnicas.join(', '));
+        console.log('Total de remessas:', remessas.length);
+        console.log('Total de candidatos (linhas):', candidatos.length);
+        console.table(candidatos.map(c => ({
+          uid: c.uid, num_op: c.num_op || '(sem OP)', num_ctrl: c.num_controle,
+          ref: c.cod_ref, cor: c.cor, qtd: c.qtd_total
+        })));
+        console.groupEnd();
+      }
 
       const m = document.createElement('div');
       m.id = 'romaneio-selector-modal';
@@ -1863,10 +1880,21 @@ const TERC_PRINT = {
                 <i class="fas fa-print"></i>
                 Selecionar produtos para o romaneio
               </div>
-              <div class="rs-subtitle">${candidatos.length} produto${candidatos.length !== 1 ? 's' : ''} disponíve${candidatos.length !== 1 ? 'is' : 'l'} em ${remessas.length} remessa${remessas.length !== 1 ? 's' : ''}</div>
+              <div class="rs-subtitle">${candidatos.length} produto${candidatos.length !== 1 ? 's' : ''} disponíve${candidatos.length !== 1 ? 'is' : 'l'} em ${remessas.length} remessa${remessas.length !== 1 ? 's' : ''}${hasMultiplasOps ? ` <span class="rs-multi-op-warn" title="Este romaneio contém produtos de OPs diferentes"><i class="fas fa-triangle-exclamation"></i> ${opsUnicas.length} OPs diferentes</span>` : ''}</div>
             </div>
             <button class="rs-close" id="rs-close" aria-label="Fechar"><i class="fas fa-times"></i></button>
           </div>
+
+          ${hasMultiplasOps ? `
+            <!-- 🆕 HOTFIX 0053 — Banner de aviso quando há múltiplas OPs -->
+            <div class="rs-multi-op-banner">
+              <div class="rs-multi-op-banner-icon"><i class="fas fa-triangle-exclamation"></i></div>
+              <div class="rs-multi-op-banner-content">
+                <div class="rs-multi-op-banner-title">Atenção: este romaneio contém <b>${opsUnicas.length} OPs diferentes</b> (${opsUnicas.map(o => esc(o)).join(', ')})</div>
+                <div class="rs-multi-op-banner-hint">Se você quer gerar romaneio de <b>apenas uma OP</b>, clique no chip da OP desejada abaixo — as demais serão desmarcadas automaticamente.</div>
+              </div>
+            </div>
+          ` : ''}
 
           <!-- Toolbar -->
           <div class="rs-toolbar">
@@ -1887,8 +1915,20 @@ const TERC_PRINT = {
             </div>
           </div>
 
-          ${coresUnicas.length > 1 || servicosUnicos.length > 1 ? `
+          ${opsUnicas.length > 1 || coresUnicas.length > 1 || servicosUnicos.length > 1 ? `
             <div class="rs-quick-section">
+              ${opsUnicas.length > 1 ? `
+                <!-- 🆕 HOTFIX 0053 — Filtro rápido por OP (isolamento total: ao clicar, mantém APENAS a OP escolhida) -->
+                <div class="rs-quick-row rs-quick-row-op">
+                  <span class="rs-quick-label"><i class="fas fa-hashtag"></i> Filtrar por OP:</span>
+                  <div class="rs-pill-group">
+                    ${opsUnicas.map(o => `<button class="rs-pill rs-pill-op" data-by-op="${esc(o)}" title="Mostrar apenas OP ${esc(o)} — desmarca as demais">${esc(o)}</button>`).join('')}
+                    <button class="rs-pill rs-pill-op-all" data-by-op-all="1" title="Voltar a mostrar todas as OPs">
+                      <i class="fas fa-layer-group"></i> Todas
+                    </button>
+                  </div>
+                </div>
+              ` : ''}
               ${coresUnicas.length > 1 ? `
                 <div class="rs-quick-row">
                   <span class="rs-quick-label"><i class="fas fa-palette"></i> Cor:</span>
@@ -1921,9 +1961,10 @@ const TERC_PRINT = {
             <div class="rs-list" id="rs-list">
               ${candidatos.map(c => `
                 <label class="rs-row" data-uid="${c.uid}"
-                       data-search="${esc((c.cod_ref || '') + ' ' + (c.desc_ref || '') + ' ' + (c.desc_servico || '') + ' ' + (c.cor || ''))}"
+                       data-search="${esc((c.cod_ref || '') + ' ' + (c.desc_ref || '') + ' ' + (c.desc_servico || '') + ' ' + (c.cor || '') + ' ' + (c.num_op || ''))}"
                        data-cor="${esc(c.cor || '')}"
-                       data-serv="${esc(c.desc_servico || '')}">
+                       data-serv="${esc(c.desc_servico || '')}"
+                       data-op="${esc(c.num_op || '')}">
                   <span class="rs-col-check">
                     <input type="checkbox" data-uid="${c.uid}" checked class="rs-checkbox" />
                   </span>
@@ -2109,6 +2150,61 @@ const TERC_PRINT = {
         };
       });
 
+      // 🆕 HOTFIX 0053 — Filtro rápido por OP (ISOLAMENTO: ao clicar, exibe APENAS a OP escolhida
+      // E desmarca automaticamente todas as linhas de outras OPs. Também esconde visualmente
+      // as linhas de outras OPs para evitar confusão. É o comportamento correto quando o
+      // usuário quer imprimir "apenas a OP X".
+      m.querySelectorAll('[data-by-op]').forEach(b => {
+        b.onclick = () => {
+          const op = b.dataset.byOp;
+          console.log('[romaneio] Isolando OP:', op);
+          let mostrados = 0, desmarcados = 0;
+          $list.querySelectorAll('.rs-row').forEach(r => {
+            const rowOp = r.dataset.op || '';
+            if (rowOp === op) {
+              // Linha da OP selecionada — mostra e marca
+              r.style.display = '';
+              selecionados.add(r.dataset.uid);
+              mostrados++;
+            } else {
+              // Linha de outra OP — esconde e desmarca (ISOLAMENTO)
+              r.style.display = 'none';
+              if (selecionados.has(r.dataset.uid)) {
+                selecionados.delete(r.dataset.uid);
+                desmarcados++;
+              }
+            }
+          });
+          // Também limpa a busca livre (ela poderia conflitar com o filtro visual)
+          if ($search) $search.value = '';
+          // Atualiza estado de "empty"
+          $empty.style.display = mostrados === 0 ? '' : 'none';
+          // Marca visualmente o chip ativo
+          m.querySelectorAll('[data-by-op],[data-by-op-all]').forEach(x => x.classList.remove('rs-pill-op-active'));
+          b.classList.add('rs-pill-op-active');
+          syncCheckboxes();
+          recalcKPIs();
+          if (typeof toast === 'function') {
+            toast(`OP ${op} isolada — ${mostrados} produto${mostrados !== 1 ? 's' : ''} visíve${mostrados !== 1 ? 'is' : 'l'}${desmarcados > 0 ? ` · ${desmarcados} de outras OPs desmarcados` : ''}`, 'info');
+          }
+        };
+      });
+
+      // 🆕 HOTFIX 0053 — Chip "Todas" — remove o filtro de OP e volta a exibir tudo
+      const $rsOpAll = m.querySelector('[data-by-op-all]');
+      if ($rsOpAll) {
+        $rsOpAll.onclick = () => {
+          $list.querySelectorAll('.rs-row').forEach(r => { r.style.display = ''; });
+          $empty.style.display = 'none';
+          m.querySelectorAll('[data-by-op],[data-by-op-all]').forEach(x => x.classList.remove('rs-pill-op-active'));
+          $rsOpAll.classList.add('rs-pill-op-active');
+          setTimeout(() => $rsOpAll.classList.remove('rs-pill-op-active'), 600);
+          if (typeof toast === 'function') {
+            toast('Filtro de OP removido — todas as OPs visíveis', 'info');
+          }
+        };
+      }
+
       // ───────── Fechar e confirmar ─────────
       const close = (result) => {
         m.remove();
@@ -2130,6 +2226,28 @@ const TERC_PRINT = {
 
       const doConfirm = async () => {
         if (selecionados.size === 0) return;
+
+        // 🆕 HOTFIX 0053 — Validação anti-mistura de OPs antes de gerar
+        // Se o usuário selecionou produtos de OPs diferentes, avisa e pede confirmação
+        // explícita (evita clicar sem querer em "Gerar Romaneio" com mistura).
+        const opsSelecionadas = new Set();
+        for (const c of candidatos) {
+          if (selecionados.has(c.uid) && c.num_op) opsSelecionadas.add(c.num_op);
+        }
+        console.log('[romaneio] OPs na seleção final:', [...opsSelecionadas].join(', ') || '(nenhuma)');
+        if (opsSelecionadas.size > 1) {
+          const listaOps = [...opsSelecionadas].sort().join(', ');
+          const msg = `⚠️ ATENÇÃO: mistura de OPs detectada\n\nVocê está gerando um romaneio com produtos de ${opsSelecionadas.size} OPs diferentes:\n${listaOps}\n\nSe você quer o romaneio de APENAS UMA OP, clique em "Cancelar" e use os chips "Filtrar por OP" no topo do modal.\n\nDeseja prosseguir mesmo assim, gerando um romaneio combinado com todas as OPs acima?`;
+          if (!confirm(msg)) {
+            console.log('[romaneio] Geração cancelada pelo usuário devido a mistura de OPs');
+            if (typeof toast === 'function') {
+              toast('Use os chips "Filtrar por OP" para isolar uma OP específica antes de gerar.', 'warning');
+            }
+            return;
+          }
+          console.log('[romaneio] Usuário confirmou mistura de OPs — prosseguindo');
+        }
+
         // Reconstrói remessas com `itens` filtrados
         const remessasFiltradas = remessas.map((r, rIdx) => {
           const selCandidatos = candidatos.filter(c => c.rIdx === rIdx && selecionados.has(c.uid));
@@ -2139,6 +2257,9 @@ const TERC_PRINT = {
           const itensFiltrados = selCandidatos.map(c => r.itens[c.iIdx]);
           return { ...r, itens: itensFiltrados };
         }).filter(Boolean);
+
+        console.log('[romaneio] Remessas finais:', remessasFiltradas.length,
+                    '· OPs:', [...new Set(remessasFiltradas.map(r => r.num_op).filter(Boolean))].join(', '));
 
         $confirm.disabled = true;
         $confirm.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Gerando…';

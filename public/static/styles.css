@@ -7738,6 +7738,91 @@ body:has(.modal-backdrop) .modal {
   transform: scale(1.06);
 }
 
+/* 🆕 HOTFIX 0053 — Chips específicos para filtro por OP (amarelo/laranja distinto do lilás padrão) */
+.rs-pill-op {
+  background: rgba(251, 191, 36, 0.10);
+  border-color: rgba(251, 191, 36, 0.35);
+  color: #fcd34d;
+  font-family: ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  font-size: 0.75rem;
+}
+.rs-pill-op:hover {
+  background: rgba(251, 191, 36, 0.22);
+  border-color: rgba(251, 191, 36, 0.6);
+}
+.rs-pill-op-all {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.3);
+  color: #cbd5e1;
+}
+.rs-pill-op-all:hover {
+  background: rgba(148, 163, 184, 0.22);
+  border-color: rgba(148, 163, 184, 0.5);
+}
+.rs-pill-op-active {
+  background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+  color: #fff !important;
+  border-color: transparent !important;
+  transform: scale(1.06);
+  box-shadow: 0 4px 10px rgba(245, 158, 11, 0.35);
+}
+
+/* 🆕 HOTFIX 0053 — Banner de aviso quando romaneio contém múltiplas OPs */
+.rs-multi-op-banner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 22px;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.15), rgba(245, 158, 11, 0.05));
+  border-top: 1px solid rgba(245, 158, 11, 0.3);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fef3c7;
+}
+.rs-multi-op-banner-icon {
+  font-size: 1.4rem;
+  color: #fbbf24;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.rs-multi-op-banner-content {
+  flex: 1;
+  min-width: 0;
+}
+.rs-multi-op-banner-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fde68a;
+  line-height: 1.4;
+}
+.rs-multi-op-banner-title b {
+  color: #fcd34d;
+  font-weight: 800;
+}
+.rs-multi-op-banner-hint {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.rs-multi-op-banner-hint b {
+  color: #fcd34d;
+}
+/* Marcador inline no subtítulo do header (quando há múltiplas OPs) */
+.rs-multi-op-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 999px;
+  color: #fcd34d;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: help;
+}
+
 /* Lista de produtos */
 .rs-list-wrap {
   flex: 1;

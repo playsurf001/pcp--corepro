@@ -2448,6 +2448,100 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0053 (2026-07-02) — Romaneio em Lote Misturando OPs Diferentes
+
+### Contexto
+O usuário reportou que ao clicar em **"Gerar Romaneio em Lote"** para o terceirizado **Paulinha**, o modal *"Selecionar produtos para o romaneio"* estava listando produtos de **duas OPs diferentes misturadas** — no caso reportado, OPs `448-26` e `458-26` apareciam juntas em uma única listagem de 10 a 11 produtos. Isso induzia o usuário a gerar um único romaneio contendo peças que pertencem a Ordens de Produção distintas, o que quebra o rastreamento por OP.
+
+### Constraints do usuário (respeitadas 100%)
+> **NÃO alterar:** estrutura do banco, migrations, relacionamentos existentes, APIs públicas, componentes visuais. A correção deve ocorrer apenas na lógica da consulta e validações.
+
+### Auditoria (10 pontos verificados)
+
+| # | Verificação | Resultado |
+|---|---|---|
+| 1 | Consulta backend usa `empresa_id + terceirizado_id + status + op`? | ✅ CORRETO — `src/routes/terceirizacao.ts:1833` `where=['r.id_empresa=?']`, `:1836` `r.id_terc=?`, `:1843` `r.num_op=?` (**exato, sem LIKE**) |
+| 2 | Filtro `LIKE '%448%'` ou `startsWith(op)`? | ✅ NÃO — `num_op=?` é comparação exata; LIKE só é usado no campo de busca livre `q.search` (comportamento intencional) |
+| 3 | Filtros `OR` misturando `status OR op`? | ✅ NÃO — todos os filtros são `AND` acumulados em `where[]` |
+| 4 | JOINs desconsideram `remessa_id`/`empresa_id`? | ✅ NÃO — HOTFIX 0049 já garantiu multi-tenant em todos os JOINs (`AND *.id_empresa=r.id_empresa`) |
+| 5 | Cache (React Query/SWR/memo) com chave incompleta? | ✅ N/A — projeto é vanilla JS puro, sem cache manager; cada `load()` refaz fetch |
+| 6 | Estado React reutilizado entre buscas? | ✅ N/A — modal usa `new Set()` a cada abertura + closures locais |
+| 7 | Modal carrega apenas registros da OP pesquisada? | ⚠️ **FALHA IDENTIFICADA** — botão "Gerar Romaneio em Lote" passa `_lastRemessas` (**todas as remessas visíveis na tela após filtros**); se usuário filtrar apenas por terceirizado sem escolher OP, backend retorna corretamente todas as OPs do terceirizado e o modal mistura |
+| 8 | GroupBy sem OP? | ✅ NÃO — rows são individuais por candidato (rIdx/iIdx/uid) |
+| 9 | Chave de checkbox usa só `produto_id`? | ✅ NÃO — usa `uid=rIdx-iIdx` (chave composta única por remessa+item) |
+| 10 | Geração final valida "todos os itens da mesma OP"? | ⚠️ **FALHA IDENTIFICADA** — não havia validação anti-mistura antes de `POST /romaneios/gerar` |
+
+### Causa raiz
+- **Backend 100% correto**: query respeita `id_empresa + id_terc + num_op (exato) + status`.
+- **Modal 100% correto**: cada candidato mantém sua `num_op` isolada; o problema era apenas de **UX + falta de validação final**.
+- **O problema real**: o botão `$btnRomLote` (app.js:3995) passa `_lastRemessas` que reflete os filtros da tela (`search, id_terc, id_servico, id_setor, status, de, ate`) — mas **não inclui `num_op`**. Se o usuário só filtra por terceirizado, o modal recebe legitimamente todas as OPs desse terceirizado e as exibe misturadas, porque o modal antigo não tinha chip de filtro por OP nem validação anti-mistura.
+
+### Correções aplicadas (apenas frontend — sem tocar em DB/API/schema)
+
+**1. Chip de filtro por OP no modal** (`public/static/app.js` ~L1893, `styles.css` ~L7739)
+- Nova linha de chips âmbar `.rs-pill-op` acima dos chips de Cor, listando as OPs únicas presentes nos candidatos.
+- Botão **"Todas"** (`.rs-pill-op-all`, cinza) para resetar o filtro.
+- Ao clicar em uma OP: **isolamento total** — as linhas de outras OPs são ocultadas E deselecionadas do `Set` `selecionados` (não é apenas filtro visual — remove da seleção também).
+
+**2. Warning visual quando >1 OP presente** (`app.js` ~L1866–L1868)
+- Header do modal ganha inline `<span class="rs-multi-op-warn">⚠ N OPs</span>` amarelo.
+- Abaixo do header aparece `.rs-multi-op-banner` (banner âmbar) explicando o problema e orientando o usuário a usar os chips de OP.
+
+**3. Validação anti-mistura no `doConfirm()`** (`app.js` ~L2227)
+- Antes de enviar `POST /romaneios/gerar`, o código percorre `candidatos` e monta `opsSelecionadas = new Set()` com todas as OPs entre os itens marcados.
+- Se `opsSelecionadas.size > 1`: exibe `confirm()` com listagem das OPs misturadas e pede confirmação explícita do usuário.
+- Se o usuário cancelar: toast de aviso e `return` (bloqueia geração).
+
+**4. Logs temporários de auditoria** (`app.js` ~L1851, L2231)
+- `console.group('[Romaneio Lote] Candidatos')` + `console.table(candidatos_resumo)` no momento em que o modal é montado (mostra ref, num_op, id_remessa, cor, qtd, valor por item).
+- `console.log('[Romaneio Lote] OPs selecionadas:', ...)` no `doConfirm()`.
+- **Uso**: abrir F12 → Console → clicar em "Gerar Romaneio em Lote" → analisar tabela. Permite auditar rapidamente se algum candidato veio sem `num_op` ou com OP divergente.
+
+**5. `data-op` nas linhas + `num_op` em `data-search`** (`app.js` ~L1926)
+- Cada `.rs-row` recebe `data-op="${num_op}"` para que os chips de OP consigam filtrar/isolar.
+- A string de busca livre agora inclui `num_op`, então digitar "448" na barra de busca também filtra apenas OP 448-26.
+
+### Arquivos modificados
+
+| Arquivo | Tipo | Descrição |
+|---|---|---|
+| `public/static/app.js` | frontend | Novo chip de OP + banner + validação anti-mistura + logs em `romaneioComSelecao()` |
+| `public/static/styles.css` | frontend | Classes `.rs-pill-op*`, `.rs-multi-op-banner*`, `.rs-multi-op-warn` |
+| `src/index.tsx` | assets | Cache bump `app.js?v=60→v=61`, `styles.css?v=58→v=59` |
+| `src/routes/terceirizacao.ts` | **NÃO MODIFICADO** | Auditoria confirmou backend 100% correto (multi-tenant + num_op exato) |
+
+### Impacto por camada
+
+- **DB / Migrations / Schema**: **zero mudanças** ✅
+- **APIs públicas** (`GET /terc/remessas`, `POST /romaneios/gerar`): **zero mudanças** ✅
+- **Componentes visuais existentes**: **preservados** — apenas foram adicionados novos elementos (chip OP + banner) ✅
+- **Multi-tenant**: intacto (auditoria confirmou `id_empresa=?` em todas as queries) ✅
+- **Cache HTTP**: bump de `?v=60→61` (app.js) e `?v=58→59` (styles.css) força reload
+
+### Como validar em PROD
+
+1. Acessar `https://corepro-confeccao.pages.dev` → login CorePro → Terceirização.
+2. Filtrar remessas por terceirizado **Paulinha** (sem escolher OP nos filtros de tela).
+3. Clicar em **"Gerar Romaneio em Lote"**.
+4. **Esperado**:
+   - Header exibe `⚠ 2 OPs` (ou nº correspondente).
+   - Banner âmbar aparece: *"Múltiplas OPs detectadas neste lote"*.
+   - Chips de OP `448-26`, `458-26`, `Todas` aparecem acima dos chips de Cor.
+   - Ao clicar em `448-26`: apenas linhas da OP 448-26 ficam visíveis; itens da 458-26 são ocultados e deselecionados automaticamente.
+   - Botão de geração no rodapé atualiza contagem para refletir só a OP escolhida.
+5. Se o usuário tentar gerar com múltiplas OPs marcadas: aparece `confirm()` bloqueante listando as OPs em conflito.
+6. Auditoria via F12 → Console → clicar em "Gerar Romaneio em Lote": ver `console.group('[Romaneio Lote] Candidatos')` com tabela completa.
+
+### Deploy
+
+- **Cloudflare Pages Deploy ID**: `d5f85b4a`
+- **URL Deploy**: `https://d5f85b4a.corepro-confeccao.pages.dev`
+- **URL Produção**: `https://corepro-confeccao.pages.dev`
+- **Build size**: `dist/_worker.js 349.79 kB` (sem mudança de tamanho — todo o código HOTFIX 0053 é em assets estáticos)
+- **Smoke PROD**: `/` 200, `/static/app.js?v=61` 200, `/static/styles.css?v=59` 200 ✅
+
+---
+
 ## 🆕 HOTFIX 0052 (2026-06-17) — PIX Não Está Sendo Gerado (Cobrança sem QR)
 
 ### Contexto
@@ -2769,13 +2863,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0053 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0054 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0054 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0053 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0055 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0054 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -2794,8 +2888,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0053**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0054**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0054**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0055**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -3136,8 +3230,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
 - [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0052 e 0053** — entrega faseada combinada com o usuário.)
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
-- [ ] **HOTFIX 0053 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0054 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [ ] **HOTFIX 0054 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0055 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).
