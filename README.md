@@ -2448,6 +2448,77 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0055 (2026-07-03) — Checkbox "Selecionar Todos" Não Marca Todos os Registros Filtrados (Retornos e Remessas)
+
+### Contexto
+O usuário reportou que, ao filtrar **Retornos** pela terceirizada "Paulinha" (52 registros no total) e clicar no checkbox do cabeçalho ("Selecionar Todos"), o sistema marcava apenas os 50 registros visíveis na página atual (ou nenhum em alguns casos), ignorando os 2 registros restantes que estavam na página 2 da paginação server-side. O contador do rodapé mostrava "50 selecionados" em vez de 52, e a impressão em lote saía com registros faltando. O bug também afetava conceitualmente as **Remessas** — embora a lista de Remessas venha completa do backend (sem paginação server-side), o handler dependia exclusivamente de `.rem-bulk-check` no DOM, sem uma fonte-da-verdade persistente.
+
+### Constraints do usuário (respeitadas 100%)
+> **Não alterar:** Banco de dados. Estrutura das tabelas. APIs existentes. Regras de negócio. Layout da tela. **Corrigir apenas a lógica de seleção.**
+
+### Diagnóstico
+- **Retornos** (`/terc/retornos?page=&per_page=`): backend server-paginado (máximo 200/página). O DOM só contém a página atual — o handler `#ret-check-all` iterava `.ret-checkbox` apenas do DOM (página 1 de N).
+- Complicação adicional: itens **já pagos** ou **sem valor** têm `<span class="ret-check-na">` em vez de `<input>` (regra de negócio inalterável), então marcar "todos" já era conceitualmente diferente de "todas as linhas".
+- **Remessas** (`/terc/remessas`): backend retorna array completo (`_lastRemessas` = 100% do filtro). O handler funcionava na prática, mas dependia exclusivamente do DOM — sem robustez a futura paginação client-side ou refactor de renderização.
+
+### Auditoria (10 pontos verificados)
+
+| # | Verificação | Resultado |
+|---|---|---|
+| 1 | Fonte da verdade da seleção é DOM (`.checkbox:checked`)? | ❌ Sim — vulnerável a paginação |
+| 2 | Set persistente `_selectedIds` entre re-renders? | ❌ Não existia |
+| 3 | Snapshot dos dados completos (para print/pagar sem refetch)? | ❌ Não existia |
+| 4 | Handler `#ret-check-all` busca todas as páginas antes de marcar? | ❌ Não |
+| 5 | Contador reflete total do filtro (não da página)? | ❌ Só página atual |
+| 6 | Botão "Pagar selecionados" usa snapshot ou refaz fetch? | ⚠️ Precisava re-fetch |
+| 7 | Botão "Imprimir selecionados" reaproveita snapshot? | ❌ Refaz fetch mesmo com dados prontos |
+| 8 | Mudança de filtro invalida a seleção? | ❌ Não (mas Set não existia) |
+| 9 | `#rem-check-all` em Remessas depende só do DOM? | ⚠️ Sim (funciona, mas frágil) |
+| 10 | Itens `<span class="ret-check-na">` interferem no fluxo? | ⚠️ Precisa filtrar por "pagáveis" |
+
+### Solução implementada
+- **Set-based Selection Model (Retornos)**: introduzido `_selectedIds = new Set()` como **única fonte da verdade** para IDs marcados, persistente entre re-renders e navegação de páginas.
+- **Snapshot de dados**: `_selectionSnapshot = {filtrosHash, rows, ts}` armazena o resultado do `fetchAllRetornos()` disparado pelo `#ret-check-all`, permitindo cálculo de contador/valor/peças e impressão **sem refetch** enquanto os filtros não mudarem.
+- **Hash de filtros**: `_filtrosHash()` gera assinatura JSON dos filtros ativos; snapshot é descartado se hash mudar.
+- **`_resetSelection()` em mudança de filtro**: qualquer alteração em busca/terceirizado/setor/pagamento/datas/refresh/clear limpa `_selectedIds` + `_selectionSnapshot`.
+- **Handler `#ret-check-all` (async)**: ao marcar, executa `TERC_PRINT.fetchAllRetornos(filtros)` (todas as páginas), popula `_selectedIds` com IDs **pagáveis** (`!dt_pagamento && valor_pago > 0`), grava snapshot, sincroniza DOM e mostra toast informativo ("52 retornos selecionados" ou "50 de 52 selecionados (2 já pago(s))").
+- **`renderTable()` sincroniza DOM**: cada `.ret-checkbox` é marcado conforme `_selectedIds.has(id)` no render — garante persistência ao paginar.
+- **`updatePaymentBar()` refatorado**: contador, total (R$) e peças agora somam a partir do snapshot filtrado por `_selectedIds`, refletindo o universo completo (não apenas página visível).
+- **`getSelectedRetornos()` refatorado**: retorna objetos completos consultando `_selectionSnapshot` (com fallback para cache da página atual).
+- **`#btn-print` refatorado**: cascata de fontes — snapshot (grátis) > cache da página (grátis) > `fetchAllRetornos` (último recurso).
+- **Padrão espelhado em Remessas**: `_remSelectedIds = new Set()`, `_remResetSelection()`, handler `#rem-check-all` marca todo `_lastRemessas`, `updateRemBulkBar()` e `getSelectedRemRows()` consomem o Set.
+
+### Arquivos alterados
+- `public/static/app.js` — **~+180 linhas líquidas**:
+  - Retornos (`ROUTES.terc_retornos`): infraestrutura `_selectedIds`/`_selectionSnapshot`/`_filtrosHash`/`_resetSelection`; refatoração de `updatePaymentBar`, `getSelectedRetornos`, `renderTable`, `#ret-check-all`, `#btn-print`, `#rpb-clear`, filter-change handlers.
+  - Remessas (`ROUTES.terc_remessas`): infraestrutura `_remSelectedIds`/`_remResetSelection`; refatoração de `updateRemBulkBar`, `getSelectedRemRows`, `clearRemBulkSelection`, renderTable + `#rem-check-all`, `printRemessasLote`, filter-change handlers.
+- `src/index.tsx` — bump cache `app.js?v=62` → `v=63`
+- `README.md` — esta seção
+
+### Cache busting
+- `app.js`: **v62 → v63**
+- `styles.css`: sem mudança (v59)
+
+### Deploy
+- **Build**: `dist/_worker.js 349.79 kB` ✅ (mesmo tamanho — código HOTFIX 0055 é 100% em assets estáticos)
+- **Deploy PROD**: `https://7bcf9b2f.corepro-confeccao.pages.dev`
+- **Smoke PROD**: `/` 200, `app.js?v=63` 200, +71 refs HOTFIX 0055 no bundle ✅
+
+### Resultado esperado (validação do usuário)
+1. **Retornos** filtrando "Paulinha" (52 registros, 50 na página 1 + 2 na página 2):
+   - Clicar em ☑ Cabeçalho → todos os 52 registros pagáveis marcados
+   - Contador "52 itens selecionados" ✅
+   - Toast: "52 retorno(s) selecionado(s)" (ou "X de 52 (Y já pago(s))" se houver não-pagáveis)
+   - Ao paginar (página 2), os 2 registros aparecem já marcados
+   - Botão "Imprimir Lote" → gera exatamente 52 registros no PDF
+   - Botão "Pagar Selecionados" → total/peças refletem os 52
+2. **Remessas** filtrando "Paulinha" (N registros):
+   - Clicar em ☑ Cabeçalho → todos os N marcados
+   - Contador reflete N
+   - Impressão gera exatamente N remessas
+
+---
+
 ## 🆕 HOTFIX 0054 (2026-07-03) — Impressão em Lote (Remessas e Retornos) Cortando Registros
 
 ### Contexto
@@ -2958,13 +3029,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0054 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0056 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0055 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0054 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0057 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0056 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -2983,8 +3054,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0054**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0055**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0056**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0057**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -3325,8 +3396,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~OP herdada entre remessas no multi-CTRL (regressão do HOTFIX 0047)~~ ✅ **Corrigido HOTFIX 0048** (`persistirRemessaUnitaria()` ganha parâmetro explícito `num_op_remessa`; multi-CTRL passa `it.num_op` em vez de `b.num_op`; PUT sincroniza com `head.num_op`; frontend marca `_num_op_manual=true` em divergências detectadas na carga; migration 0048 data-fix idempotente corrigiu 1 remessa em PROD; OP volta a pertencer ao produto/referência e nunca é herdada entre remessas distintas)
 - [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0052 e 0053** — entrega faseada combinada com o usuário.)
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
-- [ ] **HOTFIX 0054 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0055 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [ ] **HOTFIX 0056 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0057 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).

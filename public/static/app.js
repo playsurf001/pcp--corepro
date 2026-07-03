@@ -3760,18 +3760,31 @@ ROUTES.terc_remessas = async (main) => {
 
   // ============================================================
   // HOTFIX 0043 — Helpers de seleção em lote para Remessas
+  // HOTFIX 0055 — Set persistente (_remSelectedIds) para robustez cross-page
+  //   Em Remessas o backend NÃO tem paginação server-side (retorna todas as
+  //   filtradas de uma vez em _lastRemessas). Ainda assim, adotamos um Set
+  //   como fonte da verdade para (a) evitar dependência de DOM, (b) permitir
+  //   futura paginação client-side sem regressão, (c) uniformidade com Retornos.
   // ============================================================
 
-  /** Lê as remessas atualmente selecionadas (checkbox marcado). */
+  const _remSelectedIds = new Set();
+
+  function _remResetSelection() {
+    _remSelectedIds.clear();
+  }
+
+  /** Lê as remessas atualmente selecionadas usando _remSelectedIds como fonte. */
   function getSelectedRemRows() {
-    const checks = $tbl.querySelectorAll('.rem-bulk-check:checked');
     const out = [];
-    checks.forEach(cb => {
-      out.push({
-        id:  Number(cb.dataset.remId),
-        num: Number(cb.dataset.remNum) || 0,
-        qtd: Number(cb.dataset.remQtd) || 0,
-      });
+    _remSelectedIds.forEach(id => {
+      const r = _lastRemessas.find(x => Number(x.id_remessa) === Number(id));
+      if (r) {
+        out.push({
+          id:  Number(r.id_remessa),
+          num: Number(r.num_controle) || 0,
+          qtd: Number(r.qtd_total) || 0,
+        });
+      }
     });
     return out;
   }
@@ -3779,20 +3792,19 @@ ROUTES.terc_remessas = async (main) => {
   /**
    * Atualiza a barra flutuante de ações em lote conforme a seleção atual.
    * Sincroniza estado do checkbox "selecionar todos" (incluindo indeterminate).
+   * HOTFIX 0055 — Baseia-se em _remSelectedIds + _lastRemessas (não DOM).
    */
   function updateRemBulkBar() {
     const bar = document.getElementById('rem-bulk-bar');
     if (!bar) return;
 
-    const allChecks = $tbl.querySelectorAll('.rem-bulk-check');
-    const selChecks = $tbl.querySelectorAll('.rem-bulk-check:checked');
-    const total = allChecks.length;
-    const sel   = selChecks.length;
+    const total = _lastRemessas.length;
+    const sel   = _remSelectedIds.size;
 
     const checkAll = $tbl.querySelector('#rem-check-all');
     if (checkAll) {
       if (sel === 0)            { checkAll.checked = false; checkAll.indeterminate = false; }
-      else if (sel === total)   { checkAll.checked = true;  checkAll.indeterminate = false; }
+      else if (sel >= total && total > 0) { checkAll.checked = true;  checkAll.indeterminate = false; }
       else                      { checkAll.checked = false; checkAll.indeterminate = true;  }
     }
 
@@ -3801,9 +3813,12 @@ ROUTES.terc_remessas = async (main) => {
       return;
     }
 
-    // Soma peças
+    // Soma peças a partir de _lastRemessas (fonte da verdade)
     let pieces = 0;
-    selChecks.forEach(cb => { pieces += Number(cb.dataset.remQtd) || 0; });
+    _remSelectedIds.forEach(id => {
+      const r = _lastRemessas.find(x => Number(x.id_remessa) === Number(id));
+      if (r) pieces += Number(r.qtd_total) || 0;
+    });
 
     const $count  = document.getElementById('rbb-count');
     const $pieces = document.getElementById('rbb-pieces');
@@ -3813,8 +3828,9 @@ ROUTES.terc_remessas = async (main) => {
     bar.classList.add('is-visible');
   }
 
-  /** Limpa toda a seleção (desmarca checkboxes + esconde barra). */
+  /** Limpa toda a seleção (desmarca checkboxes + esconde barra + reseta Set). */
   function clearRemBulkSelection() {
+    _remResetSelection(); // HOTFIX 0055
     $tbl.querySelectorAll('.rem-bulk-check').forEach(cb => { cb.checked = false; });
     const checkAll = $tbl.querySelector('#rem-check-all');
     if (checkAll) { checkAll.checked = false; checkAll.indeterminate = false; }
@@ -4241,20 +4257,39 @@ ROUTES.terc_remessas = async (main) => {
     });
 
     // === HOTFIX 0043 — Bindings de seleção em lote ===
+    // === HOTFIX 0055 — Set _remSelectedIds como fonte da verdade ===
     const checkAll = $tbl.querySelector('#rem-check-all');
     const rowChecks = $tbl.querySelectorAll('.rem-bulk-check');
 
-    if (checkAll) {
-      checkAll.addEventListener('change', () => {
-        rowChecks.forEach(cb => { cb.checked = checkAll.checked; });
-        updateRemBulkBar();
-      });
-    }
+    // Sincroniza estado inicial do DOM com _remSelectedIds (persistência entre renders)
     rowChecks.forEach(cb => {
+      const id = Number(cb.dataset.remId);
+      cb.checked = _remSelectedIds.has(id);
       cb.addEventListener('change', () => {
+        if (cb.checked) _remSelectedIds.add(id);
+        else             _remSelectedIds.delete(id);
         updateRemBulkBar();
       });
     });
+
+    if (checkAll) {
+      checkAll.addEventListener('change', () => {
+        if (checkAll.checked) {
+          // Marca TODAS as remessas de _lastRemessas (100% do filtro)
+          _remSelectedIds.clear();
+          _lastRemessas.forEach(r => _remSelectedIds.add(Number(r.id_remessa)));
+        } else {
+          // Desmarca todas
+          _remResetSelection();
+        }
+        // Reflete no DOM
+        rowChecks.forEach(cb => {
+          const id = Number(cb.dataset.remId);
+          cb.checked = _remSelectedIds.has(id);
+        });
+        updateRemBulkBar();
+      });
+    }
 
     // Reseta seleção / barra ao trocar de página/filtro
     updateRemBulkBar();
@@ -4347,11 +4382,13 @@ ROUTES.terc_remessas = async (main) => {
   }
 
   // ----- Handlers (debounce na busca; mudança de filtro reseta cache) -----
+  // HOTFIX 0055 — Mudança de filtro invalida a seleção (snapshot stale)
   let _searchTimer = null;
   $search.addEventListener('input', () => {
     clearTimeout(_searchTimer);
     _searchTimer = setTimeout(() => {
       st.search = $search.value.trim();
+      _remResetSelection(); // HOTFIX 0055
       cacheInvalidate();
       load();
     }, 300);
@@ -4360,6 +4397,7 @@ ROUTES.terc_remessas = async (main) => {
   function bindChange(el, prop) {
     el.addEventListener('change', () => {
       st[prop] = el.value;
+      _remResetSelection(); // HOTFIX 0055
       persistFilters();
       load();
     });
@@ -4379,6 +4417,7 @@ ROUTES.terc_remessas = async (main) => {
     st.status = '';     $status.value = '';
     st.de = deDefault;  $de.value = deDefault;
     st.ate = hoje;      $ate.value = hoje;
+    _remResetSelection(); // HOTFIX 0055
     persistFilters();
     cacheInvalidate();
     load();
@@ -4470,10 +4509,8 @@ ROUTES.terc_remessas = async (main) => {
     const setDone = () => { if (btn && orig) { btn.disabled = false; btn.innerHTML = orig; } };
 
     try {
-      const selIds = new Set(
-        Array.from($tbl.querySelectorAll('.rem-bulk-check:checked'))
-          .map(cb => Number(cb.dataset.remId))
-      );
+      // HOTFIX 0055 — Set persistente como fonte da verdade
+      const selIds = new Set(_remSelectedIds);
 
       // Base de filtros aplicados (para header da impressão)
       const nomeTerc  = (st.id_terc    && $terc?.selectedOptions?.[0]?.textContent) || '';
@@ -7076,6 +7113,40 @@ ROUTES.terc_retornos = async (main) => {
     per_page:  Number(savedFilters.per_page) || PER_PAGE_DEFAULT,
   };
 
+  /* ============================================================
+   * HOTFIX 0055 — Seleção CROSS-PAGE persistente
+   *
+   * Antes: o "check-all" do header só marcava as linhas do DOM (página
+   * atual). Se o filtro por terceirizado retornava 52 itens paginados
+   * em 50+2, apenas 50 eram marcados; a barra flutuante ficava com
+   * count=50 (ou 0 se todos fossem "já pagos"), e a impressão perdia
+   * os 2 restantes.
+   *
+   * Agora: mantemos um Set `_selectedIds` de IDs de retorno selecionados
+   * (fonte de verdade), persistente através de trocas de página. Cada
+   * linha renderizada sincroniza seu checkbox com o Set. Contadores,
+   * barra de pagamento e impressão consultam SEMPRE o Set.
+   *
+   * `_selectionSnapshot` guarda `{rows, ts}` de um fetch multi-página
+   * disparado pelo "check-all" (contém os dados brutos para pagamento
+   * e impressão sem novo fetch se filtros não mudaram).
+   * ============================================================ */
+  const _selectedIds = new Set(); // IDs de retornos selecionados (todas as páginas)
+  let _selectionSnapshot = null;  // {filtrosHash, rows: [...], ts: Date}
+
+  // Serializa filtros para detectar mudanças (invalida seleção quando filtros mudam)
+  function _filtrosHash() {
+    return JSON.stringify({
+      de: state.de, ate: state.ate,
+      id_terc: state.id_terc, id_setor: state.id_setor,
+      search: state.search, status_pag: state.status_pag,
+    });
+  }
+  function _resetSelection() {
+    _selectedIds.clear();
+    _selectionSnapshot = null;
+  }
+
   // ----- Render shell (1 vez) -----
   // v23.2: KPIs + filtros + paginação TUDO dentro do MESMO sticky único.
   // Nada rola "acima" do sticky — a tabela começa abaixo dele de forma sólida.
@@ -7420,19 +7491,63 @@ ROUTES.terc_retornos = async (main) => {
     }
   }
 
+  /* ============================================================
+   * HOTFIX 0055 — Fonte da verdade: _selectedIds (Set cross-page)
+   *
+   * updatePaymentBar / getSelectedRetornos agora consomem:
+   *   - _selectedIds  → IDs marcados (persistente entre páginas)
+   *   - _selectionSnapshot.rows → dados completos (quando #ret-check-all
+   *     dispara fetchAll). Se snapshot ausente ou stale, usa o cache da
+   *     página atual (cacheGet().rows) como fallback.
+   *
+   * A UI (checkboxes DOM) é apenas REFLEXO do Set.
+   * ============================================================ */
+
+  /**
+   * Retorna as rows disponíveis para consulta (snapshot > cache página).
+   * Filtra apenas pagáveis (canPay), pois só esses podem ser selecionados.
+   */
+  function _getSelectionSource() {
+    const cached = cacheGet();
+    const pageRows = cached?.rows || [];
+    const snapRows = (_selectionSnapshot && _selectionSnapshot.filtrosHash === _filtrosHash())
+      ? (_selectionSnapshot.rows || [])
+      : [];
+    // Merge por id_retorno (snapshot tem prioridade se existir)
+    const map = new Map();
+    pageRows.forEach(r => map.set(Number(r.id_retorno), r));
+    snapRows.forEach(r => map.set(Number(r.id_retorno), r));
+    return map;
+  }
+
+  /**
+   * Verifica se um retorno é "pagável" (elegível para seleção).
+   * Espelha a regra do rowHtml() acima.
+   */
+  function _isPayable(row) {
+    if (!row) return false;
+    const isPago = !!row.dt_pagamento;
+    const valor  = Number(row.valor_pago) || 0;
+    return !isPago && valor > 0;
+  }
+
   // Atualiza barra flutuante de pagamento conforme seleção
   function updatePaymentBar() {
     const bar = document.getElementById('ret-payment-bar');
     if (!bar) return;
-    const checks = Array.from($tbl.querySelectorAll('.ret-checkbox:checked'));
-    const count = checks.length;
-    let total = 0, pieces = 0;
+
+    const srcMap = _getSelectionSource();
+    let count = 0, total = 0, pieces = 0;
     const tercSet = new Set();
-    checks.forEach(cb => {
-      total  += Number(cb.dataset.retValor || 0);
-      pieces += Number(cb.dataset.retBoas  || 0);
-      if (cb.dataset.retTercId) tercSet.add(cb.dataset.retTercId);
+    _selectedIds.forEach(id => {
+      const r = srcMap.get(Number(id));
+      if (!r) { count++; return; } // conta ainda que dados exatos indisponíveis
+      count++;
+      total  += Number(r.valor_pago) || 0;
+      pieces += Number(r.qtd_boa)    || 0;
+      if (r.id_terc) tercSet.add(String(r.id_terc));
     });
+
     if (count === 0) { bar.style.display = 'none'; return; }
     bar.style.display = '';
     document.getElementById('rpb-count').textContent = count;
@@ -7453,25 +7568,48 @@ ROUTES.terc_retornos = async (main) => {
       $pay.classList.add('btn-primary');
       $pay.classList.remove('btn-warning');
     }
-    // Sincroniza "check-all" do header
+
+    // Sincroniza "check-all" do header considerando o UNIVERSO FILTRADO
+    // (não apenas página atual). Usa _lastFetch.total quando disponível.
     const $checkAll = $tbl.querySelector('#ret-check-all');
     if ($checkAll) {
-      const allCbs = $tbl.querySelectorAll('.ret-checkbox');
-      const allChecked = allCbs.length > 0 && count === allCbs.length;
-      const someChecked = count > 0 && count < allCbs.length;
-      $checkAll.checked = allChecked;
-      $checkAll.indeterminate = someChecked;
+      // Total teórico de pagáveis no filtro:
+      //  - Se temos snapshot → conta pagáveis no snapshot
+      //  - Senão estimamos pelo _lastFetch.total (total DE RETORNOS filtrados)
+      let totalPayable = null;
+      if (_selectionSnapshot && _selectionSnapshot.filtrosHash === _filtrosHash()) {
+        totalPayable = (_selectionSnapshot.rows || []).filter(_isPayable).length;
+      }
+      if (totalPayable != null && totalPayable > 0) {
+        const allChecked  = count >= totalPayable;
+        const someChecked = count > 0 && count < totalPayable;
+        $checkAll.checked      = allChecked;
+        $checkAll.indeterminate = someChecked;
+      } else {
+        // Sem snapshot ainda — fallback: reflete estado dos inputs visíveis
+        const pageCbs = $tbl.querySelectorAll('.ret-checkbox');
+        const pageChecked = $tbl.querySelectorAll('.ret-checkbox:checked').length;
+        $checkAll.checked      = pageCbs.length > 0 && pageChecked === pageCbs.length && count === pageChecked;
+        $checkAll.indeterminate = count > 0 && !$checkAll.checked;
+      }
     }
   }
 
   function getSelectedRetornos() {
-    return Array.from($tbl.querySelectorAll('.ret-checkbox:checked')).map(cb => ({
-      id_retorno: Number(cb.dataset.retId),
-      id_terc:    Number(cb.dataset.retTercId),
-      nome_terc:  cb.dataset.retTerc || '',
-      valor:      Number(cb.dataset.retValor || 0),
-      qtd_boa:    Number(cb.dataset.retBoas || 0),
-    }));
+    const srcMap = _getSelectionSource();
+    const out = [];
+    _selectedIds.forEach(id => {
+      const r = srcMap.get(Number(id));
+      if (!r) return;
+      out.push({
+        id_retorno: Number(r.id_retorno),
+        id_terc:    Number(r.id_terc) || 0,
+        nome_terc:  r.nome_terc || '',
+        valor:      Number(r.valor_pago) || 0,
+        qtd_boa:    Number(r.qtd_boa) || 0,
+      });
+    });
+    return out;
   }
 
   // Pagar selecionados (botão da barra flutuante)
@@ -7748,16 +7886,101 @@ ROUTES.terc_retornos = async (main) => {
       window.TERC_delRetFromList(ret, rem);
     });
 
-    // HOTFIX 0042 — Seleção para pagamento
+    /* ============================================================
+     * HOTFIX 0055 — Sincronização Set ↔ DOM na renderização
+     *
+     * 1) Cada .ret-checkbox reflete o estado do _selectedIds
+     * 2) onchange do item: atualiza o Set e reavalia a barra
+     * 3) #ret-check-all: async, se marcado busca TODAS as páginas
+     *    (fetchAllRetornos) e adiciona todos os IDs pagáveis ao Set;
+     *    se desmarcado, limpa o Set.
+     * ============================================================ */
+
+    // 1) Sincroniza estado inicial dos checkboxes com _selectedIds
     $tbl.querySelectorAll('.ret-checkbox').forEach(cb => {
-      cb.addEventListener('change', updatePaymentBar);
+      const id = Number(cb.dataset.retId);
+      cb.checked = _selectedIds.has(id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) _selectedIds.add(id);
+        else             _selectedIds.delete(id);
+        updatePaymentBar();
+      });
     });
+
     const $checkAll = $tbl.querySelector('#ret-check-all');
     if ($checkAll) {
-      $checkAll.addEventListener('change', () => {
-        const checked = $checkAll.checked;
-        $tbl.querySelectorAll('.ret-checkbox').forEach(cb => { cb.checked = checked; });
-        updatePaymentBar();
+      $checkAll.addEventListener('change', async (ev) => {
+        const shouldSelectAll = $checkAll.checked;
+
+        if (!shouldSelectAll) {
+          // Desmarcar tudo — reset completo
+          _resetSelection();
+          $tbl.querySelectorAll('.ret-checkbox').forEach(cb => { cb.checked = false; });
+          updatePaymentBar();
+          return;
+        }
+
+        // MARCAR TODOS os pagáveis do FILTRO ATUAL (todas as páginas)
+        // Bloqueia o próprio checkbox durante o fetch para evitar dupla-execução.
+        $checkAll.disabled = true;
+        const prevIndeterminate = $checkAll.indeterminate;
+        $checkAll.indeterminate = true;
+
+        try {
+          const filtrosApi = {
+            de: state.de, ate: state.ate,
+          };
+          if (state.id_terc)    filtrosApi.id_terc    = String(state.id_terc);
+          if (state.id_setor)   filtrosApi.id_setor   = String(state.id_setor);
+          if (state.search)     filtrosApi.search     = state.search;
+          if (state.status_pag) filtrosApi.status_pag = state.status_pag;
+
+          // Fetch todas as páginas
+          const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+          const rows = all.rows || [];
+
+          // Snapshot para consultas subsequentes (contadores, print, pagamento)
+          _selectionSnapshot = {
+            filtrosHash: _filtrosHash(),
+            rows,
+            ts: new Date(),
+          };
+
+          // Adiciona todos os IDs PAGÁVEIS ao Set (não pagáveis são ignorados)
+          _selectedIds.clear();
+          let payableCount = 0;
+          rows.forEach(r => {
+            if (_isPayable(r)) {
+              _selectedIds.add(Number(r.id_retorno));
+              payableCount++;
+            }
+          });
+
+          // Reflete no DOM da página atual
+          $tbl.querySelectorAll('.ret-checkbox').forEach(cb => {
+            const id = Number(cb.dataset.retId);
+            cb.checked = _selectedIds.has(id);
+          });
+
+          const totalFiltrados = rows.length;
+          const naoPagaveis    = totalFiltrados - payableCount;
+          if (payableCount === 0) {
+            toast('Nenhum retorno pagável nos filtros atuais (todos já pagos ou sem valor).', 'warning');
+          } else if (naoPagaveis > 0) {
+            toast(`${payableCount} de ${totalFiltrados} retornos selecionados (${naoPagaveis} já pago(s) ou sem valor).`, 'info');
+          } else {
+            toast(`${payableCount} retorno(s) selecionado(s).`, 'success');
+          }
+        } catch (e) {
+          console.error('[ret-check-all] fetchAll falhou', e);
+          toast('Falha ao selecionar todos: ' + (e?.message || e), 'error');
+          _resetSelection();
+          $checkAll.checked = false;
+        } finally {
+          $checkAll.disabled = false;
+          $checkAll.indeterminate = false;
+          updatePaymentBar();
+        }
       });
     }
     // Restaura seleção (filtro por terceirizado pode preservar)
@@ -7928,12 +8151,14 @@ ROUTES.terc_retornos = async (main) => {
   }
 
   // ----- Handlers (debounce na busca; mudança de filtros reseta página) -----
+  // HOTFIX 0055 — QUALQUER mudança de filtro reseta _selectedIds (snapshot fica stale)
   let _searchTimer = null;
   $search.addEventListener('input', () => {
     clearTimeout(_searchTimer);
     _searchTimer = setTimeout(() => {
       state.search = $search.value.trim();
       state.page = 1;
+      _resetSelection(); // HOTFIX 0055
       cacheInvalidate(); // busca textual sempre invalida
       fetchData();
     }, 300);
@@ -7943,6 +8168,7 @@ ROUTES.terc_retornos = async (main) => {
       const v = el.value;
       state[prop] = numeric ? (v ? Number(v) : '') : v;
       state.page = 1;
+      _resetSelection(); // HOTFIX 0055
       persistFilters();
       fetchData();
     });
@@ -7955,10 +8181,16 @@ ROUTES.terc_retornos = async (main) => {
   $pp.addEventListener('change', () => {
     state.per_page = Number($pp.value) || PER_PAGE_DEFAULT;
     state.page = 1;
+    // per_page NÃO invalida o snapshot (mesmos filtros, só o corte da UI muda);
+    // porém queremos manter o Set — não resetamos aqui.
     persistFilters();
     fetchData();
   });
-  $('#btn-refresh').onclick = () => { cacheInvalidate(); fetchData({ bypassCache: true }); };
+  $('#btn-refresh').onclick = () => {
+    _resetSelection(); // HOTFIX 0055 — refresh invalida snapshot
+    cacheInvalidate();
+    fetchData({ bypassCache: true });
+  };
   $('#btn-clear').onclick = () => {
     state.de = deDefault; $de.value = deDefault;
     state.ate = hoje;     $ate.value = hoje;
@@ -7967,6 +8199,7 @@ ROUTES.terc_retornos = async (main) => {
     state.status_pag = ''; $pag.value = '';
     state.search = '';     $search.value = '';
     state.page = 1;
+    _resetSelection(); // HOTFIX 0055
     persistFilters();
     cacheInvalidate();
     fetchData();
@@ -7993,11 +8226,8 @@ ROUTES.terc_retornos = async (main) => {
     const setDone = () => { $print.disabled = false; $print.innerHTML = orig; };
 
     try {
-      // 1) IDs selecionados nesta página
-      const selIds = new Set(
-        Array.from($tbl.querySelectorAll('.ret-checkbox:checked'))
-          .map(cb => Number(cb.dataset.retId))
-      );
+      // HOTFIX 0055 — Fonte da verdade: _selectedIds (cross-page)
+      const selIds = new Set(_selectedIds); // clone defensivo
 
       // Base de filtros aplicados (para mostrar no cabeçalho da impressão + reusar no fetch)
       const filtrosApi = {
@@ -8023,24 +8253,39 @@ ROUTES.terc_retornos = async (main) => {
 
       if (selIds.size > 0) {
         // ---- MODO A: SELECIONADOS ----
-        // Pode haver selecionados em várias páginas — precisamos buscar todos e filtrar.
-        // Se apenas 1 página tem seleção (comum), evitamos fetch extra usando o cache atual.
+        // HOTFIX 0055 — Selecionados podem estar em várias páginas.
+        // Prioridade de fonte:
+        //   1) _selectionSnapshot (fresco p/ filtros atuais) — sem custo
+        //   2) cache da página atual  — sem custo
+        //   3) fetchAllRetornos       — última opção
         setBusy('Preparando impressão…');
         expected = selIds.size;
 
-        // Tenta com dados da página atual primeiro (cache local)
-        const cached = cacheGet();
-        const rowsAtuais = cached?.rows || [];
-        const foundInPage = rowsAtuais.filter(r => selIds.has(Number(r.id_retorno)));
+        const snapValid = _selectionSnapshot && _selectionSnapshot.filtrosHash === _filtrosHash();
+        if (snapValid) {
+          const snapRows = _selectionSnapshot.rows || [];
+          rows = snapRows.filter(r => selIds.has(Number(r.id_retorno)));
+        }
 
-        if (foundInPage.length === selIds.size) {
-          // Todos os selecionados estão na página atual — não precisa refetch
-          rows = foundInPage;
-        } else {
-          // Alguns selecionados podem estar em outras páginas — busca todos e filtra
-          setBusy(`Carregando ${selIds.size} selecionado(s)…`);
-          const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
-          rows = (all.rows || []).filter(r => selIds.has(Number(r.id_retorno)));
+        if (rows.length !== selIds.size) {
+          // Tenta cache da página atual como próximo fallback
+          const cached = cacheGet();
+          const rowsAtuais = cached?.rows || [];
+          const foundInPage = rowsAtuais.filter(r => selIds.has(Number(r.id_retorno)));
+          if (foundInPage.length === selIds.size) {
+            rows = foundInPage;
+          } else {
+            // Fetch multi-página (último recurso)
+            setBusy(`Carregando ${selIds.size} selecionado(s)…`);
+            const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+            rows = (all.rows || []).filter(r => selIds.has(Number(r.id_retorno)));
+            // Atualiza snapshot para próximas operações
+            _selectionSnapshot = {
+              filtrosHash: _filtrosHash(),
+              rows: all.rows || [],
+              ts: new Date(),
+            };
+          }
         }
 
         if (rows.length !== expected) {
@@ -8074,7 +8319,19 @@ ROUTES.terc_retornos = async (main) => {
         )) return;
 
         setBusy(`Carregando ${total} registro(s)…`);
-        const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+        // HOTFIX 0055 — Reutiliza snapshot se filtros idênticos e ainda válido
+        const snapValid = _selectionSnapshot && _selectionSnapshot.filtrosHash === _filtrosHash();
+        let all;
+        if (snapValid && (_selectionSnapshot.rows || []).length >= total) {
+          all = { rows: _selectionSnapshot.rows, total: (_selectionSnapshot.rows || []).length };
+        } else {
+          all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+          _selectionSnapshot = {
+            filtrosHash: _filtrosHash(),
+            rows: all.rows || [],
+            ts: new Date(),
+          };
+        }
         rows = all.rows || [];
         expected = all.total || total;
 
@@ -8124,9 +8381,11 @@ ROUTES.terc_retornos = async (main) => {
   };
 
   // HOTFIX 0042 — Barra flutuante de pagamento
+  // HOTFIX 0055 — Também reseta _selectedIds (fonte da verdade)
   const $rpbClear = document.getElementById('rpb-clear');
   const $rpbPay   = document.getElementById('rpb-pay');
   if ($rpbClear) $rpbClear.onclick = () => {
+    _resetSelection();
     $tbl.querySelectorAll('.ret-checkbox').forEach(cb => { cb.checked = false; });
     const ca = $tbl.querySelector('#ret-check-all'); if (ca) { ca.checked = false; ca.indeterminate = false; }
     updatePaymentBar();
