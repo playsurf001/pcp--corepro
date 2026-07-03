@@ -2626,6 +2626,334 @@ const TERC_PRINT = {
     `;
     this._openWindow('Controle Parcial — Ctrl ' + remessa.num_controle, body);
   },
+
+  /* ============================================================================
+   * 🆕 HOTFIX 0054 — Impressão em LOTE de Lista (Remessas ou Retornos)
+   *
+   * Recebe a LISTA COMPLETA de registros já selecionados/carregados pelo caller
+   * (nunca lê o DOM/viewport). Abre uma nova janela A4 com:
+   *   - Cabeçalho institucional repetido em cada página (thead sticky)
+   *   - Rodapé com data/usuário/empresa
+   *   - Layout A4 landscape (mais colunas cabem) com font-size auto-reduzido
+   *   - CSS @page + page-break-inside: avoid nas linhas
+   *   - Conta impressa = conta esperada (validação anti-truncamento)
+   *
+   * Parâmetros:
+   *   rows      → Array com TODOS os itens a imprimir (a fonte de verdade)
+   *   opts.tipo → 'remessas' | 'retornos' (define colunas e título)
+   *   opts.filtros → objeto {rotulo: valor} para exibir filtros aplicados
+   *   opts.expectedCount → nº esperado (para conferência anti-truncamento)
+   *   opts.orientacao → 'landscape' (default) | 'portrait'
+   * ============================================================================ */
+  async listaLote(rows, opts = {}) {
+    const tipo = opts.tipo || 'remessas';
+    const orientacao = opts.orientacao || 'landscape';
+    const empresa = await TERC.loadEmpresa();
+
+    // === Validação anti-truncamento (constraint #12) ===
+    if (opts.expectedCount != null && rows.length !== opts.expectedCount) {
+      toast(
+        `A impressão foi interrompida porque nem todos os registros foram carregados (` +
+        `esperado ${opts.expectedCount}, obtido ${rows.length}). Aguarde alguns segundos e tente novamente.`,
+        'error'
+      );
+      return null;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      toast('Nenhum registro para imprimir.', 'warning');
+      return null;
+    }
+
+    // === Auto-reduz fonte quando lista é grande (constraint #10, #14) ===
+    const total = rows.length;
+    let fontSize = '8.5pt';
+    let padCell = '3px 4px';
+    if (total > 100) { fontSize = '7.5pt'; padCell = '2px 3px'; }
+    if (total > 300) { fontSize = '7pt';   padCell = '1.5px 2.5px'; }
+
+    // === Título e colunas por tipo ===
+    const titulo = tipo === 'retornos' ? 'Lista de Retornos' : 'Lista de Remessas';
+    const cols = tipo === 'retornos' ? [
+      { key: 'dt_retorno',   label: 'Data',         w: '7%',  fmt: (r) => fmt.date(r.dt_retorno),          align: 'center' },
+      { key: 'num_controle', label: 'Ctrl',         w: '5%',  fmt: (r) => r.num_controle ?? '—',            align: 'right'  },
+      { key: 'nome_terc',    label: 'Terceirizado', w: '14%', fmt: (r) => escapeHtml(r.nome_terc || '—'),   align: 'left'   },
+      { key: 'nome_setor',   label: 'Setor',        w: '8%',  fmt: (r) => escapeHtml(r.nome_setor || '—'),  align: 'left'   },
+      { key: 'cod_ref',      label: 'Ref',          w: '7%',  fmt: (r) => escapeHtml(r.cod_ref || '—'),     align: 'left'   },
+      { key: 'cor',          label: 'Cor',          w: '7%',  fmt: (r) => escapeHtml(r.cor || '—'),         align: 'left'   },
+      { key: 'desc_servico', label: 'Serviço',      w: '13%', fmt: (r) => escapeHtml(r.desc_servico || '—'), align: 'left'  },
+      { key: 'qtd_boa',      label: 'Boas',         w: '5%',  fmt: (r) => fmt.int(r.qtd_boa),                align: 'right'  },
+      { key: 'qtd_refugo',   label: 'Falta',        w: '5%',  fmt: (r) => fmt.int(r.qtd_refugo),             align: 'right'  },
+      { key: 'qtd_conserto', label: 'Conserto',     w: '5%',  fmt: (r) => fmt.int(r.qtd_conserto),           align: 'right'  },
+      { key: 'qtd_total',    label: 'Total',        w: '5%',  fmt: (r) => fmt.int(r.qtd_total),              align: 'right'  },
+      { key: 'valor_pago',   label: 'Valor',        w: '8%',  fmt: (r) => TERC.fmtBRL(fmt.safeNum(r.valor_pago)), align: 'right' },
+      { key: 'pag',          label: 'Pagto',        w: '11%', fmt: (r) => r.dt_pagamento ? fmt.date(r.dt_pagamento) : 'Pendente', align: 'center' },
+    ] : [
+      { key: 'dt_envio',     label: 'Envio',        w: '7%',  fmt: (r) => fmt.date(r.dt_envio),             align: 'center' },
+      { key: 'num_controle', label: 'Ctrl',         w: '5%',  fmt: (r) => r.num_controle ?? '—',             align: 'right'  },
+      { key: 'num_op',       label: 'OP',           w: '6%',  fmt: (r) => escapeHtml(r.num_op || '—'),        align: 'center' },
+      { key: 'nome_terc',    label: 'Terceirizado', w: '13%', fmt: (r) => escapeHtml(r.nome_terc || '—'),    align: 'left'   },
+      { key: 'nome_setor',   label: 'Setor',        w: '8%',  fmt: (r) => escapeHtml(r.nome_setor || '—'),   align: 'left'   },
+      { key: 'cod_ref',      label: 'Ref',          w: '7%',  fmt: (r) => escapeHtml(r.cod_ref || '—'),      align: 'left'   },
+      { key: 'cor',          label: 'Cor',          w: '7%',  fmt: (r) => escapeHtml(r.cor || '—'),          align: 'left'   },
+      { key: 'desc_servico', label: 'Serviço',      w: '13%', fmt: (r) => escapeHtml(r.desc_servico || '—'), align: 'left'   },
+      { key: 'qtd_total',    label: 'Qtd',          w: '5%',  fmt: (r) => fmt.int(r.qtd_total),              align: 'right'  },
+      { key: 'valor_total',  label: 'Valor',        w: '8%',  fmt: (r) => TERC.fmtBRL(fmt.safeNum(r.valor_total)), align: 'right' },
+      { key: 'status',       label: 'Status',       w: '10%', fmt: (r) => escapeHtml(TERC.statusLabel(r.status)), align: 'center' },
+      { key: 'dt_recebimento', label: 'Recebido',   w: '8%',  fmt: (r) => r.dt_recebimento ? fmt.date(r.dt_recebimento) : '—', align: 'center' },
+    ];
+
+    // === Totais ===
+    const totais = { qtd_total: 0, valor: 0 };
+    for (const r of rows) {
+      totais.qtd_total += fmt.safeNum(r.qtd_total) || 0;
+      totais.valor    += fmt.safeNum(tipo === 'retornos' ? r.valor_pago : r.valor_total) || 0;
+    }
+
+    // === Filtros aplicados (bullets) ===
+    const filtrosArr = Object.entries(opts.filtros || {})
+      .filter(([, v]) => v != null && v !== '' && v !== undefined)
+      .map(([k, v]) => `<span class="fltr"><b>${escapeHtml(k)}:</b> ${escapeHtml(String(v))}</span>`);
+    const filtrosHtml = filtrosArr.length
+      ? `<div class="filtros-aplic">${filtrosArr.join('')}</div>`
+      : '';
+
+    // === Meta data ===
+    const dtHora = dayjs().format('DD/MM/YYYY HH:mm');
+    const usuario = state.user?.nome || state.user?.login || '—';
+
+    // === CSS DEDICADO — @page + page-break + thead sticky ===
+    const cssListaLote = `
+      @page { size: A4 ${orientacao}; margin: 8mm 8mm 12mm 8mm; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: #fff; }
+      body { font-family: Arial, 'Helvetica Neue', sans-serif; font-size: ${fontSize}; color: #000; }
+      .print-container { width: 100%; }
+
+      /* ============ CABEÇALHO REPETIDO em toda página (thead) ============ */
+      table.lista { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      table.lista thead { display: table-header-group; } /* CRÍTICO: repete em cada página */
+      table.lista tfoot { display: table-footer-group; }
+      table.lista tr { page-break-inside: avoid; break-inside: avoid; }
+
+      /* Cabeçalho INSTITUCIONAL — vira thead superior (fica em toda página) */
+      .header-inst {
+        display: table; width: 100%; margin-bottom: 4px;
+        border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;
+      }
+      .header-inst .cell { display: table-cell; vertical-align: middle; }
+      .header-inst .logo-cell { width: 40px; }
+      .header-inst .logo-cell img { width: 34px; height: 30px; object-fit: contain; }
+      .header-inst .info-cell { text-align: center; }
+      .header-inst .nome-emp { font-size: 12pt; font-weight: bold; }
+      .header-inst .contato-emp { font-size: 7.5pt; color: #444; }
+      .header-inst .meta-cell { text-align: right; font-size: 7.5pt; min-width: 120px; }
+      .titulo-lista {
+        font-size: 11pt; font-weight: bold; text-align: center;
+        margin: 3px 0 2px; letter-spacing: 0.3px;
+      }
+      .filtros-aplic {
+        font-size: 7.5pt; color: #333; padding: 2px 4px; margin-bottom: 3px;
+        background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px;
+      }
+      .filtros-aplic .fltr { display: inline-block; margin-right: 8px; }
+      .filtros-aplic b { color: #1e3a8a; }
+      .resumo-linha {
+        font-size: 8pt; margin-bottom: 4px; padding: 2px 4px;
+        background: #dbeafe; border-left: 3px solid #1e3a8a;
+      }
+      .resumo-linha b { color: #1e3a8a; }
+
+      /* ============ TABELA PRINCIPAL ============ */
+      table.lista th, table.lista td {
+        border: 0.4px solid #64748b;
+        padding: ${padCell};
+        line-height: 1.2;
+        overflow: hidden;
+        word-wrap: break-word;
+        vertical-align: middle;
+      }
+      table.lista thead th {
+        background: #1e3a8a; color: #fff;
+        font-size: ${fontSize}; font-weight: bold;
+        text-align: center;
+        padding: 3px 3px;
+      }
+      table.lista tbody tr td { background: #fff; }
+      table.lista tbody tr.zebra td { background: #f8fafc; }
+      table.lista td.left   { text-align: left; }
+      table.lista td.right  { text-align: right; }
+      table.lista td.center { text-align: center; }
+      table.lista tfoot td {
+        background: #1e3a8a; color: #fff;
+        font-weight: bold; font-size: ${fontSize};
+        padding: 4px 4px;
+      }
+      table.lista tfoot td.tot-label { text-align: right; }
+
+      /* ============ RODAPÉ ============ */
+      .rodape {
+        margin-top: 6mm;
+        border-top: 0.5px dotted #64748b;
+        padding-top: 3px;
+        font-size: 7pt; color: #555;
+        display: table; width: 100%;
+      }
+      .rodape .rcell { display: table-cell; vertical-align: middle; }
+      .rodape .r-left { text-align: left; }
+      .rodape .r-center { text-align: center; }
+      .rodape .r-right { text-align: right; }
+      .no-print { display: none !important; }
+
+      /* Página X de Y via CSS counters (funciona em Chrome/Edge/Firefox modernos) */
+      @media print {
+        body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+        table.lista { page-break-inside: auto; }
+        table.lista tr { page-break-inside: avoid !important; break-inside: avoid !important; }
+        table.lista thead { display: table-header-group; }
+        table.lista tfoot { display: table-footer-group; }
+      }
+    `;
+
+    // === Cabeçalho institucional (repete via thead) ===
+    const headerHtml = `
+      <div class="header-inst">
+        <div class="cell logo-cell">
+          <img src="/static/favicon.png" onerror="this.style.display='none'"/>
+        </div>
+        <div class="cell info-cell">
+          <div class="nome-emp">${escapeHtml(empresa.nome || 'CorePro')}</div>
+          <div class="contato-emp">
+            ${escapeHtml(empresa.tel || '')}${empresa.tel && empresa.email ? ' · ' : ''}${escapeHtml(empresa.email || '')}
+            ${empresa.cnpj ? ' · CNPJ ' + escapeHtml(empresa.cnpj) : ''}
+          </div>
+        </div>
+        <div class="cell meta-cell">
+          <div><b>Emissão:</b> ${dtHora}</div>
+          <div><b>Usuário:</b> ${escapeHtml(usuario)}</div>
+        </div>
+      </div>
+      <div class="titulo-lista">${escapeHtml(titulo)} — ${total} registro(s)</div>
+      ${filtrosHtml}
+      <div class="resumo-linha">
+        <b>Total de registros:</b> ${fmt.int(total)}
+        · <b>Quantidade total:</b> ${fmt.int(totais.qtd_total)}
+        · <b>Valor total:</b> ${TERC.fmtBRL(totais.valor)}
+      </div>
+    `;
+
+    // === Cabeçalho da tabela ===
+    const theadHtml = `
+      <thead>
+        <tr>
+          ${cols.map(c => `<th style="width:${c.w}">${escapeHtml(c.label)}</th>`).join('')}
+        </tr>
+      </thead>
+    `;
+
+    // === Corpo — 100% das linhas passadas (NUNCA lê DOM) ===
+    const tbodyHtml = `
+      <tbody>
+        ${rows.map((r, i) => `
+          <tr class="${i % 2 === 1 ? 'zebra' : ''}">
+            ${cols.map(c => `<td class="${c.align || 'left'}">${c.fmt(r)}</td>`).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    `;
+
+    // === Rodapé da tabela (totais) ===
+    const tfootHtml = `
+      <tfoot>
+        <tr>
+          <td class="tot-label" colspan="${cols.length - 2}">TOTAL GERAL</td>
+          <td class="right">${fmt.int(totais.qtd_total)}</td>
+          <td class="right">${TERC.fmtBRL(totais.valor)}</td>
+        </tr>
+      </tfoot>
+    `;
+
+    // === Rodapé institucional ===
+    const rodapeHtml = `
+      <div class="rodape">
+        <div class="rcell r-left">Gerado por CorePro PCP · ${escapeHtml(empresa.nome || 'CorePro')}</div>
+        <div class="rcell r-center">Total impresso: <b>${fmt.int(total)}</b> registro(s)</div>
+        <div class="rcell r-right">${dtHora} · ${escapeHtml(usuario)}</div>
+      </div>
+    `;
+
+    // === Container off-screen (constraint #4) — nova janela A4 dedicada ===
+    const w = window.open('', '_blank', 'width=1100,height=800');
+    if (!w) { toast('Pop-ups bloqueados. Permita pop-ups para imprimir.', 'error'); return null; }
+
+    w.document.write(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+      <title>${escapeHtml(titulo)} — ${total} registros</title>
+      <style>${cssListaLote}</style>
+      </head><body>
+      <div class="print-container">
+        ${headerHtml}
+        <table class="lista">
+          ${theadHtml}
+          ${tbodyHtml}
+          ${tfootHtml}
+        </table>
+        ${rodapeHtml}
+      </div>
+      <script>
+        window.addEventListener('load', () => {
+          // Aguarda um tick para o browser calcular layouts antes do print
+          setTimeout(() => { try { window.print(); } catch(e) {} }, 400);
+        });
+      </script>
+      </body></html>`);
+    w.document.close();
+
+    console.log('[TERC_PRINT.listaLote] impressão disparada', {
+      tipo, orientacao, total, esperado: opts.expectedCount ?? total,
+    });
+    return w;
+  },
+
+  /* ============================================================================
+   * 🆕 HOTFIX 0054 — Carrega TODAS as páginas de /terc/retornos para impressão
+   *
+   * O backend limita per_page em 200. Se o usuário quer imprimir >200 registros,
+   * fazemos paginação transparente (`page=1..N`) até acumular `total`.
+   * Retorna { rows, total } ou lança erro se contagem divergir.
+   * ============================================================================ */
+  async fetchAllRetornos(filtros) {
+    const PER_PAGE = 200;
+    const p1 = new URLSearchParams({ ...filtros, page: '1', per_page: String(PER_PAGE) });
+    const first = await api('get', '/terc/retornos?' + p1.toString(), null, { silent: true });
+    const total = Number(first?.data?.total || 0);
+    const rows = [...(first?.data?.rows || [])];
+    const totalPages = Number(first?.data?.total_pages || 1);
+    for (let page = 2; page <= totalPages; page++) {
+      const pn = new URLSearchParams({ ...filtros, page: String(page), per_page: String(PER_PAGE) });
+      const r = await api('get', '/terc/retornos?' + pn.toString(), null, { silent: true });
+      rows.push(...(r?.data?.rows || []));
+    }
+    console.log('[TERC_PRINT.fetchAllRetornos]', { esperado: total, obtido: rows.length, paginas: totalPages });
+    return { rows, total };
+  },
+
+  /* ============================================================================
+   * 🆕 HOTFIX 0054 — Carrega TODAS as páginas de /terc/remessas para impressão
+   * ============================================================================ */
+  async fetchAllRemessas(filtros) {
+    const PER_PAGE = 200;
+    const p1 = new URLSearchParams({ ...filtros, page: '1', per_page: String(PER_PAGE) });
+    const first = await api('get', '/terc/remessas?' + p1.toString(), null, { silent: true });
+    const total = Number(first?.data?.total || 0);
+    const rows = [...(first?.data?.rows || [])];
+    const totalPages = Number(first?.data?.total_pages || Math.ceil(total / PER_PAGE) || 1);
+    for (let page = 2; page <= totalPages; page++) {
+      const pn = new URLSearchParams({ ...filtros, page: String(page), per_page: String(PER_PAGE) });
+      const r = await api('get', '/terc/remessas?' + pn.toString(), null, { silent: true });
+      rows.push(...(r?.data?.rows || []));
+    }
+    console.log('[TERC_PRINT.fetchAllRemessas]', { esperado: total, obtido: rows.length, paginas: totalPages });
+    return { rows, total };
+  },
 };
 
 /* ---------- DASHBOARD de Terceirização (rota inicial padrão para TODOS) ---------- */
@@ -3341,10 +3669,14 @@ ROUTES.terc_remessas = async (main) => {
             </div>
           </div>
 
-          <!-- Linha 3: ações secundárias (Limpar) -->
+          <!-- Linha 3: ações secundárias (Limpar + HOTFIX 0054: Imprimir Lote) -->
           <div class="page-sticky-actions">
             <button id="btn-clear" class="btn btn-secondary btn-sm" title="Limpar filtros">
               <i class="fas fa-eraser mr-1"></i><span>Limpar</span>
+            </button>
+            <div class="flex-1"></div>
+            <button id="btn-print-lote" class="btn btn-secondary btn-sm" title="Imprimir lista de remessas (selecionadas ou todas filtradas)">
+              <i class="fas fa-print mr-1"></i><span>Imprimir Lote</span>
             </button>
           </div>
         </div>
@@ -3365,6 +3697,10 @@ ROUTES.terc_remessas = async (main) => {
         <div class="rem-bulk-bar__actions">
           <button id="rbb-clear" class="btn btn-ghost" title="Limpar seleção">
             <i class="fas fa-xmark mr-1"></i><span>Cancelar Seleção</span>
+          </button>
+          <!-- HOTFIX 0054 — Imprimir selecionadas (aparece na barra flutuante) -->
+          <button id="rbb-print" class="btn btn-secondary" title="Imprimir as remessas selecionadas">
+            <i class="fas fa-print mr-1"></i><span>Imprimir Selecionadas</span>
           </button>
           <button id="rbb-del" class="btn btn-danger" title="Excluir as remessas selecionadas">
             <i class="fas fa-trash mr-1"></i><span>Excluir Selecionadas</span>
@@ -4110,8 +4446,106 @@ ROUTES.terc_remessas = async (main) => {
   // Esses botões estão fora do #rem-tbl (no shell), então bindam apenas 1 vez.
   const $rbbClear = document.getElementById('rbb-clear');
   const $rbbDel   = document.getElementById('rbb-del');
+  const $rbbPrint = document.getElementById('rbb-print');       // HOTFIX 0054
+  const $btnPrintLote = document.getElementById('btn-print-lote'); // HOTFIX 0054
   if ($rbbClear) $rbbClear.onclick = () => clearRemBulkSelection();
   if ($rbbDel)   $rbbDel.onclick   = () => bulkDeleteRem();
+
+  /* ============================================================
+   * HOTFIX 0054 — Impressão em LOTE de Remessas
+   *
+   * Fluxo:
+   *  1) Se há remessas selecionadas (checkboxes) → imprime EXATAMENTE elas.
+   *  2) Senão → oferece imprimir TODAS as filtradas (_lastRemessas).
+   *  3) NUNCA usa window.print() puro — usa TERC_PRINT.listaLote() com
+   *     container off-screen, cabeçalho A4 e verificação anti-truncamento.
+   * ============================================================ */
+  async function printRemessasLote(ev) {
+    // Descobre qual botão foi clicado (para restaurar innerHTML depois)
+    const btn = (ev && ev.currentTarget) || $btnPrintLote || $rbbPrint;
+    const orig = btn ? btn.innerHTML : null;
+    const setBusy = (label) => {
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>' + label; }
+    };
+    const setDone = () => { if (btn && orig) { btn.disabled = false; btn.innerHTML = orig; } };
+
+    try {
+      const selIds = new Set(
+        Array.from($tbl.querySelectorAll('.rem-bulk-check:checked'))
+          .map(cb => Number(cb.dataset.remId))
+      );
+
+      // Base de filtros aplicados (para header da impressão)
+      const nomeTerc  = (st.id_terc    && $terc?.selectedOptions?.[0]?.textContent) || '';
+      const nomeServ  = (st.id_servico && $serv?.selectedOptions?.[0]?.textContent) || '';
+      const nomeSetor = (st.id_setor   && $setor?.selectedOptions?.[0]?.textContent) || '';
+      const nomeStatus = (st.status    && $status?.selectedOptions?.[0]?.textContent) || '';
+      const filtrosDisplay = {
+        Período: `${fmt.date(st.de)} → ${fmt.date(st.ate)}`,
+        ...(nomeTerc   ? { Terceirizado: nomeTerc } : {}),
+        ...(nomeServ   ? { Serviço: nomeServ } : {}),
+        ...(nomeSetor  ? { Setor: nomeSetor } : {}),
+        ...(nomeStatus ? { Status: nomeStatus } : {}),
+        ...(st.search  ? { Busca: st.search } : {}),
+      };
+
+      let rows = [];
+      let expected = 0;
+
+      if (selIds.size > 0) {
+        // ---- MODO A: SELECIONADAS ----
+        setBusy('Preparando impressão…');
+        expected = selIds.size;
+        rows = _lastRemessas.filter(r => selIds.has(Number(r.id_remessa)));
+        if (rows.length !== expected) {
+          toast(
+            `A impressão foi interrompida porque nem todos os registros foram carregados ` +
+            `(esperado ${expected}, obtido ${rows.length}). Aguarde alguns segundos e tente novamente.`,
+            'error'
+          );
+          return;
+        }
+        filtrosDisplay['Seleção'] = `${expected} remessa(s) selecionada(s)`;
+      } else {
+        // ---- MODO B: TODAS FILTRADAS ----
+        if (!_lastRemessas.length) {
+          toast('Nenhuma remessa filtrada para imprimir. Ajuste os filtros primeiro.', 'warning');
+          return;
+        }
+        expected = _lastRemessas.length;
+        if (expected > 2000) {
+          toast(
+            `São ${expected} remessas filtradas — muito para uma única impressão. ` +
+            `Refine os filtros ou marque as caixas de seleção nas linhas.`,
+            'warning'
+          );
+          return;
+        }
+        if (!confirm(
+          `Nenhum item selecionado.\n\n` +
+          `Deseja imprimir TODAS as ${expected} remessa(s) filtradas?\n\n` +
+          `(Para imprimir apenas algumas, marque as caixas de seleção na tabela.)`
+        )) return;
+        rows = _lastRemessas.slice(); // clone defensivo
+      }
+
+      setBusy('Abrindo impressão…');
+      await TERC_PRINT.listaLote(rows, {
+        tipo: 'remessas',
+        filtros: filtrosDisplay,
+        expectedCount: expected,
+        orientacao: 'landscape',
+      });
+    } catch (e) {
+      console.error('[print-lote remessas] falha', e);
+      toast('Falha ao preparar impressão: ' + (e?.message || e), 'error');
+    } finally {
+      setDone();
+    }
+  }
+
+  if ($btnPrintLote) $btnPrintLote.onclick = printRemessasLote;
+  if ($rbbPrint)     $rbbPrint.onclick     = printRemessasLote;
 
   $btnRomLote.onclick = async () => {
     if (!_lastRemessas.length) { toast('Filtre alguma remessa antes', 'warning'); return; }
@@ -7409,6 +7843,8 @@ ROUTES.terc_retornos = async (main) => {
   // ----- Fetch com AbortController (cancela request anterior) -----
   let _abortCtrl = null;
   let _inFlight = false;
+  // HOTFIX 0054 — Metadados da última busca (para impressão em lote saber quanto tem)
+  let _lastFetch = { total: 0, totalPages: 1, perPage: state.per_page };
   async function fetchData(opts = {}) {
     // Cancela request anterior
     if (_abortCtrl) { try { _abortCtrl.abort(); } catch {} }
@@ -7420,6 +7856,12 @@ ROUTES.terc_retornos = async (main) => {
       renderKpis(cached.kpis);
       renderTable(cached.rows);
       renderPager(cached.total, cached.page, cached.per_page, cached.total_pages);
+      // HOTFIX 0054 — mesmo com cache, refresh metadados para o print em lote
+      _lastFetch = {
+        total: Number(cached.total || 0),
+        totalPages: Number(cached.total_pages || 1),
+        perPage: Number(cached.per_page || state.per_page),
+      };
       return;
     }
     if (!_inFlight) {
@@ -7454,6 +7896,12 @@ ROUTES.terc_retornos = async (main) => {
       });
 
       cacheSet(data);
+      // HOTFIX 0054 — Armazena metadados da última busca para impressão em lote
+      _lastFetch = {
+        total: Number(data.total || 0),
+        totalPages: Number(data.total_pages || 1),
+        perPage: Number(data.per_page || state.per_page),
+      };
       renderKpis(data.kpis || {});
       renderIntegrityBanner(data.integridade || null);
       renderTable(data.rows || []);
@@ -7523,7 +7971,137 @@ ROUTES.terc_retornos = async (main) => {
     cacheInvalidate();
     fetchData();
   };
-  $('#btn-print').onclick = () => window.print();
+  /* ============================================================
+   * HOTFIX 0054 — Impressão em LOTE de Retornos
+   *
+   * Fluxo:
+   *  1) Se há checkboxes marcados → imprime EXATAMENTE os selecionados.
+   *  2) Senão → oferece imprimir TODOS os filtrados (state.total do fetch).
+   *  3) Faz fetch de todas as páginas (per_page=200) antes do print.
+   *  4) Valida contagem esperada vs obtida — cancela se diverge.
+   *  5) Delega para TERC_PRINT.listaLote(rows, opts).
+   *
+   * Nunca usa window.print() puro (que só imprimia o viewport atual).
+   * ============================================================ */
+  $('#btn-print').onclick = async () => {
+    const $print = $('#btn-print');
+    const orig = $print.innerHTML;
+    const setBusy = (label) => {
+      $print.disabled = true;
+      $print.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>' + label;
+    };
+    const setDone = () => { $print.disabled = false; $print.innerHTML = orig; };
+
+    try {
+      // 1) IDs selecionados nesta página
+      const selIds = new Set(
+        Array.from($tbl.querySelectorAll('.ret-checkbox:checked'))
+          .map(cb => Number(cb.dataset.retId))
+      );
+
+      // Base de filtros aplicados (para mostrar no cabeçalho da impressão + reusar no fetch)
+      const filtrosApi = {
+        de: state.de, ate: state.ate,
+      };
+      if (state.id_terc)    filtrosApi.id_terc    = String(state.id_terc);
+      if (state.id_setor)   filtrosApi.id_setor   = String(state.id_setor);
+      if (state.search)     filtrosApi.search     = state.search;
+      if (state.status_pag) filtrosApi.status_pag = state.status_pag;
+
+      const nomeTerc = (state.id_terc && $terc?.selectedOptions?.[0]?.textContent) || '';
+      const nomeSetor = (state.id_setor && $setor?.selectedOptions?.[0]?.textContent) || '';
+      const filtrosDisplay = {
+        Período: `${fmt.date(state.de)} → ${fmt.date(state.ate)}`,
+        ...(nomeTerc  ? { Terceirizado: nomeTerc } : {}),
+        ...(nomeSetor ? { Setor: nomeSetor } : {}),
+        ...(state.status_pag ? { Pagamento: state.status_pag === 'pago' ? 'Pagos' : 'Pendentes' } : {}),
+        ...(state.search ? { Busca: state.search } : {}),
+      };
+
+      let rows = [];
+      let expected = 0;
+
+      if (selIds.size > 0) {
+        // ---- MODO A: SELECIONADOS ----
+        // Pode haver selecionados em várias páginas — precisamos buscar todos e filtrar.
+        // Se apenas 1 página tem seleção (comum), evitamos fetch extra usando o cache atual.
+        setBusy('Preparando impressão…');
+        expected = selIds.size;
+
+        // Tenta com dados da página atual primeiro (cache local)
+        const cached = cacheGet();
+        const rowsAtuais = cached?.rows || [];
+        const foundInPage = rowsAtuais.filter(r => selIds.has(Number(r.id_retorno)));
+
+        if (foundInPage.length === selIds.size) {
+          // Todos os selecionados estão na página atual — não precisa refetch
+          rows = foundInPage;
+        } else {
+          // Alguns selecionados podem estar em outras páginas — busca todos e filtra
+          setBusy(`Carregando ${selIds.size} selecionado(s)…`);
+          const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+          rows = (all.rows || []).filter(r => selIds.has(Number(r.id_retorno)));
+        }
+
+        if (rows.length !== expected) {
+          toast(
+            `A impressão foi interrompida porque nem todos os registros foram carregados ` +
+            `(esperado ${expected}, obtido ${rows.length}). Aguarde alguns segundos e tente novamente.`,
+            'error'
+          );
+          return;
+        }
+        filtrosDisplay['Seleção'] = `${expected} retorno(s) selecionado(s)`;
+      } else {
+        // ---- MODO B: TODOS OS FILTRADOS ----
+        const total = _lastFetch.total || 0;
+        if (total === 0) {
+          toast('Nenhum retorno para imprimir com os filtros atuais.', 'warning');
+          return;
+        }
+        if (total > 2000) {
+          toast(
+            `São ${total} retornos filtrados — muito para uma única impressão. ` +
+            `Refine os filtros (período, terceirizado) ou marque os itens que deseja imprimir.`,
+            'warning'
+          );
+          return;
+        }
+        if (!confirm(
+          `Nenhum item selecionado.\n\n` +
+          `Deseja imprimir TODOS os ${total} retorno(s) filtrados?\n\n` +
+          `(Para imprimir apenas alguns, marque as caixas de seleção na tabela.)`
+        )) return;
+
+        setBusy(`Carregando ${total} registro(s)…`);
+        const all = await TERC_PRINT.fetchAllRetornos(filtrosApi);
+        rows = all.rows || [];
+        expected = all.total || total;
+
+        if (rows.length !== expected) {
+          toast(
+            `A impressão foi interrompida porque nem todos os registros foram carregados ` +
+            `(esperado ${expected}, obtido ${rows.length}). Aguarde alguns segundos e tente novamente.`,
+            'error'
+          );
+          return;
+        }
+      }
+
+      setBusy('Abrindo impressão…');
+      await TERC_PRINT.listaLote(rows, {
+        tipo: 'retornos',
+        filtros: filtrosDisplay,
+        expectedCount: expected,
+        orientacao: 'landscape',
+      });
+    } catch (e) {
+      console.error('[btn-print retornos] falha', e);
+      toast('Falha ao preparar impressão: ' + (e?.message || e), 'error');
+    } finally {
+      setDone();
+    }
+  };
 
   // ----- Atalhos globais p/ ações na lista (invalidam cache ao salvar) -----
   window.TERC_editRetFromList = (idRet, idRem) => {

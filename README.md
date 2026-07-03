@@ -2448,6 +2448,101 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0054 (2026-07-03) — Impressão em Lote (Remessas e Retornos) Cortando Registros
+
+### Contexto
+O usuário reportou que, ao selecionar vários registros (ou "Selecionar Todos") na tela de **Retornos** e clicar em **Imprimir**, o sistema gerava um documento contendo apenas os registros visíveis no viewport (paginação server-side de 20/50/100/200), cortando o conteúdo. Print anexo mostrou apenas ~10 linhas da OP "Aparar peça" da Zélia/Vanilda numa impressão que deveria conter todos os retornos filtrados/selecionados.
+
+### Constraints do usuário (respeitadas 100%)
+> **NÃO alterar:** estrutura do banco, APIs existentes, regras de negócio, sistema de seleção, layout geral do sistema. Corrigir apenas a lógica de geração do documento de impressão.
+
+### Auditoria (15 pontos verificados)
+
+| # | Verificação | Resultado |
+|---|---|---|
+| 1 | Origem dos dados na impressão | ❌ **BUG** — `$('#btn-print').onclick = () => window.print()` (viewport puro, imprime só a página server-side atual) |
+| 2 | Paginação server-side (`per_page: 20/50/100/200`) | ✅ Existe (backend `/terc/retornos` limitado a max 200/pág) — mas impressão ignorava e capturava só o DOM da página vigente |
+| 3 | Virtualização (React Virtual, react-window) | ✅ N/A — projeto é vanilla JS |
+| 4 | Container off-screen exclusivo p/ impressão | ❌ Ausente — CSS de impressão do documento inteiro era usado |
+| 5 | Paginação automática (`@page`, `page-break-*`) | ⚠️ Existia em `TERC_PRINT._printCSS()` (usado em Romaneios), **não** em Retornos |
+| 6-7 | Cabeçalho/rodapé com Página X de Y, empresa, usuário, filtros | ❌ Ausente em Retornos |
+| 8-10 | Largura 100%/A4/escalonamento | ❌ Sem CSS dedicado |
+| 11-12 | Contagem exata / conferência pré-print | ❌ Ausente (nada validava selecionados vs impresso) |
+| 13 | Carregamento completo (fetch all pages) antes de imprimir | ❌ Ausente |
+
+### Correções aplicadas (apenas frontend — sem tocar DB/APIs/regras)
+
+**1. Novo módulo `TERC_PRINT.listaLote(rows, opts)` (`public/static/app.js` ~L2629)**
+- Recebe a **LISTA COMPLETA de registros já resolvidos** pelo caller (nunca lê o DOM/viewport).
+- Abre **nova janela A4 landscape** com CSS `@page` dedicado + `page-break-inside: avoid` em linhas + `thead { display: table-header-group }` (cabeçalho repete em toda página).
+- Layout responsivo por volume: `fontSize` reduz automaticamente para 7.5pt (>100 regs) ou 7pt (>300 regs) — constraint #10.
+- Cabeçalho institucional: logo, empresa, contato, CNPJ, data/hora de emissão, usuário.
+- Filtros aplicados destacados em box âmbar (Período, Terceirizado, Setor, Pagamento, Busca, Seleção).
+- Resumo: `<b>Total de registros:</b> N · Qtd total · Valor total` — constraint #6.
+- Tabela com 12–13 colunas conforme tipo (`remessas` ou `retornos`), footer com totais consolidados.
+- Rodapé com data/usuário/empresa/total impresso — constraint #7.
+- **Validação anti-truncamento**: se `opts.expectedCount != null && rows.length !== opts.expectedCount` → cancela impressão + toast de erro (constraint #12).
+
+**2. Novo helper `TERC_PRINT.fetchAllRetornos(filtros)` (~L2801)**
+- Backend `/terc/retornos` limita a `per_page=200`. Para imprimir >200 retornos, este helper faz paginação transparente: `page=1..totalPages` acumulando `rows[]`.
+- Retorna `{ rows, total }` com validação de contagem.
+
+**3. Novo helper `TERC_PRINT.fetchAllRemessas(filtros)` (~L2820)**
+- Símile para `/terc/remessas` (embora Remessas retorne array direto sem paginação — helper deixa preparado caso backend evolua).
+
+**4. Refatoração `#btn-print` em Retornos (~L7534)**
+Substitui o antigo `window.print()` por fluxo em dois modos:
+- **Modo A — SELECIONADOS**: se há `.ret-checkbox:checked`, coleta IDs e:
+  - Se todos os IDs estão na página atual (cache local) → usa direto.
+  - Senão → chama `fetchAllRetornos` e filtra pelos IDs.
+  - Valida `rows.length === selIds.size`; se diverge → cancela + toast.
+- **Modo B — TODOS FILTRADOS**: se nenhum item marcado → `confirm()` para imprimir todos os `_lastFetch.total` filtrados; guard `total > 2000` para evitar sobrecarga; faz `fetchAllRetornos` e valida contagem.
+- Botão exibe estados `Preparando…` / `Carregando N…` / `Abrindo impressão…`.
+
+**5. Novos botões em Remessas (~L3676 + L3705)**
+- `#btn-print-lote` no `page-sticky-actions` (sempre visível, "Imprimir Lote").
+- `#rbb-print` "Imprimir Selecionadas" na barra flutuante `rem-bulk-bar__actions` (aparece quando há seleção).
+- Handler `printRemessasLote()` (~L4451): mesmo fluxo (selecionadas → `_lastRemessas.filter(id ∈ selIds)`; senão → confirma imprimir todas `_lastRemessas`; sempre valida `expectedCount`).
+
+**6. Armazenamento de `_lastFetch` em Retornos (~L7723)**
+- Após cada `fetchData`, salva `{ total, totalPages, perPage }` no escopo da rota para o print saber a contagem correta esperada.
+
+**7. Logs temporários de auditoria**
+- `console.log('[TERC_PRINT.listaLote] impressão disparada', {...})` mostra `tipo, orientacao, total, esperado`.
+- `console.log('[TERC_PRINT.fetchAllRetornos]', {...})` mostra `esperado, obtido, paginas`.
+
+### Arquivos modificados
+
+| Arquivo | Descrição |
+|---|---|
+| `public/static/app.js` | Novo `TERC_PRINT.listaLote()` + `fetchAllRetornos/Remessas()` + refactor `#btn-print` (Retornos) + novos botões e handler `printRemessasLote()` em Remessas + `_lastFetch` metadata |
+| `src/index.tsx` | Cache bump `app.js?v=61→v=62` |
+
+### Impacto por camada
+- **DB / Migrations / Schema**: zero mudanças
+- **APIs públicas** (`/terc/retornos`, `/terc/remessas`, `/parametros`): zero mudanças (só chamadas HTTP normais com paginação transparente)
+- **Regras de negócio / Sistema de seleção existente**: preservados (checkboxes `.ret-checkbox` / `.rem-bulk-check` inalterados)
+- **Layout geral / componentes visuais existentes**: preservados (apenas novos botões e nova janela A4 externa)
+- **Compatibilidade browser**: Chrome/Edge/Firefox modernos (CSS `page-break-inside: avoid` + `table-header-group`)
+
+### Como validar em PROD
+1. Acessar `https://corepro-confeccao.pages.dev` → Terceirização → **Retornos**.
+2. Filtrar período que retorne 50+ retornos.
+3. **Teste A — SELECIONADOS**: marcar 3–5 checkboxes, clicar em **Imprimir**. Nova janela deve mostrar EXATAMENTE 3–5 linhas com cabeçalho, filtros e totais.
+4. **Teste B — TODOS**: desmarcar tudo, clicar em **Imprimir** → `confirm()` mostra "Deseja imprimir TODOS os N retornos filtrados?" → OK → nova janela com N linhas.
+5. **Teste C — >200 retornos**: ajustar filtros para +200, clicar em **Imprimir** todos: helper busca todas as páginas (`page=1..N`, `per_page=200`) antes de abrir. Console mostra `esperado / obtido / paginas`.
+6. **Teste D — Remessas**: idem em `Terceirização → Remessas` com botão "Imprimir Lote" / "Imprimir Selecionadas".
+7. F12 → Console: `[TERC_PRINT.listaLote] impressão disparada { tipo, total, esperado }` deve mostrar `total === esperado`.
+
+### Deploy
+- **Cloudflare Pages Deploy ID**: `dba360e6`
+- **URL Deploy**: `https://dba360e6.corepro-confeccao.pages.dev`
+- **URL Produção**: `https://corepro-confeccao.pages.dev`
+- **Build size**: `dist/_worker.js 349.79 kB` (worker inalterado); `app.js` 621KB → 649KB (+27KB do novo módulo de impressão)
+- **Smoke PROD**: `/` 200, `app.js?v=62` 200, `styles.css?v=59` 200 ✅ + 19 refs HOTFIX 0054 no bundle
+
+---
+
 ## 🆕 HOTFIX 0053 (2026-07-02) — Romaneio em Lote Misturando OPs Diferentes
 
 ### Contexto
