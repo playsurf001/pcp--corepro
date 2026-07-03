@@ -9,7 +9,7 @@
 //   • Listar planos
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, toInt } from '../lib/db';
+import { ok, fail, toInt, withD1Retry, isTransientD1Error } from '../lib/db';
 import {
   hashSenha,
   criarSessaoMaster,
@@ -40,41 +40,92 @@ app.get('/master/health', (c) => c.json(ok({ service: 'master', ts: new Date().t
 /* ============================================================
  * AUTH — Login / Logout / Me (somente login é público)
  * ============================================================ */
+// HOTFIX 0056 — Master login também protegido contra falhas transitórias do D1.
 app.post('/master/auth/login', async (c) => {
+  const { login, senha } = (await c.req.json().catch(() => ({}))) as any;
+  if (!login || !senha) return fail('Login e senha obrigatórios.', 400);
+  const loginNorm = String(login).trim().toLowerCase();
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || '';
+  const ua = c.req.header('user-agent') || '';
+
+  // ── [1] BUSCA DO SUPER_ADMIN ─────────────────────────────────────────
+  let row: any = null;
   try {
-    const { login, senha } = (await c.req.json().catch(() => ({}))) as any;
-    if (!login || !senha) return fail('Login e senha obrigatórios.', 400);
-
-    const row: any = await c.env.DB.prepare(
-      `SELECT id_super, login, nome, email, salt, senha_hash, ativo
-         FROM super_admins WHERE login = ? AND ativo = 1`
-    ).bind(String(login).trim().toLowerCase()).first();
-
-    if (!row) return fail('Credenciais inválidas.', 401);
-
-    const hash = await hashSenha(row.salt, String(senha));
-    if (hash !== row.senha_hash) return fail('Credenciais inválidas.', 401);
-
-    const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || '';
-    const ua = c.req.header('user-agent') || '';
-    const token = await criarSessaoMaster(c.env.DB, row.id_super, ip, ua);
-
-    await c.env.DB.prepare(
-      `UPDATE super_admins SET ultimo_acesso = datetime('now'), dt_atualizacao = datetime('now') WHERE id_super = ?`
-    ).bind(row.id_super).run();
-
-    return c.json(ok({
-      token,
-      master: {
-        id_super: row.id_super,
-        login: row.login,
-        nome: row.nome,
-        email: row.email,
-      },
-    }));
+    row = await withD1Retry(
+      () => c.env.DB.prepare(
+        `SELECT id_super, login, nome, email, salt, senha_hash, ativo
+           FROM super_admins WHERE login = ? AND ativo = 1`
+      ).bind(loginNorm).first(),
+      { attempts: 3, baseDelayMs: 60, label: 'master-login/select-super' }
+    );
   } catch (e: any) {
+    console.error(JSON.stringify({
+      scope: 'master-login', stage: 'select-super',
+      transient: isTransientD1Error(e),
+      error: e?.message || String(e), login: loginNorm, ip,
+      ts: new Date().toISOString(),
+    }));
+    if (isTransientD1Error(e)) {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'Serviço de autenticação Master temporariamente indisponível. Tente novamente em alguns segundos.',
+        code: 'MASTER_AUTH_TEMPORARILY_UNAVAILABLE',
+      }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } });
+    }
     return fail('Erro no login master: ' + (e?.message || e), 500);
   }
+
+  if (!row) return fail('Credenciais inválidas.', 401);
+
+  // ── [2] VALIDA SENHA ─────────────────────────────────────────────────
+  const hash = await hashSenha(row.salt, String(senha));
+  if (hash !== row.senha_hash) return fail('Credenciais inválidas.', 401);
+
+  // ── [3] CRIA SESSÃO ──────────────────────────────────────────────────
+  let token: string;
+  try {
+    token = await withD1Retry(
+      () => criarSessaoMaster(c.env.DB, row.id_super, ip, ua),
+      { attempts: 3, baseDelayMs: 60, label: 'master-login/criar-sessao' }
+    );
+  } catch (e: any) {
+    console.error(JSON.stringify({
+      scope: 'master-login', stage: 'criar-sessao',
+      transient: isTransientD1Error(e),
+      error: e?.message || String(e), login: loginNorm,
+      ts: new Date().toISOString(),
+    }));
+    if (isTransientD1Error(e)) {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'Serviço de sessão temporariamente indisponível. Tente novamente em alguns segundos.',
+        code: 'MASTER_SESSION_TEMPORARILY_UNAVAILABLE',
+      }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } });
+    }
+    return fail('Erro no login master (sessão): ' + (e?.message || e), 500);
+  }
+
+  // ── [4] UPDATE ULTIMO_ACESSO (não bloqueia) ──────────────────────────
+  try {
+    await withD1Retry(
+      () => c.env.DB.prepare(
+        `UPDATE super_admins SET ultimo_acesso = datetime('now'), dt_atualizacao = datetime('now') WHERE id_super = ?`
+      ).bind(row.id_super).run(),
+      { attempts: 2, baseDelayMs: 40, label: 'master-login/update-acesso' }
+    );
+  } catch (e: any) {
+    console.warn('[master-login] non-critical update-acesso failed:', e?.message || e);
+  }
+
+  return c.json(ok({
+    token,
+    master: {
+      id_super: row.id_super,
+      login: row.login,
+      nome: row.nome,
+      email: row.email,
+    },
+  }));
 });
 
 app.post('/master/auth/logout', async (c) => {

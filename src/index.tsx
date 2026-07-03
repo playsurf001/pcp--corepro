@@ -121,6 +121,19 @@ app.onError((err, c) => {
     status = 400;
     code = 'INVALID_JSON';
     friendly = 'Corpo da requisição inválido (JSON malformado).';
+  } else if (
+    /caused object to be reset|starting up D1 DB storage|Network connection lost|storage caused object/i.test(raw)
+  ) {
+    // HOTFIX 0056 — Erros TRANSITÓRIOS de infra do Cloudflare D1.
+    // Antes eram mapeados para o D1_ERROR genérico ("Erro no banco de
+    // dados. Equipe foi notificada."), o que confundia o usuário porque
+    // sugeria bug permanente do sistema. Agora devolvemos 503 com
+    // mensagem clara de que é temporário + Retry-After.
+    status = 503;
+    code = 'DB_TRANSIENT';
+    friendly = 'Serviço temporariamente indisponível (falha transitória do banco). Aguarde alguns segundos e tente novamente.';
+    const m = raw.match(/reference\s*=\s*([\w-]+)/i);
+    hint = m ? `Referência Cloudflare: ${m[1]}` : 'Falha transitória de storage do D1';
   } else if (/D1_ERROR/i.test(raw)) {
     status = 500;
     code = 'DB_ERROR';
@@ -129,6 +142,10 @@ app.onError((err, c) => {
     const m = raw.match(/D1_ERROR:\s*([^\n]+)/i);
     if (m) hint = m[1].slice(0, 160).trim();
   }
+
+  // HOTFIX 0056 — Sinaliza retry para clientes em erros transitórios (503)
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (status === 503) headers['Retry-After'] = '2';
 
   return new Response(
     JSON.stringify({
@@ -141,7 +158,7 @@ app.onError((err, c) => {
       // detail: stack/raw completo — só em dev/local
       detail: (c.env as any)?.NODE_ENV === 'production' ? undefined : raw.slice(0, 300),
     }),
-    { status, headers: { 'Content-Type': 'application/json' } }
+    { status, headers }
   );
 });
 
@@ -279,7 +296,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
   <script src="/static/support_content.js?v=58"></script>
-  <script src="/static/app.js?v=63"></script>
+  <script src="/static/app.js?v=64"></script>
   <script src="/static/relatorios_det.js?v=6"></script>
 </body>
 </html>`;

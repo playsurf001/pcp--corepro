@@ -543,24 +543,79 @@
       </div>
     </div>`;
 
+    // HOTFIX 0056 — Auto-retry no login Master para erros transitórios do D1
     $('#m-form').onsubmit = async (e) => {
       e.preventDefault();
       const btn = $('#m-btn');
-      btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Entrando…';
-      $('#m-err').textContent = '';
-      try {
-        const r = await axios.post(API + '/master/auth/login', {
-          login: $('#m-login').value.trim(),
-          senha: $('#m-senha').value,
-        });
-        AUTH.setToken(r.data.data.token);
-        STATE.master = r.data.data.master;
-        location.hash = '#master/dashboard';
-        boot();
-      } catch (err) {
-        $('#m-err').textContent = err.response?.data?.error || 'Credenciais inválidas.';
-        btn.disabled = false; btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket"></i> Acessar área Master';
+      const $err = $('#m-err');
+      const setBtn = (label, disabled = true) => {
+        btn.disabled = disabled;
+        btn.innerHTML = disabled
+          ? '<i class="fas fa-spinner fa-spin"></i> ' + label
+          : '<i class="fas fa-arrow-right-to-bracket"></i> ' + label;
+      };
+      setBtn('Entrando…');
+      $err.textContent = '';
+
+      const payload = {
+        login: $('#m-login').value.trim(),
+        senha: $('#m-senha').value,
+      };
+      const MAX_TRIES = 3;
+      let lastErr = null;
+
+      for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+        try {
+          const r = await axios.post(API + '/master/auth/login', payload, {
+            validateStatus: () => true,
+          });
+
+          if (r.status >= 200 && r.status < 300 && r.data?.data?.token) {
+            AUTH.setToken(r.data.data.token);
+            STATE.master = r.data.data.master;
+            location.hash = '#master/dashboard';
+            boot();
+            return;
+          }
+
+          // Determinísticos: não faz retry
+          if (r.status === 401 || r.status === 400 || r.status === 409 || r.status === 429) {
+            $err.textContent = r.data?.error || 'Credenciais inválidas.';
+            setBtn('Acessar área Master', false);
+            return;
+          }
+
+          // Transitórios: retry
+          const code = r.data?.code || '';
+          const isTransient = r.status === 503
+            || code === 'DB_TRANSIENT'
+            || code === 'MASTER_AUTH_TEMPORARILY_UNAVAILABLE'
+            || code === 'MASTER_SESSION_TEMPORARILY_UNAVAILABLE'
+            || code === 'DB_BUSY';
+
+          if (isTransient && attempt < MAX_TRIES) {
+            $err.innerHTML = `<span class="text-amber-500">Serviço iniciando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
+            setBtn(`Aguardando (${attempt}/${MAX_TRIES})...`);
+            await new Promise(res => setTimeout(res, 1500 * attempt));
+            continue;
+          }
+
+          lastErr = r.data?.error || `HTTP ${r.status}`;
+          break;
+        } catch (netErr) {
+          lastErr = netErr?.message || 'Erro de conexão';
+          if (attempt < MAX_TRIES) {
+            $err.innerHTML = `<span class="text-amber-500">Reconectando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
+            setBtn(`Reconectando (${attempt}/${MAX_TRIES})...`);
+            await new Promise(res => setTimeout(res, 1500 * attempt));
+            continue;
+          }
+          break;
+        }
       }
+
+      $err.textContent = lastErr || 'Não foi possível fazer login. Tente novamente em alguns segundos.';
+      setBtn('Acessar área Master', false);
     };
   }
 

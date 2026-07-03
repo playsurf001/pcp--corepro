@@ -12794,33 +12794,94 @@ function renderLogin(msg) {
   $('#login-form').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#login-btn');
-    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Entrando...';
-    try {
-      const r = await axios.post(API + '/auth/login', {
-        login: $('#login-login').value.trim(),
-        senha: $('#login-senha').value,
-      });
-      AUTH.setToken(r.data.data.token);
-      // Busca perfil completo (com avatar/email) — fallback p/ resposta do login
-      let usuario = r.data.data.usuario;
+    const $msg = $('#login-msg');
+    const setBtn = (label, disabled = true) => {
+      btn.disabled = disabled;
+      btn.innerHTML = disabled
+        ? '<i class="fas fa-spinner fa-spin mr-1"></i> ' + label
+        : '<i class="fas fa-sign-in-alt mr-1"></i> ' + label;
+    };
+    setBtn('Entrando...');
+
+    // HOTFIX 0056 — Auto-retry no frontend para erros TRANSITÓRIOS do D1
+    // O backend já faz até 3 tentativas internamente; aqui adicionamos mais
+    // 2 tentativas no client (2s de espera cada) para cobrir cold-start
+    // extremo do worker+D1. Não faz retry em 401 (credenciais erradas).
+    const payload = {
+      login: $('#login-login').value.trim(),
+      senha: $('#login-senha').value,
+    };
+    const MAX_TRIES = 3;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
       try {
-        const me = await axios.get(API + '/auth/me', {
-          headers: { Authorization: 'Bearer ' + r.data.data.token }
+        const r = await axios.post(API + '/auth/login', payload, {
+          // Aceita 4xx sem lançar (para tratar 401 vs 503 separadamente)
+          validateStatus: () => true,
         });
-        if (me.data?.data) usuario = { ...usuario, ...me.data.data };
-      } catch {}
-      AUTH.setUser(usuario);
-      state.user = usuario;
-      if (state.user.trocar_senha) {
-        renderTrocarSenhaObrigatoria();
-      } else {
-        bootApp();
+
+        if (r.status >= 200 && r.status < 300 && r.data?.data?.token) {
+          // ✅ Sucesso
+          AUTH.setToken(r.data.data.token);
+          let usuario = r.data.data.usuario;
+          try {
+            const me = await axios.get(API + '/auth/me', {
+              headers: { Authorization: 'Bearer ' + r.data.data.token }
+            });
+            if (me.data?.data) usuario = { ...usuario, ...me.data.data };
+          } catch {}
+          AUTH.setUser(usuario);
+          state.user = usuario;
+          if (state.user.trocar_senha) {
+            renderTrocarSenhaObrigatoria();
+          } else {
+            bootApp();
+          }
+          return;
+        }
+
+        // Erros determinísticos (não faz retry)
+        if (r.status === 401 || r.status === 400 || r.status === 409 || r.status === 429) {
+          $msg.textContent = r.data?.error || 'Usuário ou senha inválidos.';
+          setBtn('Entrar', false);
+          return;
+        }
+
+        // Erros transitórios (503 / DB_TRANSIENT / AUTH_TEMPORARILY_UNAVAILABLE)
+        const code = r.data?.code || '';
+        const isTransient = r.status === 503
+          || code === 'DB_TRANSIENT'
+          || code === 'AUTH_TEMPORARILY_UNAVAILABLE'
+          || code === 'DB_BUSY';
+
+        if (isTransient && attempt < MAX_TRIES) {
+          $msg.innerHTML = `<span class="text-amber-500">Serviço iniciando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
+          setBtn(`Aguardando (${attempt}/${MAX_TRIES})...`);
+          // Backoff: 1.5s → 3s
+          await new Promise(res => setTimeout(res, 1500 * attempt));
+          continue;
+        }
+
+        // Esgotou tentativas ou erro inesperado
+        lastErr = r.data?.error || `HTTP ${r.status}`;
+        break;
+      } catch (netErr) {
+        // Erro de rede — tenta de novo se ainda tem tentativas
+        lastErr = netErr?.message || 'Erro de conexão';
+        if (attempt < MAX_TRIES) {
+          $msg.innerHTML = `<span class="text-amber-500">Reconectando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
+          setBtn(`Reconectando (${attempt}/${MAX_TRIES})...`);
+          await new Promise(res => setTimeout(res, 1500 * attempt));
+          continue;
+        }
+        break;
       }
-    } catch (e) {
-      const m = e.response?.data?.error || 'Erro ao fazer login';
-      $('#login-msg').textContent = m;
-      btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt mr-1"></i> Entrar';
     }
+
+    // Todas as tentativas falharam
+    $msg.textContent = lastErr || 'Não foi possível fazer login. Tente novamente em alguns segundos.';
+    setBtn('Entrar', false);
   };
   $('#login-boot').onclick = async (e) => {
     e.preventDefault();
@@ -13889,7 +13950,7 @@ ROUTES.suporte = async (main) => {
   if (isMasterRoute()) {
     // Injeta master.js dinamicamente
     const s = document.createElement('script');
-    s.src = '/static/master.js?v=7';
+    s.src = '/static/master.js?v=8';
     s.onerror = () => {
       $('#app').innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626"><i class="fas fa-exclamation-triangle text-3xl"></i><p class="mt-3">Erro ao carregar área Master.</p></div>';
     };

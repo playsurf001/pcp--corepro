@@ -157,3 +157,72 @@ export function toNum(v: any, def = 0): number {
   const n = parseFloat(String(v));
   return Number.isNaN(n) ? def : n;
 }
+
+/* ================================================================
+ * HOTFIX 0056 — D1 transient error retry
+ *
+ * Cloudflare D1 pode retornar erros TRANSITÓRIOS de storage
+ * (cold-start / object reset / internal error) que se resolvem
+ * sozinhos em milissegundos. Exemplos observados em prod:
+ *   - "Internal error while starting up D1 DB storage caused object to be reset"
+ *   - "Network connection lost"
+ *   - "D1_ERROR" genérico intermitente
+ *
+ * isTransientD1Error() detecta esses padrões via mensagem.
+ * withD1Retry() executa a operação até N vezes com backoff curto
+ * (evita degradar UX em erros passageiros de infra).
+ *
+ * NÃO faz retry em erros DETERMINÍSTICOS (constraint, NOT NULL,
+ * too many SQL vars, etc.) — esses devem falhar imediatamente.
+ * ================================================================ */
+
+/** Retorna true se a mensagem do erro indica falha transitória de infra do D1. */
+export function isTransientD1Error(err: any): boolean {
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (!msg) return false;
+  // Padrões observados em incidentes reais do Cloudflare D1
+  return (
+    msg.includes('caused object to be reset') ||
+    msg.includes('starting up d1 db storage') ||
+    msg.includes('network connection lost') ||
+    msg.includes('storage caused object') ||
+    (msg.includes('internal error') && msg.includes('d1'))
+  );
+}
+
+/**
+ * Executa uma operação D1 com retry automático em erros transitórios.
+ * @param op função async que executa a query D1
+ * @param opts { attempts?, baseDelayMs?, label? }
+ * @returns o resultado da op se ela eventualmente suceder
+ * @throws o último erro (transitório ou não) se todas as tentativas falharem
+ */
+export async function withD1Retry<T>(
+  op: () => Promise<T>,
+  opts: { attempts?: number; baseDelayMs?: number; label?: string } = {}
+): Promise<T> {
+  const attempts   = Math.max(1, opts.attempts ?? 3);
+  const baseDelay  = Math.max(10, opts.baseDelayMs ?? 60);
+  const label      = opts.label || 'd1-op';
+  let lastErr: any = null;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await op();
+    } catch (e: any) {
+      lastErr = e;
+      if (!isTransientD1Error(e) || i === attempts) {
+        // Erro não-transitório OU esgotou tentativas → propaga
+        if (isTransientD1Error(e)) {
+          console.error(`[${label}] D1 transient error - all ${attempts} attempts failed:`, e?.message || e);
+        }
+        throw e;
+      }
+      // Backoff exponencial curto: 60ms, 120ms, 240ms...
+      const delay = baseDelay * Math.pow(2, i - 1);
+      console.warn(`[${label}] D1 transient error on attempt ${i}/${attempts}, retrying in ${delay}ms:`, e?.message || e);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  // Nunca chega aqui, mas satisfaz o TS
+  throw lastErr;
+}

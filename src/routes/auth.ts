@@ -1,7 +1,7 @@
 // Rotas de autenticação
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt } from '../lib/db';
+import { ok, fail, audit, toInt, withD1Retry, isTransientD1Error } from '../lib/db';
 import {
   hashSenha,
   randomHex,
@@ -13,6 +13,58 @@ import {
 import { assertLimit, LimitExceededError } from '../lib/plan_limits';
 
 const app = new Hono<{ Bindings: Bindings }>();
+
+/* ================================================================
+ * HOTFIX 0056 — Login resiliente a falhas transitórias do D1
+ *
+ * Contexto: em prod, o Cloudflare D1 pode retornar erros de storage
+ * de forma intermitente (cold-start / object reset). O login era
+ * a rota mais afetada porque é a PRIMEIRA query após o worker
+ * ser instanciado. Sem retry, o usuário via
+ * "Erro no banco de dados. Equipe foi notificada." e não conseguia
+ * entrar — mesmo quando o D1 já estava respondendo às próximas queries.
+ *
+ * Solução:
+ *   1. Cada etapa (busca usuário, hash senha, cria sessão, update login,
+ *      audit) roda dentro de withD1Retry() com 3 tentativas e backoff
+ *      curto (60ms → 120ms → 240ms).
+ *   2. Try/catch granular por etapa com labels específicos → logs
+ *      no console mostram exatamente onde falhou.
+ *   3. Erros transitórios que sobrevivem ao retry retornam 503 com
+ *      mensagem amigável ("Serviço temporariamente indisponível") em
+ *      vez do genérico "Erro no banco de dados".
+ *   4. Erros determinísticos (tabela faltando, sintaxe, etc.) mantêm
+ *      500 e logs completos.
+ * ================================================================ */
+
+/** Constrói uma Response 503 amigável para erros de infra do D1. */
+function serviceUnavailable(reason: string, ref?: string) {
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: 'Serviço de autenticação temporariamente indisponível. Aguarde alguns segundos e tente novamente.',
+      code: 'AUTH_TEMPORARILY_UNAVAILABLE',
+      hint: reason,
+      ref: ref || undefined,
+    }),
+    { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } }
+  );
+}
+
+/** Logging estruturado para o servidor (aparece em wrangler tail / pm2 logs). */
+function logAuthError(stage: string, err: any, ctx: Record<string, any> = {}) {
+  const msg = err?.message || String(err);
+  const transient = isTransientD1Error(err);
+  console.error(JSON.stringify({
+    scope: 'auth-login',
+    stage,
+    transient,
+    error: msg,
+    stack: err?.stack ? String(err.stack).slice(0, 800) : undefined,
+    ...ctx,
+    ts: new Date().toISOString(),
+  }));
+}
 
 /* ========= BOOTSTRAP =========
  * Primeiro acesso: se o admin ainda tem senha '__BOOTSTRAP__', permite
@@ -40,38 +92,150 @@ app.post('/auth/bootstrap', async (c) => {
   );
 });
 
-/* ========= LOGIN ========= */
+/* ========= LOGIN =========
+ * HOTFIX 0056 — refatorado para ser resiliente a falhas transitórias do D1
+ * e reportar erros específicos por etapa.
+ *
+ * Etapas (cada uma com try/catch + retry + log específico):
+ *   [1] Parse do body
+ *   [2] Busca do usuário (SELECT * FROM usuarios WHERE login=? AND ativo=1)
+ *   [3] Validação do hash da senha (Web Crypto — sem D1)
+ *   [4] Criação da sessão (INSERT em sessoes + housekeeping)
+ *   [5] Update do ultimo_login (não crítico — falha silenciosa em transient)
+ *   [6] Audit log (não crítico — falha silenciosa)
+ *
+ * Erros determinísticos (senha errada, usuário inativo) devolvem 401.
+ * Erros transitórios de infra (D1 storage) devolvem 503 com Retry-After.
+ * Erros determinísticos de infra (tabela faltando, etc.) devolvem 500.
+ */
 app.post('/auth/login', async (c) => {
-  const b = await c.req.json<{ login?: string; senha?: string }>();
-  const login = (b.login || '').trim();
-  const senha = b.senha || '';
-  if (!login || !senha) return fail('Login e senha obrigatórios.');
-
-  const u = await c.env.DB.prepare(
-    `SELECT * FROM usuarios WHERE login=? AND ativo=1`
-  ).bind(login).first<any>();
-  if (!u) {
-    await audit(c.env.DB, 'AUTH', 'LOGIN_FAIL', login, '', '', 'usuario_inexistente');
-    return fail('Usuário ou senha inválidos.', 401);
-  }
-  if (u.senha_hash === '__BOOTSTRAP__') {
-    return fail('Sistema não inicializado. Chame POST /api/auth/bootstrap primeiro.', 409);
-  }
-  const hash = await hashSenha(u.senha_salt, senha);
-  if (hash !== u.senha_hash) {
-    await audit(c.env.DB, 'AUTH', 'LOGIN_FAIL', login, '', '', 'senha_errada');
-    return fail('Usuário ou senha inválidos.', 401);
-  }
-
+  const startedAt = Date.now();
   const ip =
     c.req.header('cf-connecting-ip') ||
     c.req.header('x-forwarded-for') ||
     '';
   const ua = c.req.header('user-agent') || '';
-  const token = await criarSessao(c.env.DB, u.id_usuario, ip, ua);
-  await c.env.DB.prepare(`UPDATE usuarios SET ultimo_login=datetime('now') WHERE id_usuario=?`)
-    .bind(u.id_usuario).run();
-  await audit(c.env.DB, 'AUTH', 'LOGIN', login, '', '', '', login);
+
+  // ── [1] PARSE DO BODY ────────────────────────────────────────────────
+  let b: { login?: string; senha?: string };
+  try {
+    b = await c.req.json<{ login?: string; senha?: string }>();
+  } catch (e: any) {
+    logAuthError('parse-body', e, { ip });
+    return fail('Corpo da requisição inválido (JSON malformado).', 400);
+  }
+  const login = (b.login || '').trim();
+  const senha = b.senha || '';
+  if (!login || !senha) return fail('Login e senha obrigatórios.');
+
+  // ── [2] BUSCA DO USUÁRIO ─────────────────────────────────────────────
+  let u: any = null;
+  try {
+    u = await withD1Retry(
+      () => c.env.DB
+        .prepare(`SELECT * FROM usuarios WHERE login=? AND ativo=1`)
+        .bind(login)
+        .first<any>(),
+      { attempts: 3, baseDelayMs: 60, label: 'auth-login/select-user' }
+    );
+  } catch (e: any) {
+    logAuthError('select-user', e, { login, ip });
+    if (isTransientD1Error(e)) {
+      return serviceUnavailable('storage-transient-select-user');
+    }
+    // Erro determinístico (ex.: tabela usuarios não existe) — 500 mas amigável
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'Não foi possível consultar o banco de usuários. Tente novamente em instantes.',
+      code: 'AUTH_SELECT_USER_FAILED',
+      hint: (e?.message || '').slice(0, 160),
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  if (!u) {
+    // Audit é best-effort — não bloqueia resposta se D1 estiver instável
+    try {
+      await withD1Retry(
+        () => audit(c.env.DB, 'AUTH', 'LOGIN_FAIL', login, '', '', 'usuario_inexistente'),
+        { attempts: 2, baseDelayMs: 40, label: 'auth-login/audit-fail' }
+      );
+    } catch (e: any) { logAuthError('audit-fail-inexistente', e, { login }); }
+    return fail('Usuário ou senha inválidos.', 401);
+  }
+
+  if (u.senha_hash === '__BOOTSTRAP__') {
+    return fail('Sistema não inicializado. Chame POST /api/auth/bootstrap primeiro.', 409);
+  }
+
+  // ── [3] VALIDAÇÃO DA SENHA (Web Crypto — sem D1) ─────────────────────
+  let hash: string;
+  try {
+    hash = await hashSenha(u.senha_salt, senha);
+  } catch (e: any) {
+    logAuthError('hash-senha', e, { login, id_usuario: u.id_usuario });
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'Falha ao validar credenciais. Tente novamente.',
+      code: 'AUTH_HASH_FAILED',
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (hash !== u.senha_hash) {
+    try {
+      await withD1Retry(
+        () => audit(c.env.DB, 'AUTH', 'LOGIN_FAIL', login, '', '', 'senha_errada'),
+        { attempts: 2, baseDelayMs: 40, label: 'auth-login/audit-fail' }
+      );
+    } catch (e: any) { logAuthError('audit-fail-senha', e, { login }); }
+    return fail('Usuário ou senha inválidos.', 401);
+  }
+
+  // ── [4] CRIA SESSÃO ──────────────────────────────────────────────────
+  let token: string;
+  try {
+    token = await withD1Retry(
+      () => criarSessao(c.env.DB, u.id_usuario, ip, ua),
+      { attempts: 3, baseDelayMs: 60, label: 'auth-login/criar-sessao' }
+    );
+  } catch (e: any) {
+    logAuthError('criar-sessao', e, { login, id_usuario: u.id_usuario });
+    if (isTransientD1Error(e)) {
+      return serviceUnavailable('storage-transient-criar-sessao');
+    }
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'Não foi possível criar a sessão. Tente novamente em instantes.',
+      code: 'AUTH_SESSION_FAILED',
+      hint: (e?.message || '').slice(0, 160),
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // ── [5] UPDATE ULTIMO_LOGIN (não bloqueia — falha silenciosa) ────────
+  try {
+    await withD1Retry(
+      () => c.env.DB
+        .prepare(`UPDATE usuarios SET ultimo_login=datetime('now') WHERE id_usuario=?`)
+        .bind(u.id_usuario).run(),
+      { attempts: 2, baseDelayMs: 40, label: 'auth-login/update-ultimo-login' }
+    );
+  } catch (e: any) {
+    // Não bloqueia o login — apenas registra
+    logAuthError('update-ultimo-login', e, { login, id_usuario: u.id_usuario });
+  }
+
+  // ── [6] AUDIT SUCESSO (não bloqueia) ─────────────────────────────────
+  try {
+    await withD1Retry(
+      () => audit(c.env.DB, 'AUTH', 'LOGIN', login, '', '', '', login),
+      { attempts: 2, baseDelayMs: 40, label: 'auth-login/audit-success' }
+    );
+  } catch (e: any) {
+    logAuthError('audit-success', e, { login, id_usuario: u.id_usuario });
+  }
+
+  const durMs = Date.now() - startedAt;
+  if (durMs > 2000) {
+    console.warn(`[auth-login] slow login: ${durMs}ms for login=${login}`);
+  }
 
   return c.json(
     ok({
