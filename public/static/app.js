@@ -8425,7 +8425,25 @@ ROUTES.terc_retornos = async (main) => {
  * ============================================================ */
 
 /**
- * Gera comprovante PDF do pagamento usando jsPDF + autoTable.
+ * HOTFIX 0058 — Gera comprovante PDF do pagamento usando jsPDF + autoTable.
+ *
+ * Correções aplicadas (comprovantes de qualquer volume — 5 a 5.000+ itens):
+ *  1) Cabeçalho repetido em TODAS as páginas via didDrawPage do autoTable.
+ *  2) Rodapé "Página X de Y · Gerado em … · CorePro" em TODAS as páginas
+ *     (renderizado numa segunda passada, após saber o total de páginas).
+ *  3) Bloco pós-tabela (totais + observação + responsável + assinaturas) tem
+ *     sua altura pré-calculada. Se não couber na página corrente, uma
+ *     addPage() é feita antes de escrever — assinaturas NUNCA são cortadas.
+ *  4) autoTable já quebra automaticamente entre páginas, respeitando margens
+ *     (top/bottom) que reservam espaço para o cabeçalho e o rodapé.
+ *  5) "Assinaturas inteligentes": se sobrar espaço suficiente na última
+ *     página da tabela, o bloco final entra logo depois; senão vai para uma
+ *     página nova. Nada de página inteira só com assinatura por acidente.
+ *  6) Totais aparecem APENAS após o último item (uma vez).
+ *  7) Assinaturas aparecem APENAS uma vez, sempre na última página.
+ *
+ * Nada mudou em: schema, endpoint /payments-terc/:id, cálculos, regras
+ * financeiras, autenticação, multi-tenant, estrutura dos comprovantes.
  * Usa a empresa do usuário logado (state.user / TERC.empresa).
  */
 async function generatePaymentReceiptPDF(idPagamento) {
@@ -8439,37 +8457,52 @@ async function generatePaymentReceiptPDF(idPagamento) {
     if (!jsPDF) { toast('jsPDF não está carregado.', 'error'); return; }
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const pageW = doc.internal.pageSize.getWidth();
-    let y = 14;
+    const pageH = doc.internal.pageSize.getHeight();
 
-    // Cabeçalho
-    doc.setFontSize(16); doc.setFont('helvetica', 'bold');
-    doc.text(pag.empresa_nome || 'CorePro — Terceirização', 14, y);
-    doc.setFontSize(10); doc.setFont('helvetica', 'normal');
-    y += 6;
-    doc.text('Comprovante de Pagamento de Terceirizado', 14, y);
-    y += 5;
-    doc.setDrawColor(200); doc.line(14, y, pageW - 14, y);
-    y += 6;
+    // ── Constantes de layout ─────────────────────────────────────────────
+    const MARGIN_LEFT   = 14;
+    const MARGIN_RIGHT  = 14;
+    const MARGIN_TOP    = 14;             // topo do cabeçalho
+    const HEADER_H      = 42;             // altura reservada para o cabeçalho em cada página
+    const FOOTER_H      = 12;             // altura reservada para o rodapé em cada página
+    const CONTENT_TOP   = MARGIN_TOP + HEADER_H;
+    const CONTENT_BOT   = pageH - FOOTER_H;
+    const gerado_em    = dayjs().format('DD/MM/YYYY HH:mm');
 
-    // Bloco identificação do pagamento
-    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
-    doc.text(`Pagamento Nº ${pag.id_pagamento}`, 14, y);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Data: ${fmt.date(pag.dt_pagamento)}`, pageW - 14, y, { align: 'right' });
-    y += 6;
-    doc.text(`Status: ${pag.status || 'Confirmado'}`, 14, y);
-    doc.text(`Forma: ${pag.forma_pagamento || '—'}`, pageW - 14, y, { align: 'right' });
-    y += 8;
+    // ── HEADER: desenhado no topo de CADA página (via didDrawPage) ──────
+    function drawHeader() {
+      let hy = MARGIN_TOP;
+      doc.setTextColor(0);
+      // Título / empresa
+      doc.setFontSize(16); doc.setFont('helvetica', 'bold');
+      doc.text(pag.empresa_nome || 'CorePro — Terceirização', MARGIN_LEFT, hy);
+      doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+      hy += 6;
+      doc.text('Comprovante de Pagamento de Terceirizado', MARGIN_LEFT, hy);
+      hy += 5;
+      doc.setDrawColor(200); doc.line(MARGIN_LEFT, hy, pageW - MARGIN_RIGHT, hy);
+      hy += 6;
+      // Linha 1: número + data
+      doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+      doc.text(`Pagamento Nº ${pag.id_pagamento}`, MARGIN_LEFT, hy);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`Data: ${fmt.date(pag.dt_pagamento)}`, pageW - MARGIN_RIGHT, hy, { align: 'right' });
+      hy += 6;
+      // Linha 2: status + forma
+      doc.setFontSize(10);
+      doc.text(`Status: ${pag.status || 'Confirmado'}`, MARGIN_LEFT, hy);
+      doc.text(`Forma: ${pag.forma_pagamento || '—'}`, pageW - MARGIN_RIGHT, hy, { align: 'right' });
+      hy += 6;
+      // Linha 3: terceirizado
+      doc.setFont('helvetica', 'bold');
+      doc.text(`Terceirizado:`, MARGIN_LEFT, hy);
+      doc.setFont('helvetica', 'normal');
+      const tercLine = [pag.nome_terc || '—', pag.nome_setor && `Setor: ${pag.nome_setor}`, pag.telefone && `Tel: ${pag.telefone}`]
+        .filter(Boolean).join(' · ');
+      doc.text(tercLine, MARGIN_LEFT + 26, hy);
+    }
 
-    // Dados terceirizado
-    doc.setFont('helvetica', 'bold'); doc.text('Terceirizado', 14, y); y += 5;
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Nome: ${pag.nome_terc || '—'}`, 14, y); y += 5;
-    if (pag.nome_setor) { doc.text(`Setor: ${pag.nome_setor}`, 14, y); y += 5; }
-    if (pag.telefone)   { doc.text(`Telefone: ${pag.telefone}`, 14, y); y += 5; }
-    y += 3;
-
-    // Tabela de itens
+    // ── Tabela de itens (autoTable cuida da quebra de página) ────────────
     const head = [['CTRL', 'OP', 'Referência', 'Cor', 'Serviço', 'Boas', 'Valor (R$)']];
     const body = itens.map(i => [
       String(i.num_controle || '—'),
@@ -8480,8 +8513,10 @@ async function generatePaymentReceiptPDF(idPagamento) {
       String(i.qtd_boa || 0),
       Number(i.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
     ]);
+
     doc.autoTable({
-      startY: y, head, body,
+      startY: CONTENT_TOP,
+      head, body,
       theme: 'striped',
       headStyles: { fillColor: [37, 99, 235], textColor: 255, fontSize: 9 },
       bodyStyles: { fontSize: 8 },
@@ -8491,50 +8526,93 @@ async function generatePaymentReceiptPDF(idPagamento) {
         5: { halign: 'right', cellWidth: 14 },
         6: { halign: 'right', cellWidth: 24 },
       },
-      margin: { left: 14, right: 14 },
+      // As margens top/bottom garantem que a tabela NÃO invada o cabeçalho
+      // nem o rodapé em quebras automáticas.
+      margin: { left: MARGIN_LEFT, right: MARGIN_RIGHT, top: CONTENT_TOP, bottom: FOOTER_H + 2 },
+      // Cabeçalho da tabela repete em cada página automaticamente
+      showHead: 'everyPage',
+      // Redesenha nosso cabeçalho de comprovante em cada página nova
+      didDrawPage: () => { drawHeader(); },
     });
-    y = doc.lastAutoTable.finalY + 6;
 
-    // Totais
-    doc.setDrawColor(180); doc.line(14, y, pageW - 14, y); y += 6;
+    // ── Pré-cálculo do bloco final (totais + obs + assinaturas) ──────────
+    // Se não couber na página atual, abre uma nova ANTES de escrever.
+    // Isso garante que as assinaturas jamais sejam cortadas.
+    let yAfterTable = doc.lastAutoTable.finalY + 6;
+    const obsLines = pag.observacao
+      ? doc.splitTextToSize(String(pag.observacao), pageW - MARGIN_LEFT - MARGIN_RIGHT)
+      : [];
+    const respLines = 1 + (pag.ip_origem ? 1 : 0);
+    // Altura estimada (mm): linha de separação(1) + totais(6+2) + [obs label 5 + linhas*5 + 3] + resp*5 + espaço(15) + linhas de assinatura(4+6)
+    const blockH =
+      6 +                                     // separador + espaço
+      8 +                                     // linha totais
+      (obsLines.length ? (5 + obsLines.length * 5 + 3) : 0) +
+      respLines * 5 +
+      15 +                                    // espaço antes das assinaturas
+      4 + 6;                                  // linhas + labels de assinatura
+
+    if (yAfterTable + blockH > CONTENT_BOT) {
+      doc.addPage();
+      // didDrawPage já foi chamado pelo autoTable para páginas da tabela;
+      // aqui é uma página nova só para o bloco final, precisamos redesenhar:
+      drawHeader();
+      yAfterTable = CONTENT_TOP;
+    }
+
+    // ── Totais (uma única vez, após o último item) ───────────────────────
+    let y = yAfterTable;
+    doc.setDrawColor(180); doc.line(MARGIN_LEFT, y, pageW - MARGIN_RIGHT, y); y += 6;
+    doc.setTextColor(0);
     doc.setFontSize(10); doc.setFont('helvetica', 'bold');
-    doc.text(`Total de retornos: ${pag.qtd_retornos || 0}`, 14, y);
+    doc.text(`Total de retornos: ${pag.qtd_retornos || 0}`, MARGIN_LEFT, y);
     doc.text(`Peças boas: ${pag.qtd_pecas_boas || 0}`, 80, y);
     const valorFmt = Number(pag.valor_total || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     doc.setFontSize(12);
-    doc.text(`Total pago: ${valorFmt}`, pageW - 14, y, { align: 'right' });
+    doc.text(`Total pago: ${valorFmt}`, pageW - MARGIN_RIGHT, y, { align: 'right' });
     y += 8;
 
-    // Observação
-    if (pag.observacao) {
+    // ── Observação ───────────────────────────────────────────────────────
+    if (obsLines.length) {
       doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
-      doc.text('Observação:', 14, y); y += 5;
+      doc.text('Observação:', MARGIN_LEFT, y); y += 5;
       doc.setFont('helvetica', 'normal');
-      const lines = doc.splitTextToSize(String(pag.observacao), pageW - 28);
-      doc.text(lines, 14, y); y += lines.length * 5 + 3;
+      doc.text(obsLines, MARGIN_LEFT, y); y += obsLines.length * 5 + 3;
     }
 
-    // Responsável + assinatura
+    // ── Responsável + IP ─────────────────────────────────────────────────
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
-    doc.text(`Responsável (sistema): ${pag.usuario || '—'}`, 14, y); y += 5;
-    if (pag.ip_origem) { doc.text(`IP de origem: ${pag.ip_origem}`, 14, y); y += 5; }
+    doc.text(`Responsável (sistema): ${pag.usuario || '—'}`, MARGIN_LEFT, y); y += 5;
+    if (pag.ip_origem) { doc.text(`IP de origem: ${pag.ip_origem}`, MARGIN_LEFT, y); y += 5; }
     y += 15;
 
-    // Assinatura
-    doc.setDrawColor(60); doc.line(14, y, 100, y);
-    doc.line(pageW - 100, y, pageW - 14, y);
+    // ── Assinaturas (sempre na última página, uma única vez) ─────────────
+    doc.setDrawColor(60);
+    doc.line(MARGIN_LEFT, y, MARGIN_LEFT + 86, y);                      // linha esquerda
+    doc.line(pageW - MARGIN_RIGHT - 86, y, pageW - MARGIN_RIGHT, y);   // linha direita
     y += 4;
     doc.setFontSize(8);
-    doc.text('Recebido por (assinatura)', 14, y);
-    doc.text('Empresa (assinatura)', pageW - 100, y);
+    doc.text('Recebido por (assinatura)', MARGIN_LEFT, y);
+    doc.text('Empresa (assinatura)', pageW - MARGIN_RIGHT - 86, y);
 
-    // Rodapé
-    const pageH = doc.internal.pageSize.getHeight();
-    doc.setFontSize(7); doc.setTextColor(120);
-    doc.text(`Gerado em ${dayjs().format('DD/MM/YYYY HH:mm')} · CorePro — Terceirização Têxtil`, pageW / 2, pageH - 8, { align: 'center' });
+    // ── FOOTER: renderizado em TODAS as páginas (segunda passada) ────────
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setFontSize(7); doc.setTextColor(120);
+      doc.text(
+        `Página ${p} de ${totalPages}  ·  Gerado em ${gerado_em}  ·  CorePro — Terceirização Têxtil`,
+        pageW / 2, pageH - 6, { align: 'center' }
+      );
+    }
 
     doc.save(`comprovante_pagamento_${idPagamento}.pdf`);
-    toast('Comprovante PDF gerado!', 'success');
+    toast(
+      totalPages > 1
+        ? `Comprovante PDF gerado (${totalPages} páginas)!`
+        : 'Comprovante PDF gerado!',
+      'success'
+    );
   } catch (e) {
     console.error('[pdf-comprovante] erro', e);
     toast('Falha ao gerar comprovante PDF.', 'error');

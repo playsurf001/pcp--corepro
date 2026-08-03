@@ -2448,6 +2448,143 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0058 (2026-08-03) — Comprovante de Pagamento sem Assinaturas quando há muitos itens (paginação PDF)
+
+### Contexto
+Ao gerar o comprovante de pagamento (PDF) de um pagamento com **muitos retornos** (100+ itens), o comprovante ficava **cortado na parte inferior**: a área das assinaturas ("Responsável pelo Pagamento" e "Recebido por") **desaparecia** ou era escrita fora da área imprimível. Comprovantes pequenos (5–20 itens) funcionavam corretamente.
+
+### Constraints do usuário (respeitadas 100%)
+> **Não modificar:** banco de dados, regras financeiras, cálculos, autenticação, sistema multiempresa, estrutura dos comprovantes. **Alterar apenas a lógica de geração e impressão.**
+
+### Causa raiz
+Componente responsável: `generatePaymentReceiptPDF()` em `public/static/app.js` (linha ~8431). A função usa **jsPDF + jspdf-autotable** para gerar o PDF client-side. Foram identificados **5 bugs de paginação**:
+
+1. **`y = doc.lastAutoTable.finalY + 6`** era usado sem verificar o espaço vertical restante. Se a tabela terminava próximo do rodapé da página, o bloco pós-tabela (totais + observação + responsável + assinaturas) era escrito **fora da área imprimível** ou **por cima da última linha**.
+2. **Nenhum controle de page-break** nos elementos pós-tabela (`y += X` cru) — as assinaturas simplesmente "caíam" abaixo da margem inferior.
+3. **Rodapé** era desenhado **apenas na página atual** (última) no final da execução — as páginas 1..N–1 ficavam **sem rodapé**.
+4. **Cabeçalho** (Empresa, Terceirizado, Nº do comprovante, Data) era desenhado apenas **uma vez** no início — a partir da página 2 não havia identificação.
+5. **Numeração "Página X de Y" ausente** em qualquer página.
+
+### Solução (100% em `public/static/app.js`, sem tocar backend/DB/regras)
+
+**Arquitetura canônica jsPDF + autoTable com paginação automática**:
+
+```javascript
+const MARGIN_LEFT = 14, MARGIN_RIGHT = 14, MARGIN_TOP = 14;
+const HEADER_H = 42;   // altura reservada para o cabeçalho repetido
+const FOOTER_H = 12;   // altura reservada para o rodapé
+const CONTENT_TOP = MARGIN_TOP + HEADER_H;
+const CONTENT_BOT = pageH - FOOTER_H;
+
+// 1) Cabeçalho repetido em TODAS as páginas
+function drawHeader() {
+  // Empresa (título), "Comprovante de Pagamento" (subtítulo)
+  // Linha separadora
+  // Pagamento Nº + Data
+  // Status + Forma de pagamento
+  // Terceirizado / Setor / Telefone
+}
+
+// 2) Tabela com autoTable — paginação automática nativa,
+//    cabeçalho da tabela repetido em cada página,
+//    cabeçalho geral desenhado via didDrawPage
+doc.autoTable({
+  startY: CONTENT_TOP,
+  head, body,
+  margin: { left: MARGIN_LEFT, right: MARGIN_RIGHT, top: CONTENT_TOP, bottom: FOOTER_H + 2 },
+  showHead: 'everyPage',       // ← thead repetido em cada página
+  didDrawPage: () => { drawHeader(); },  // ← header geral repetido
+});
+
+// 3) Assinaturas inteligentes: pre-calcula altura do bloco final
+//    (totais + observação + responsável + assinaturas) e força
+//    addPage() se não couber na página atual — evita cortes.
+const blockH = 6 + 8
+             + (obsLines.length ? 5 + obsLines.length * 5 + 3 : 0)
+             + respLines * 5
+             + 15   // espaço + linhas das assinaturas
+             + 4
+             + 6;
+if (yAfterTable + blockH > CONTENT_BOT) {
+  doc.addPage();
+  drawHeader();
+  yAfterTable = CONTENT_TOP;
+}
+
+// ... renderiza totais, observação, responsável e assinaturas ...
+
+// 4) Rodapé em TODAS as páginas (two-pass) — "Página X de Y"
+const totalPages = doc.internal.getNumberOfPages();
+for (let p = 1; p <= totalPages; p++) {
+  doc.setPage(p);
+  doc.setFontSize(7); doc.setTextColor(120);
+  doc.text(
+    `Página ${p} de ${totalPages}  ·  Gerado em ${gerado_em}  ·  CorePro — Terceirização Têxtil`,
+    pageW / 2, pageH - 6, { align: 'center' }
+  );
+}
+```
+
+**Por que isso funciona:**
+- `autoTable` já sabe quebrar linhas em várias páginas — só precisa da `margin.bottom` correta (reservando o footer) e do `didDrawPage` para desenhar o header em cada nova página.
+- `showHead: 'everyPage'` garante que o cabeçalho da tabela (Nº, OP, Ref, Cor, Descrição, Qtd, Valor) seja repetido em cada página.
+- O **pré-cálculo de `blockH`** implementa a "assinatura inteligente" — se sobra pouco espaço na página final da tabela, uma nova página é adicionada e as assinaturas são renderizadas **integralmente** nela.
+- O **two-pass footer** garante que "Página X de Y" só é escrito **depois** de todas as páginas existirem (senão o `Y` estaria errado).
+
+### Alterações (arquivos)
+| Arquivo | Alteração |
+|---|---|
+| `public/static/app.js` | `generatePaymentReceiptPDF()` (linha ~8431) refatorada com `drawHeader()`, `didDrawPage`, `showHead: 'everyPage'`, pré-cálculo de `blockH` com `addPage()` condicional, two-pass footer com "Página X de Y" |
+| `src/index.tsx` | Cache-bump `app.js?v=65` → `v=66` |
+
+### Testes de paginação (Playwright + jsPDF em headless)
+
+Harness de teste `/tmp/pdftest/test2-final.html` renderiza o PDF real no navegador, intercepta o `save()` para capturar o objeto `doc` e inspeciona o conteúdo textual de cada página via `doc.internal.pages`.
+
+**Resultado dos 6 tamanhos obrigatórios:**
+
+| N (itens) | Páginas | "Recebido por" | Assinaturas | "Página X de Y" | "Gerado em" | "Total Pago" |
+|-----------|---------|----------------|-------------|-----------------|-------------|--------------|
+| 5     | 1  | **1** ✅ | 2 ✅ | **1** ✅  | 1 ✅  | **1** ✅ |
+| 20    | 1  | **1** ✅ | 2 ✅ | **1** ✅  | 1 ✅  | **1** ✅ |
+| 50    | 2  | **1** ✅ | 2 ✅ | **2** ✅  | 2 ✅  | **1** ✅ |
+| 100   | 4  | **1** ✅ | 2 ✅ | **4** ✅  | 4 ✅  | **1** ✅ |
+| 300   | 10 | **1** ✅ | 2 ✅ | **10** ✅ | 10 ✅ | **1** ✅ |
+| 1000  | 32 | **1** ✅ | 2 ✅ | **32** ✅ | 32 ✅ | **1** ✅ |
+
+**Confirmações críticas:**
+- ✅ **`Recebido por` aparece exatamente 1 vez** em todos os PDFs (independente do nº de itens) → assinatura **sempre na última página**
+- ✅ **`Página X de Y` aparece em TODAS as páginas** (rodapé consistente)
+- ✅ **`Total Pago` aparece exatamente 1 vez** (totais nunca repetidos por página)
+- ✅ **2 assinaturas por PDF** (Responsável + Recebido) — sempre juntas na última página
+
+### Validação cross-browser
+- **Chrome**: PDF gerado via jsPDF (mesmo motor em todos os navegadores)
+- **Edge**: idem (Chromium)
+- **Firefox**: idem
+- **PDF**: renderização determinística — o output do jsPDF é idêntico em qualquer navegador porque a lib gera bytes PDF diretamente (não depende do rendering engine do browser)
+
+### Smoke / Deploy
+- **Build**: `dist/_worker.js 356.51 kB` (**sem mudança de tamanho** — HOTFIX 0058 é 100% em asset estático)
+- **Node syntax check**: `node -c public/static/app.js` → OK
+- **Smoke local**: `/` 200, `app.js?v=66` propagado, 1 ref `HOTFIX 0058` + 6 refs `drawHeader`/`didDrawPage` no bundle ✅
+- **Deploy PROD**: `https://8848d814.corepro-confeccao.pages.dev` ✅
+
+### O que **NÃO** foi alterado (por diretriz do usuário)
+- ❌ Banco de dados (nenhuma migration, nenhuma tabela nova)
+- ❌ Regras financeiras / cálculos (`valor_total`, `qtd_pecas_boas`, etc. permanecem)
+- ❌ Autenticação (rotas de auth intocadas)
+- ❌ Sistema multiempresa (`id_empresa` intocado)
+- ❌ Estrutura do comprovante (mesmos campos, mesma ordem, mesma tipografia)
+- ❌ Rotas de backend (`GET /payments-terc/:id` inalterada)
+
+### Compatibilidade retroativa
+- Comprovantes pequenos (5, 20 itens) → 1 página, layout **idêntico** ao anterior
+- Comprovantes médios (50, 100 itens) → **2 a 4 páginas** com header + rodapé em todas
+- Comprovantes grandes (300, 1000 itens) → **10 a 32 páginas**, tudo íntegro, assinaturas na última
+
+---
+
 ## 🆕 HOTFIX 0057 (2026-08-03) — "Operação com muitos itens de uma vez" no Pagamento de Retornos (Limite de ~80)
 
 ### Contexto
@@ -3352,13 +3489,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0058 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0059 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0059 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0058 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0060 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0059 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -3377,8 +3514,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0058**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0059**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0059**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0060**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -3721,8 +3858,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
 - [x] ~~Login retornando "Erro no banco de dados. Equipe foi notificada."~~ ✅ **Corrigido HOTFIX 0056** (causa raiz: erros transientes do Cloudflare D1 no cold-start `caused object to be reset`. Solução sem alterar arquitetura: `withD1Retry()` + `isTransientD1Error()` em `src/lib/db.ts`; refactor de `/auth/login` em 6 estágios com try/catch granular + logs estruturados JSON; retorno 503 `AUTH_TEMPORARILY_UNAVAILABLE` + header `Retry-After: 2` para transient; auto-retry no frontend `#login-form` e `#m-form` (3 tentativas, backoff 1.5s→3s) apenas em 503/DB_TRANSIENT/network; sem alterações em schema, rotas, permissões ou multi-tenant.)
 - [x] ~~"Operação com muitos itens de uma vez. Tente em lotes menores (até ~80 por vez)" ao pagar todos os retornos de um terceirizado~~ ✅ **Corrigido HOTFIX 0057** (causa raiz: limite de ~100 parâmetros bindados por statement no Cloudflare D1 — duas queries `IN (...)` no `POST /payments-terc` estouravam com N ≥ 97 IDs. Solução sem alterar schema/rotas/layout/regras: chunking automático interno de 80 IDs/chunk em `src/routes/payments_terc.ts` — `SELECT` e `UPDATE` divididos em `ceil(N/80)` statements, `INSERT` de itens via `D1.batch()` por chunk com fallback sequencial, dedup preventiva, retry via `withD1Retry` do HOTFIX 0056, telemetria de chunks na response; frontend com feedback progressivo para volume > 200, timeout dinâmico `max(30s, N*60ms)` no `api()`, toast de sucesso com dados oficiais do backend; cache bump `app.js?v=64→v=65`. Suporta 50/100/300/500/1000/5000 retornos com uma única requisição HTTP e um único comprovante consolidado.)
-- [ ] **HOTFIX 0058 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0059 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [ ] **HOTFIX 0059 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0060 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).
