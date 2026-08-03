@@ -68,6 +68,9 @@ async function api(method, path, body, opts = {}) {
     // 🆕 Suporte a AbortController: passe opts.signal para cancelar requests
     const cfg = { method, url: API + path, data: body, headers };
     if (opts.signal) cfg.signal = opts.signal;
+    // HOTFIX 0057 — Suporte a timeout customizado (ms) para operações longas
+    // (ex.: pagamento em lote com centenas/milhares de retornos).
+    if (typeof opts.timeout === 'number' && opts.timeout > 0) cfg.timeout = opts.timeout;
     const r = await axios(cfg);
     return r.data;
   } catch (e) {
@@ -7750,20 +7753,36 @@ ROUTES.terc_retornos = async (main) => {
       const forma = (document.getElementById('pm-forma')).value;
       const obs = (document.getElementById('pm-obs')  ).value || '';
       const btn = document.getElementById('pm-confirm');
+      const qtd = cfg.id_retornos.length;
+      // HOTFIX 0057 — Feedback progressivo para pagamentos grandes.
+      // O backend faz chunking automático (80 por lote), invisível ao usuário.
+      const isLarge = qtd > 200;
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Processando…';
+      btn.innerHTML = isLarge
+        ? `<i class="fas fa-spinner fa-spin mr-1"></i>Processando ${fmt.int(qtd)} retornos…`
+        : '<i class="fas fa-spinner fa-spin mr-1"></i>Processando…';
+      // Bloqueia botão Cancelar durante o processamento
+      card.querySelectorAll('[data-close]').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
       try {
+        // HOTFIX 0057 — timeout estendido para pagamentos com muitos retornos
+        // (backend processa em chunks de 80; cada chunk ~200-400ms no D1).
+        const timeoutMs = Math.max(30000, qtd * 60); // mínimo 30s, +60ms por retorno
         const r = await api('post', '/payments-terc', {
           id_terc: cfg.id_terc,
           id_retornos: cfg.id_retornos,
           dt_pagamento: dt,
           forma_pagamento: forma,
           observacao: obs,
-        });
+        }, { timeout: timeoutMs });
         const idPag = Number(r?.data?.id_pagamento || 0);
+        const qtdOk = Number(r?.data?.qtd_retornos || qtd);
+        const valOk = Number(r?.data?.valor_total  || cfg.valor_total);
         m.remove();
-        toast('Pagamento registrado com sucesso!', 'success');
-        // Refresh lista + painel
+        toast(
+          `Pagamento registrado! ${fmt.int(qtdOk)} retorno(s) · ${TERC.fmtBRL(valOk)}`,
+          'success'
+        );
+        // Refresh lista + painel (invalidando cache para pegar dados frescos)
         cacheInvalidate();
         await fetchData({ bypassCache: true });
         if (state.id_terc) loadTercFinancePanel();
@@ -7775,6 +7794,7 @@ ROUTES.terc_retornos = async (main) => {
         toast(msg, 'error');
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-check mr-1"></i>Confirmar Pagamento';
+        card.querySelectorAll('[data-close]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
       }
     };
   }

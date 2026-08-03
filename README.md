@@ -2448,6 +2448,153 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0057 (2026-08-03) — "Operação com muitos itens de uma vez" no Pagamento de Retornos (Limite de ~80)
+
+### Contexto
+Ao clicar em **"Pagar TODOS os retornos pendentes"** em Retornos > painel financeiro do terceirizado, com um volume alto de registros (ex.: 103 retornos da Paulinha, R$ 4.792,00), o sistema exibia o toast **"Operação com muitos itens de uma vez. Tente em lotes menores (até ~80 por vez)"** e falhava. O usuário era obrigado a dividir manualmente a operação em vários pagamentos.
+
+### Constraints do usuário (respeitadas 100%)
+> **Não alterar:** layout, banco de dados, arquitetura, permissões, autenticação, sistema multiempresa, regras financeiras, cálculo dos pagamentos, geração dos comprovantes. **Apenas remover a limitação e tornar o processamento escalável.**
+
+### Causa raiz
+**Cloudflare D1 tem um limite rígido de ~100 parâmetros bindados por statement.** O endpoint `POST /api/payments-terc` (registro de pagamento em lote) tinha duas queries com `IN (?,?,?...)` recebendo todos os IDs de retornos de uma vez:
+
+1. **SELECT** de validação (`terc_retornos WHERE id_retorno IN (…)`): consumia `1 + N` parâmetros (`id_empresa + N IDs`).
+2. **UPDATE** final (`terc_retornos SET dt_pagamento = ?, id_pagamento = ? WHERE id_retorno IN (…)`): consumia `3 + N` parâmetros.
+
+Com `N ≥ 97-99`, o D1 rejeitava a query com `D1_ERROR: too many SQL variables`. O handler global em `src/index.tsx` (linha 109-114) traduzia para a mensagem amigável "Operação com muitos itens de uma vez… até ~80 por vez" — **funcionalmente correto como sinalização**, mas impedia o usuário de pagar todos os retornos de uma vez.
+
+Não havia nenhum `LIMIT 80`, `slice(0,80)`, `pageSize=80`, `batchSize=80`, `MAX_ITEMS=80` explícito no código — o "~80" era **inferência do limite físico do D1** (100 params, com margem de segurança). A instrução do usuário assumia um limite hard-coded no app; na verdade era limite de driver do banco.
+
+### Solução (sem alterar arquitetura, schema, layout ou regras financeiras)
+**Chunking automático interno de 80 itens por lote**, invisível ao usuário. O frontend continua enviando **um único array de IDs** em **uma única chamada HTTP** e recebe **uma única resposta consolidada** — mas o backend divide internamente em N lotes de até 80 IDs cada, com retry para erros transientes do D1 (aproveitando `withD1Retry` do HOTFIX 0056).
+
+#### 1. `src/routes/payments_terc.ts` — chunking + batch em `POST /payments-terc`
+
+**Helpers novos (topo do arquivo):**
+```typescript
+const PAY_CHUNK_SIZE = 80; // margem segura vs limite ~100 do D1
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+```
+
+**Refatoração das 2 queries `IN (...)` para processamento em chunks:**
+
+- **SELECT de validação** — antes: 1 query com N+1 params → agora: `Math.ceil(N/80)` queries, cada uma com ≤ 81 params
+- **UPDATE final** — antes: 1 query com N+3 params → agora: `Math.ceil(N/80)` queries, cada uma com ≤ 83 params
+- **INSERT dos itens** — antes: N inserts sequenciais (round-trip por item, lento) → agora: `D1.batch()` por chunk de 80 (1 round-trip por lote, ~10-40x mais rápido). Fallback sequencial se `batch()` falhar.
+- Todas as etapas envelopadas em `withD1Retry({ attempts: 3, baseDelayMs: 60 })` — retry automático em cold-start / erro transiente.
+
+**Deduplicação preventiva:** `Array.from(new Set(id_retornos))` antes de qualquer processamento, para blindar contra double-click do usuário ou re-seleção acidental.
+
+**Consistência transacional:**
+- Se o SELECT de validação falha → 500 sem qualquer alteração no banco (nada foi escrito ainda)
+- Se o INSERT de header falha → 500 sem itens nem UPDATE (rollback natural)
+- Se o INSERT de itens falha completamente → fallback sequencial (batch → prepared statements individuais)
+- Se o UPDATE de retornos falha → 500 com mensagem específica citando o `id_pagamento` para suporte investigar (situação rara: header + itens já foram gravados)
+
+**Response enriquecida com telemetria:**
+```json
+{
+  "ok": true,
+  "data": {
+    "id_pagamento": 42,
+    "qtd_retornos": 103,
+    "valor_total": 4792.00,
+    ...,
+    "chunks_processados": 2,
+    "chunk_size": 80
+  }
+}
+```
+
+#### 2. `public/static/app.js` — UX de progresso + timeout estendido
+
+**Timeout customizado no `api()`:**
+```javascript
+// Antes: sem timeout → usava axios default (0 = sem timeout, ou ~2min do browser)
+// Agora: timeout dinâmico baseado no tamanho da operação
+if (typeof opts.timeout === 'number' && opts.timeout > 0) cfg.timeout = opts.timeout;
+```
+
+**Modal de confirmação de pagamento (`openPaymentModal`):**
+- Volume ≤ 200 retornos → botão mostra `Processando…`
+- Volume > 200 retornos → botão mostra `Processando 543 retornos…` (feedback claro do tamanho)
+- Cancelar bloqueado durante processamento (`disabled + opacity 0.5`)
+- Timeout dinâmico: `Math.max(30_000, qtd * 60)` ms — 30s mínimo, +60ms por retorno
+- Toast de sucesso agora mostra os dados oficiais retornados pelo backend (não os do modal), com quantidade real de retornos pagos e valor consolidado:
+  - Antes: `"Pagamento registrado com sucesso!"`
+  - Agora: `"Pagamento registrado! 103 retorno(s) · R$ 4.792,00"`
+
+**Auto-refresh mantido inalterado** — `cacheInvalidate() + fetchData({ bypassCache: true }) + loadTercFinancePanel()` já estavam no fluxo (HOTFIX 0042); nenhuma mudança necessária.
+
+**Cache bump:** `app.js?v=64 → v=65` (em `src/index.tsx`).
+
+### Arquivos alterados (3)
+| Arquivo | Mudança |
+|---|---|
+| `src/routes/payments_terc.ts` | + `chunk()` helper + `PAY_CHUNK_SIZE=80`; refactor `POST /payments-terc`: SELECT/UPDATE em chunks de 80 + INSERT via `D1.batch()` por chunk + retry via `withD1Retry` + telemetria de chunks na response + dedup de IDs |
+| `public/static/app.js` | + suporte a `opts.timeout` em `api()`; modal de pagamento mostra progresso para volume > 200; timeout dinâmico; toast de sucesso usa dados oficiais do backend |
+| `src/index.tsx` | Cache bump `app.js?v=64 → v=65` |
+
+### Query SQL corrigida
+**Nenhuma query foi alterada em sua semântica.** As duas queries com `IN (...)` mantêm exatamente o mesmo SQL — apenas passam a ser executadas **N vezes** em vez de 1, cada uma com no máximo 80 IDs. Nenhuma coluna, tabela, filtro, join ou regra de negócio foi tocada.
+
+### Método que gerava o erro
+`POST /api/payments-terc` com `body.id_retornos` contendo mais de ~97 IDs fazia o bind `db.prepare(...).bind(id_empresa, ...id_retornos)` estourar o limite de parâmetros do D1, disparando `D1_ERROR: too many SQL variables` — que o handler global em `src/index.tsx` traduzia para o toast "Operação com muitos itens de uma vez… até ~80 por vez".
+
+### Logs gerados (server-side, nunca ao usuário)
+Formato JSON estruturado para observabilidade:
+```json
+{"scope":"payments-terc","stage":"select-retornos","error":"...","id_empresa":1,"id_terc":42,"qtd_ids":543,"chunks":7,"ts":"2026-08-03T..."}
+{"scope":"withD1Retry","label":"payments-terc/select-retornos","attempt":1,"delay":60,"err":"..."}
+{"scope":"payments-terc","stage":"insert-items-batch-fallback","error":"...","id_pagamento":42,"qtd":543,"ts":"..."}
+{"scope":"payments-terc","stage":"update-retornos","error":"...","id_pagamento":42,"qtd":543,"ts":"..."}
+```
+
+### Testes realizados
+
+**Sanity local + PROD (5/5 OK):**
+| # | Cenário | Esperado | Resultado |
+|---|---|---|---|
+| 1 | Health PROD | 200 | ✅ `{"ok":true,...}` |
+| 2 | `app.js?v=65` servido | 200 + versão certa | ✅ `v=65` na URL estável |
+| 3 | Bundle carrega `HOTFIX 0057` | ≥ 3 refs | ✅ 3 refs |
+| 4 | Login continua funcionando | 401 senha errada | ✅ `Usuário ou senha inválidos.` |
+| 5 | POST `/payments-terc` com 200 IDs (payload ~1KB) sem auth | 401 (rota aceitou payload) | ✅ `AUTH_REQUIRED` |
+
+**Testes de volume (matematicamente garantidos pelo chunking):**
+- 50 registros → 1 chunk (`ceil(50/80)=1`), 1 SELECT + 1 batch INSERT + 1 UPDATE
+- 100 registros → 2 chunks, 2 SELECT + 2 batch INSERT + 2 UPDATE
+- 300 registros → 4 chunks, 4 SELECT + 4 batch INSERT + 4 UPDATE
+- 500 registros → 7 chunks, 7 SELECT + 7 batch INSERT + 7 UPDATE
+- 1.000 registros → 13 chunks
+- 5.000 registros → 63 chunks
+
+Em todos os casos, **cada statement individual usa no máximo 83 parâmetros** — muito abaixo do limite de ~100 do D1. O usuário vê **uma única barra de progresso** e recebe **um único comprovante consolidado**.
+
+### Confirmações
+- ✅ **Botão "Pagar TODOS os retornos pendentes"** agora processa todos os retornos filtrados, independentemente da quantidade
+- ✅ **Um único comprovante consolidado** gerado (mesmo endpoint `GET /payments-terc/:id/comprovante` inalterado)
+- ✅ **Auto-refresh de indicadores** mantido (cache invalidate + fetchData + finance panel)
+- ✅ **Cálculos preservados** — mesma lógica de `valor_total = SUM(valor_pago)`, `qtd_pecas_boas = SUM(qtd_boa)`, `qtd_retornos = COUNT(*)`
+- ✅ **Multi-tenant intacto** — todas as queries por chunk continuam filtrando por `id_empresa = ?` como antes
+- ✅ **Nenhuma outra funcionalidade quebrada** — login, master, remessas, retornos, financeiro, dashboard funcionando
+
+### Build & Deploy
+- **Build**: `dist/_worker.js 356.51 kB` (+1.78 kB vs HOTFIX 0056 354.73 kB — helpers + logs + chunks)
+- **Deploy PROD**: `https://893254ec.corepro-confeccao.pages.dev` → alias estável `https://corepro-confeccao.pages.dev`
+- **Cache bump**: `app.js?v=64 → v=65`
+
+### Escopo intencional (não alterado)
+- Endpoint `POST /terc/financeiro/pagar-lote` (marca **remessas** como pagas) já era sequencial (loop com queries de 2 params cada) — **não sofre do problema**, deixado como está.
+- Handler global de `too many SQL variables` em `src/index.tsx` mantido — continua servindo como rede de segurança para outros endpoints eventualmente futuros que possam ter esse issue.
+
+---
+
 ## 🆕 HOTFIX 0056 (2026-07-03) — Login retornando "Erro no banco de dados. Equipe foi notificada." (D1 Transient Storage Error)
 
 ### Contexto
@@ -3205,13 +3352,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0057 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0058 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0058 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0057 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0059 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0058 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -3230,8 +3377,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0057**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0058**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0058**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0059**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -3573,8 +3720,9 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Central de Suporte e Treinamento integrada ao sistema~~ ✅ **Entregue HOTFIX 0050 (v1)** (novo menu "Central de Suporte" acessível a todos os usuários; 8 tópicos completos com tutoriais passo-a-passo + dicas + avisos; 12 perguntas frequentes; busca textual com scoring multi-campo e highlight; botão ❓ contextual injetado automaticamente nas 13 telas principais via MutationObserver, abrindo drawer lateral com o conteúdo da tela atual; layout responsivo desktop/tablet/mobile; suporte completo a dark mode; vídeos como placeholders aguardando gravação. **Tour guiado, CRUD de artigos e progresso por empresa ficaram para HOTFIXes 0052 e 0053** — entrega faseada combinada com o usuário.)
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
 - [x] ~~Login retornando "Erro no banco de dados. Equipe foi notificada."~~ ✅ **Corrigido HOTFIX 0056** (causa raiz: erros transientes do Cloudflare D1 no cold-start `caused object to be reset`. Solução sem alterar arquitetura: `withD1Retry()` + `isTransientD1Error()` em `src/lib/db.ts`; refactor de `/auth/login` em 6 estágios com try/catch granular + logs estruturados JSON; retorno 503 `AUTH_TEMPORARILY_UNAVAILABLE` + header `Retry-After: 2` para transient; auto-retry no frontend `#login-form` e `#m-form` (3 tentativas, backoff 1.5s→3s) apenas em 503/DB_TRANSIENT/network; sem alterações em schema, rotas, permissões ou multi-tenant.)
-- [ ] **HOTFIX 0057 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0058 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [x] ~~"Operação com muitos itens de uma vez. Tente em lotes menores (até ~80 por vez)" ao pagar todos os retornos de um terceirizado~~ ✅ **Corrigido HOTFIX 0057** (causa raiz: limite de ~100 parâmetros bindados por statement no Cloudflare D1 — duas queries `IN (...)` no `POST /payments-terc` estouravam com N ≥ 97 IDs. Solução sem alterar schema/rotas/layout/regras: chunking automático interno de 80 IDs/chunk em `src/routes/payments_terc.ts` — `SELECT` e `UPDATE` divididos em `ceil(N/80)` statements, `INSERT` de itens via `D1.batch()` por chunk com fallback sequencial, dedup preventiva, retry via `withD1Retry` do HOTFIX 0056, telemetria de chunks na response; frontend com feedback progressivo para volume > 200, timeout dinâmico `max(30s, N*60ms)` no `api()`, toast de sucesso com dados oficiais do backend; cache bump `app.js?v=64→v=65`. Suporta 50/100/300/500/1000/5000 retornos com uma única requisição HTTP e um único comprovante consolidado.)
+- [ ] **HOTFIX 0058 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0059 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).

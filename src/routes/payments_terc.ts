@@ -27,7 +27,7 @@
  */
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, withD1Retry } from '../lib/db';
 import { requireAdmin } from '../lib/auth';
 
 const app = new Hono<{ Bindings: Bindings; Variables: { user: any; id_empresa: number } }>();
@@ -36,6 +36,21 @@ const MOD = 'PAGTERC';
 const FORMAS_VALIDAS = new Set([
   'PIX', 'Dinheiro', 'Transferência', 'TED', 'DOC', 'Cartão', 'Outro'
 ]);
+
+/**
+ * HOTFIX 0057 — Chunking automático para contornar o limite de ~100 parâmetros
+ * bindados por statement do Cloudflare D1. Usamos 80 (margem segura contra
+ * placeholders adicionais como id_empresa, dt_pagamento, id_pagamento).
+ * Pagamentos com centenas/milhares de retornos são processados internamente
+ * em N chunks — invisível ao usuário, com uma única requisição HTTP.
+ */
+const PAY_CHUNK_SIZE = 80;
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 /** Extrai o IP do cliente (tenta vários headers Cloudflare/proxy) */
 function getClientIP(c: any): string {
@@ -290,17 +305,42 @@ app.post('/payments-terc', async (c) => {
   `).bind(id_terc, id_empresa).first<any>();
   if (!terc) return c.json(fail('Terceirizado não encontrado nesta empresa.', 404));
 
-  // ── Valida retornos: pertencem à empresa + ao terceirizado + ainda pendentes
-  const placeholders = id_retornos.map(() => '?').join(',');
-  const rets = (await c.env.DB.prepare(`
-    SELECT rt.id_retorno, rt.id_remessa, rt.dt_pagamento, rt.valor_pago, rt.qtd_boa, r.id_terc
-    FROM terc_retornos rt
-    JOIN terc_remessas r ON r.id_remessa = rt.id_remessa AND r.id_empresa = rt.id_empresa
-    WHERE rt.id_empresa = ? AND rt.id_retorno IN (${placeholders})
-  `).bind(id_empresa, ...id_retornos).all()).results as any[];
+  // ── HOTFIX 0057 — Deduplica IDs antes de qualquer processamento
+  //    (frontend pode enviar duplicatas em cenários de re-seleção)
+  const idsUnicos = Array.from(new Set(id_retornos));
 
-  if (rets.length !== id_retornos.length) {
-    return c.json(fail(`Alguns retornos não foram encontrados ou pertencem a outra empresa. (${rets.length}/${id_retornos.length})`, 400));
+  // ── HOTFIX 0057 — Valida retornos EM CHUNKS de 80 (limite D1 ~100 params/statement).
+  //    Contorna "too many SQL variables" para pagamentos com centenas/milhares de itens.
+  //    Cada chunk é retentado em caso de erro transiente do D1 (cold-start).
+  const idChunks = chunk(idsUnicos, PAY_CHUNK_SIZE);
+  const rets: any[] = [];
+
+  try {
+    for (const grp of idChunks) {
+      const ph = grp.map(() => '?').join(',');
+      const parte = await withD1Retry(
+        () => c.env.DB.prepare(`
+          SELECT rt.id_retorno, rt.id_remessa, rt.dt_pagamento, rt.valor_pago, rt.qtd_boa, r.id_terc
+          FROM terc_retornos rt
+          JOIN terc_remessas r ON r.id_remessa = rt.id_remessa AND r.id_empresa = rt.id_empresa
+          WHERE rt.id_empresa = ? AND rt.id_retorno IN (${ph})
+        `).bind(id_empresa, ...grp).all(),
+        { attempts: 3, baseDelayMs: 60, label: 'payments-terc/select-retornos' }
+      );
+      rets.push(...((parte.results || []) as any[]));
+    }
+  } catch (e: any) {
+    console.error(JSON.stringify({
+      scope: 'payments-terc', stage: 'select-retornos',
+      error: e?.message || String(e), id_empresa, id_terc,
+      qtd_ids: idsUnicos.length, chunks: idChunks.length,
+      ts: new Date().toISOString(),
+    }));
+    return c.json(fail('Falha ao validar retornos. Tente novamente.', 500));
+  }
+
+  if (rets.length !== idsUnicos.length) {
+    return c.json(fail(`Alguns retornos não foram encontrados ou pertencem a outra empresa. (${rets.length}/${idsUnicos.length})`, 400));
   }
 
   const errosTerc = rets.filter(r => Number(r.id_terc) !== id_terc);
@@ -319,33 +359,82 @@ app.post('/payments-terc', async (c) => {
   const qtd_retornos   = rets.length;
 
   // ── 1) Insere cabeçalho do pagamento
-  const insP = await c.env.DB.prepare(`
-    INSERT INTO payments_terc (
+  const insP = await withD1Retry(
+    () => c.env.DB.prepare(`
+      INSERT INTO payments_terc (
+        id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
+        forma_pagamento, observacao, status, usuario, ip_origem
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Confirmado', ?, ?)
+    `).bind(
       id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
-      forma_pagamento, observacao, status, usuario, ip_origem
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Confirmado', ?, ?)
-  `).bind(
-    id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
-    forma_pagamento, observacao, login, ip
-  ).run();
+      forma_pagamento, observacao, login, ip
+    ).run(),
+    { attempts: 3, baseDelayMs: 60, label: 'payments-terc/insert-header' }
+  );
 
   const id_pagamento = Number(insP.meta?.last_row_id || 0);
   if (!id_pagamento) return c.json(fail('Falha ao registrar pagamento.', 500));
 
-  // ── 2) Insere itens (1 por retorno)
-  for (const r of rets) {
-    await c.env.DB.prepare(`
-      INSERT INTO payment_terc_items (id_pagamento, id_empresa, id_retorno, valor)
-      VALUES (?, ?, ?, ?)
-    `).bind(id_pagamento, id_empresa, r.id_retorno, Number(r.valor_pago) || 0).run();
+  // ── HOTFIX 0057 — 2) Insere itens usando D1 batch() por chunk.
+  //    batch() executa múltiplos statements em uma única round-trip, cada um com
+  //    seus próprios placeholders — sem estourar o limite de parâmetros.
+  //    Fallback: se batch falhar por qualquer motivo, cai no INSERT sequencial.
+  try {
+    const itemChunks = chunk(rets, PAY_CHUNK_SIZE);
+    for (const grp of itemChunks) {
+      const stmts = grp.map(r =>
+        c.env.DB.prepare(`
+          INSERT INTO payment_terc_items (id_pagamento, id_empresa, id_retorno, valor)
+          VALUES (?, ?, ?, ?)
+        `).bind(id_pagamento, id_empresa, r.id_retorno, Number(r.valor_pago) || 0)
+      );
+      await withD1Retry(
+        () => c.env.DB.batch(stmts),
+        { attempts: 3, baseDelayMs: 60, label: 'payments-terc/insert-items-batch' }
+      );
+    }
+  } catch (e: any) {
+    console.warn(JSON.stringify({
+      scope: 'payments-terc', stage: 'insert-items-batch-fallback',
+      error: e?.message || String(e), id_pagamento, qtd: rets.length,
+      ts: new Date().toISOString(),
+    }));
+    // Fallback sequencial (menos eficiente mas garantidamente compatível)
+    for (const r of rets) {
+      await withD1Retry(
+        () => c.env.DB.prepare(`
+          INSERT INTO payment_terc_items (id_pagamento, id_empresa, id_retorno, valor)
+          VALUES (?, ?, ?, ?)
+        `).bind(id_pagamento, id_empresa, r.id_retorno, Number(r.valor_pago) || 0).run(),
+        { attempts: 3, baseDelayMs: 60, label: 'payments-terc/insert-item' }
+      );
+    }
   }
 
-  // ── 3) Atualiza retornos: marca como pagos
-  await c.env.DB.prepare(`
-    UPDATE terc_retornos
-    SET dt_pagamento = ?, id_pagamento = ?
-    WHERE id_empresa = ? AND id_retorno IN (${placeholders})
-  `).bind(dt_pagamento, id_pagamento, id_empresa, ...id_retornos).run();
+  // ── HOTFIX 0057 — 3) Atualiza retornos EM CHUNKS de 80 (mesma razão do SELECT).
+  //    Cada UPDATE marca até 80 retornos como pagos, com retry para transient D1.
+  try {
+    for (const grp of idChunks) {
+      const ph = grp.map(() => '?').join(',');
+      await withD1Retry(
+        () => c.env.DB.prepare(`
+          UPDATE terc_retornos
+          SET dt_pagamento = ?, id_pagamento = ?
+          WHERE id_empresa = ? AND id_retorno IN (${ph})
+        `).bind(dt_pagamento, id_pagamento, id_empresa, ...grp).run(),
+        { attempts: 3, baseDelayMs: 60, label: 'payments-terc/update-retornos' }
+      );
+    }
+  } catch (e: any) {
+    console.error(JSON.stringify({
+      scope: 'payments-terc', stage: 'update-retornos',
+      error: e?.message || String(e), id_pagamento, qtd: idsUnicos.length,
+      ts: new Date().toISOString(),
+    }));
+    // Neste ponto o cabeçalho + itens já foram inseridos, mas o UPDATE falhou.
+    // Retorna 500 para o frontend saber que precisa investigar; NÃO retorna sucesso.
+    return c.json(fail(`Pagamento parcialmente registrado (id ${id_pagamento}) — falha ao marcar retornos. Contate o suporte.`, 500));
+  }
 
   // ── 4) Auditoria
   await audit(c, MOD, 'CREATE',
@@ -363,6 +452,9 @@ app.post('/payments-terc', async (c) => {
     forma_pagamento,
     dt_pagamento,
     terceirizado: terc.nome_terc,
+    // HOTFIX 0057 — telemetria de chunks (útil para auditoria/debug, transparente na UI)
+    chunks_processados: idChunks.length,
+    chunk_size: PAY_CHUNK_SIZE,
   }));
 });
 
