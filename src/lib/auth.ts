@@ -1,7 +1,7 @@
 // Autenticação: login, senha (SHA-256 + salt), tokens de sessão (Web Crypto API)
 import type { Context, Next } from 'hono';
 import type { Bindings } from './db';
-import { fail, audit } from './db';
+import { fail, audit, withD1Retry, isTransientD1Error } from './db';
 
 /* ========= Hash / Sal ========= */
 const enc = new TextEncoder();
@@ -48,19 +48,37 @@ export async function criarSessao(
   return token;
 }
 
+/**
+ * Valida a sessão consultando o D1.
+ *
+ * HOTFIX 0061 — resiliente a falhas TRANSITÓRIAS de storage do D1:
+ *   - Roda dentro de withD1Retry (3 tentativas, backoff 60→120→240ms).
+ *   - Se todas falharem por erro TRANSITÓRIO (não sessão inválida),
+ *     LANÇA o erro em vez de retornar null. O caller decide:
+ *       • authMiddleware traduz para 503 (Retry-After) — sessão preservada.
+ *       • /auth/me traduz para 503 — cliente NÃO limpa o token.
+ *   - Erros determinísticos (tabela ausente, etc.) também propagam para
+ *     o onError global.
+ *   - Retorna null APENAS quando o token realmente não existe / expirou /
+ *     usuário está inativo — comportamento antigo preservado.
+ */
 export async function validarSessao(db: D1Database, token: string) {
   if (!token) return null;
-  const r = await db
-    .prepare(
-      `SELECT s.token, s.dt_expira,
-              u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
-              u.email, u.avatar_data, u.avatar_mime, u.id_empresa, u.is_owner
-       FROM sessoes s
-       JOIN usuarios u ON u.id_usuario = s.id_usuario
-       WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
-    )
-    .bind(token)
-    .first<any>();
+  const r = await withD1Retry(
+    () =>
+      db
+        .prepare(
+          `SELECT s.token, s.dt_expira,
+                  u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
+                  u.email, u.avatar_data, u.avatar_mime, u.id_empresa, u.is_owner
+           FROM sessoes s
+           JOIN usuarios u ON u.id_usuario = s.id_usuario
+           WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
+        )
+        .bind(token)
+        .first<any>(),
+    { attempts: 3, baseDelayMs: 60, label: 'auth/validar-sessao' }
+  );
   return r || null;
 }
 
@@ -101,7 +119,32 @@ export async function authMiddleware(c: Context<{ Bindings: Bindings }>, next: N
   if (PUBLIC_PATHS.has(path)) return next();
 
   const token = getToken(c);
-  const sess = await validarSessao(c.env.DB, token);
+  // HOTFIX 0061: se validarSessao lançar erro TRANSITÓRIO de infra, devolvemos
+  // 503 (Retry-After) em vez de 500/401 — assim o SPA NÃO limpa o token e o
+  // usuário permanece logado. Erros determinísticos continuam propagando para
+  // o onError global.
+  let sess: any = null;
+  try {
+    sess = await validarSessao(c.env.DB, token);
+  } catch (e: any) {
+    const transient = isTransientD1Error(e);
+    console.error('[authMiddleware] validarSessao failed', JSON.stringify({
+      path, transient, error: String(e?.message || e).slice(0, 300),
+    }));
+    if (transient) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: 'Serviço temporariamente indisponível. Aguarde alguns segundos e tente novamente.',
+          code: 'AUTH_TEMPORARILY_UNAVAILABLE',
+          hint: 'storage-transient-validar-sessao',
+        }),
+        { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } }
+      );
+    }
+    // Erro determinístico → propaga para onError global (logs + resposta amigável)
+    throw e;
+  }
   if (!sess) {
     return new Response(
       JSON.stringify({ ok: false, error: 'Não autenticado.', code: 'AUTH_REQUIRED' }),

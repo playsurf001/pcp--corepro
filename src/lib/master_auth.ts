@@ -3,7 +3,7 @@
 // Endpoints protegidos: /api/master/*
 import type { Context, Next } from 'hono';
 import type { Bindings } from './db';
-import { fail } from './db';
+import { fail, withD1Retry, isTransientD1Error } from './db';
 import { hashSenha, randomHex } from './auth';
 
 /* ========= Sessões Master ========= */
@@ -141,9 +141,35 @@ export function tenantStatusGuard() {
     const id_empresa = Number(user.id_empresa || 0);
     if (!id_empresa) return next();
 
-    const empresa = await c.env.DB.prepare(
-      `SELECT status, bloqueada_em, motivo_bloqueio FROM companies WHERE id_empresa = ?`
-    ).bind(id_empresa).first<any>();
+    // HOTFIX 0061 — Este guard roda em TODA request autenticada. Sem retry,
+    // qualquer erro transitório do D1 aqui derrubava toda a sessão. Agora:
+    //   • withD1Retry: 3 tentativas com backoff 60/120/240ms.
+    //   • Se ainda falhar por infra: fail-open (deixa passar) e loga.
+    //     Racional: melhor tolerar uma request de um tenant supostamente
+    //     suspenso do que quebrar TODAS as requests de tenants válidos por
+    //     uma falha momentânea de storage. O onError global mantém o
+    //     comportamento correto para erros determinísticos.
+    let empresa: any = null;
+    try {
+      empresa = await withD1Retry(
+        () =>
+          c.env.DB.prepare(
+            `SELECT status, bloqueada_em, motivo_bloqueio FROM companies WHERE id_empresa = ?`
+          ).bind(id_empresa).first<any>(),
+        { attempts: 3, baseDelayMs: 60, label: 'tenant-status-guard' }
+      );
+    } catch (e: any) {
+      const transient = isTransientD1Error(e);
+      console.error('[tenantStatusGuard]', JSON.stringify({
+        path, id_empresa, transient, error: String(e?.message || e).slice(0, 300),
+      }));
+      if (transient) {
+        // Fail-open em falhas transitórias: sessão preservada, próxima request tentará de novo.
+        return next();
+      }
+      // Erro determinístico → propaga
+      throw e;
+    }
 
     if (!empresa) {
       return new Response(

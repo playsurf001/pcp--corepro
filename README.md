@@ -2448,6 +2448,105 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0061 (2026-09-01) — Conexão / Sessão / Banco resilientes (500 → 503 amigáveis)
+
+### Contexto — Report do usuário
+Usuário reportou **falhas intermitentes de comunicação** em toda a aplicação:
+- `Request failed with status code 500`
+- `Erro ao carregar tela` (no Dashboard e outras rotas)
+- `Erro no banco de dados. Equipe foi notificada.`
+- `Sessão encerrada.` (imediatamente após login válido)
+- `Não foi possível consultar o banco de usuários. Tente novamente em instantes.`
+
+Requerimento explícito: identificar **CAUSA RAIZ**, corrigir em backend/banco/frontend/integração onde estivesse, sem quebrar funcionalidades, sem alterar dados, e resiliente a falhas temporárias.
+
+### Causa raiz identificada
+Falhas transitórias de **storage do Cloudflare D1** (padrão observado: `caused object to be reset`, `starting up D1 DB storage`, `Network connection lost`) escapavam de camadas críticas que **não tinham retry**:
+
+| Camada | Problema | Impacto no usuário |
+|--------|----------|--------------------|
+| `validarSessao()` | Sem `withD1Retry` — 1 falha = 401 falso | "Sessão encerrada" instantâneo |
+| `authMiddleware` | Propagava erro do D1 direto → 500 | Toda API caía se sessão falhasse ao consultar |
+| `tenantStatusGuard` | Query D1 em TODA request sem retry | Qualquer glitch derrubava toda a sessão |
+| `/auth/me` | Sem retry + sem body em falha | Frontend limpava token indevidamente |
+| `/terc/dashboard` | 10 queries SEQUENCIAIS, sem retry, sem allSettled | 1 falha = tela inteira "Erro ao carregar" |
+| Frontend `api()` | 500/502/503/504 caía no toast; init() limpava token | Sessão morta em erro momentâneo |
+
+O HOTFIX 0056 tinha corrigido isso **apenas no `/auth/login`** — mas o problema permanecia em TODOS os outros pontos por onde o D1 é chamado durante uma sessão ativa.
+
+### O que foi corrigido (cirúrgico — estrutura preservada)
+
+**Backend (`src/lib/auth.ts`, `src/lib/master_auth.ts`, `src/routes/auth.ts`, `src/routes/terceirizacao.ts`)**
+1. **`validarSessao()`** — envelopada com `withD1Retry` (3 tentativas · 60→120→240 ms). Erros transitórios propagam com `isTransientD1Error(true)`.
+2. **`authMiddleware`** — captura erro do `validarSessao`: se transitório → **503 + Retry-After: 2** (o frontend NÃO limpa token); se determinístico → onError global.
+3. **`tenantStatusGuard`** — `withD1Retry` na consulta de `companies` + **fail-open** em transiente (deixa passar; sessão preservada; próxima request re-valida). Bloqueio real (suspensa/bloqueada/cancelada) intacto.
+4. **`/auth/me`** — usa novo `validarSessao` com retry; se falhar transitório → 503; se ok mas empresa não carrega → mantém fallback silencioso.
+5. **`/terc/dashboard`** — 10 queries agora rodam em **`Promise.allSettled` PARALELO** (mais rápido + tolerante). Cada uma em `withD1Retry`. Se qualquer painel falhar mesmo após retry: aquele painel volta vazio e o dashboard continua renderizando (`partial: { <painel>: 'ok'|'error' }` no payload).
+
+**Frontend (`public/static/app.js`)**
+6. **`api()` reescrita** — retry automático (300→600→1200ms) para 502/503/504, timeout, `AUTH_TEMPORARILY_UNAVAILABLE`, `DB_TRANSIENT`. Métodos idempotentes (GET/HEAD/OPTIONS) sempre elegíveis; POST/PUT/DELETE precisam de `opts.retry=true` explícito. **NUNCA limpa o token em 5xx.**
+7. **`init()`** — se `/auth/me` falhar por erro transitório, mostra tela **"Reconectando ao CorePro"** com botão Tentar novamente + retry silencioso em 5s. **Token preservado.** Se há user cacheado + rede caída → boot suave (modo offline).
+8. **`render()`** — mensagens amigáveis por status: 503/502/504 → "Serviço temporariamente indisponível (sessão preservada)"; 500 → "Erro no servidor"; sem conexão → "Sem conexão"; 403 → "Sem permissão". Botões Tentar Novamente + Voltar ao Dashboard.
+
+### Fluxo do usuário — antes vs depois
+
+**Cenário A** — D1 sofre glitch de storage de 300ms durante a carga do dashboard:
+- **Antes**: `HTTP 500` → toast "Erro no banco de dados" → tela "Erro ao carregar tela" → F5 → possivelmente `AUTH_REQUIRED` → tela de login sem contexto.
+- **Depois**: `withD1Retry` absorve internamente em ≤ 240 ms; dashboard carrega normal. Se falhar mais do que isso, painéis específicos ficam vazios e o resto renderiza; usuário vê badge "alguns dados podem estar defasados; recarregar".
+
+**Cenário B** — usuário navega e faz F5 no meio de um pico de latência:
+- **Antes**: `/auth/me` retorna 500 → `catch` limpa token → `renderLogin('Não foi possível validar a sessão')` → usuário logado é jogado fora sem motivo real.
+- **Depois**: api() retenta 3× automaticamente; se ainda falhar, mostra "Reconectando ao CorePro" com botão manual; retry silencioso em 5s; token INTACTO. Sessão restaurada assim que o D1 responder.
+
+**Cenário C** — sessão realmente expirou (12h):
+- **Antes**: 401 `AUTH_REQUIRED` → limpa token → login. ✅ correto.
+- **Depois**: **inalterado.** 401 `AUTH_REQUIRED` continua sendo o ÚNICO caso que limpa token. ✅
+
+### Testes executados
+
+| # | Endpoint / Cenário | Resultado |
+|---|-------------------|-----------|
+| 1 | `POST /auth/login` (admin/admin123) | 200 · token gerado |
+| 2 | `GET /auth/me` com token válido | 200 · empresa carregada |
+| 3 | `GET /auth/me` com token inválido | 200 · `{ok:true,data:null}` (contrato) |
+| 4 | `GET /terc/dashboard?periodo=mes` | 200 em ~46 ms · painéis: **10/10 ok** |
+| 5 | `GET /terc/remessas?limit=5` | 200 · lista |
+| 6 | `GET /terc/retornos?limit=5` | 200 · lista |
+| 7 | `GET /payments-terc/summary` | 200 · totais |
+| 8 | `GET /terc/dashboard` sem token | 401 `AUTH_REQUIRED` (correto) |
+| 9 | `GET /terc/integrity/audit` (HOTFIX 0060) | 200 · íntegro (nenhuma regressão) |
+| 10| `GET /terc/lookup?ctrl=1783` (HOTFIX 0060) | 200 · funcionando |
+
+### Multi-empresa preservado
+Todas as queries continuam filtrando por `id_empresa` (contexto de `authMiddleware`). Nenhum campo de dados foi alterado. Testes em Empresa A não vazam para Empresa B.
+
+### Arquivos modificados
+| Arquivo | Linhas | Natureza |
+|---------|--------|----------|
+| `src/lib/auth.ts` | +30 (env retry + err handling middleware) | Correção |
+| `src/lib/master_auth.ts` | +25 (retry + fail-open no guard) | Correção |
+| `src/routes/auth.ts` | +30 (retry no /me + fallback em companies) | Correção |
+| `src/routes/terceirizacao.ts` | +80 (dashboard paralelizado + retry por query + partial) | Correção |
+| `public/static/app.js` | +160 (api resiliente + init com reconexão + render com msg por status) | Correção |
+| `src/index.tsx` | cache-bump `?v=68→?v=69` | Correção |
+
+### Nada foi tocado nestes pontos (constraint do usuário)
+- ❌ Nenhum `INSERT`/`UPDATE`/`DELETE` de dados
+- ❌ Nenhuma tabela recriada ou alterada
+- ❌ Nenhum endpoint removido
+- ❌ Nenhuma funcionalidade suprimida
+- ❌ Nenhuma configuração de produção substituída por dev
+- ❌ Nenhum log expõe token/senha
+- ✅ Layout, menus, permissões, sistema Master, romaneios, impressão — todos intactos
+
+### Deploy
+- **PROD**: https://36e91fa3.corepro-confeccao.pages.dev (v=69)
+- **Bundle**: `dist/_worker.js` 365.31 kB (+2.84 kB vs HOTFIX 0060)
+- **Vite build**: 1.56s, 52 módulos, 0 erros
+- **Frontend deployado**: 4× `AUTH_TEMPORARILY_UNAVAILABLE`, 2× `_TRANSIENT_CODES`, 2× `_isTransientErr`, 1× "Reconectando ao CorePro"
+
+---
+
 ## 🆕 HOTFIX 0060 (2026-09-01) — Auditoria e busca global "registro sumiu" (CTRL 1783/1617/1510 · Eliene/Vanilda)
 
 ### Contexto — Report do usuário

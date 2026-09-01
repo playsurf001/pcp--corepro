@@ -261,18 +261,55 @@ app.post('/auth/logout', async (c) => {
   return c.json(ok({ ok: true }));
 });
 
-/* ========= ME ========= */
+/* ========= ME =========
+ * HOTFIX 0061 — endpoint crítico para persistência da sessão no SPA.
+ * O front chama /auth/me em TODA carga inicial (F5, hard reload, retorno
+ * ao sistema). Se falhar por erro transitório do D1, o front antes
+ * limpava o token e derrubava o usuário — comportamento agora corrigido
+ * também no cliente.
+ *
+ * Aqui aplicamos:
+ *   1. withD1Retry na validação da sessão (via validarSessao já retentado).
+ *   2. Se validarSessao lançar erro transitório: 503 + Retry-After (front
+ *      NÃO limpa o token — apenas mostra "aguarde e tente novamente").
+ *   3. Consulta de companies com retry + fallback silencioso (já existente).
+ *   4. Erros determinísticos propagam para onError.
+ */
 app.get('/auth/me', async (c) => {
   const auth = c.req.header('authorization') || '';
   const tok = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : '';
   if (!tok) return c.json(ok(null));
-  const sess = await validarSessao(c.env.DB, tok);
+
+  let sess: any = null;
+  try {
+    sess = await validarSessao(c.env.DB, tok);
+  } catch (e: any) {
+    const transient = isTransientD1Error(e);
+    logAuthError('me/validar-sessao', e, { transient });
+    if (transient) {
+      return serviceUnavailable('storage-transient-me');
+    }
+    // Erro determinístico → onError global cuida (500 amigável)
+    throw e;
+  }
   if (!sess) return c.json(ok(null));
-  // Multi-tenant: anexa info b\u00e1sica da empresa do usu\u00e1rio (fallback id_empresa=1)
+
+  // Multi-tenant: anexa info básica da empresa do usuário (fallback id_empresa=1)
   const id_empresa = (sess as any).id_empresa || 1;
-  const emp = await c.env.DB.prepare(
-    `SELECT id_empresa, nome, slug, plano, status FROM companies WHERE id_empresa=?`
-  ).bind(id_empresa).first<any>().catch(() => null);
+  let emp: any = null;
+  try {
+    emp = await withD1Retry(
+      () =>
+        c.env.DB.prepare(
+          `SELECT id_empresa, nome, slug, plano, status FROM companies WHERE id_empresa=?`
+        ).bind(id_empresa).first<any>(),
+      { attempts: 2, baseDelayMs: 50, label: 'auth-me/select-empresa' }
+    );
+  } catch (e: any) {
+    // Falha silenciosa — mantemos o fallback abaixo. NÃO derruba a sessão.
+    logAuthError('me/select-empresa', e, { id_empresa });
+    emp = null;
+  }
   return c.json(
     ok({
       id_usuario: sess.id_usuario,
@@ -285,7 +322,7 @@ app.get('/auth/me', async (c) => {
       trocar_senha: !!sess.trocar_senha,
       is_owner: !!(sess as any).is_owner,
       id_empresa: id_empresa,
-      empresa: emp || { id_empresa: 1, nome: 'CorePro Confec\u00e7\u00e3o', plano: 'enterprise', status: 'ativa' },
+      empresa: emp || { id_empresa: 1, nome: 'CorePro Confecção', plano: 'enterprise', status: 'ativa' },
     })
   );
 });

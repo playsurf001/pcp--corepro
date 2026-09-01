@@ -2,7 +2,7 @@
 // Baseado na planilha "Controle de Terceirização Versão.xlsx"
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, toNum, getUser, logTenant } from '../lib/db';
+import { ok, fail, audit, toInt, toNum, getUser, logTenant, withD1Retry } from '../lib/db';
 import { assertLimit, LimitExceededError } from '../lib/plan_limits';
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -4524,123 +4524,192 @@ app.get('/terc/dashboard', async (c) => {
     c.env.DB, id_empresa, q
   );
 
-  // KPIs
-  const kpiRem = await c.env.DB.prepare(`
-    SELECT
-      COUNT(*) AS total,
-      COALESCE(SUM(qtd_total),0) AS pecas_enviadas,
-      COALESCE(SUM(valor_total),0) AS valor_total,
-      SUM(CASE WHEN status IN ('AguardandoEnvio','Enviado','EmProducao','Parcial') THEN 1 ELSE 0 END) AS em_aberto,
-      SUM(CASE WHEN status IN ('Concluido','Retornado','Pago') THEN 1 ELSE 0 END) AS concluidas,
-      SUM(CASE WHEN status='Atrasado' THEN 1 ELSE 0 END) AS atrasadas,
-      SUM(CASE WHEN status='EmProducao' THEN 1 ELSE 0 END) AS em_producao,
-      SUM(CASE WHEN status_fin='PendentePagamento' THEN (valor_total - COALESCE(valor_pago,0)) ELSE 0 END) AS valor_a_pagar,
-      SUM(CASE WHEN status_fin='Pago' THEN COALESCE(valor_pago,0) ELSE 0 END) AS valor_pago_total
-    FROM terc_remessas
-    WHERE id_empresa=? AND dt_saida BETWEEN ? AND ?`).bind(id_empresa, ini, fim).first<any>();
+  /* ================================================================
+   * HOTFIX 0061 — Dashboard resiliente
+   *
+   * Antes: 10 queries SEQUENCIAIS SEM retry. Se qualquer uma delas
+   *   caísse com erro transitório do D1, todo o dashboard retornava
+   *   500 e o front mostrava "Erro ao carregar tela — Request failed
+   *   with status code 500".
+   *
+   * Agora:
+   *   1. Todas as 10 queries são disparadas em PARALELO com
+   *      Promise.allSettled (mais rápido + tolerante a falhas parciais).
+   *   2. Cada query passa por withD1Retry (3 tentativas, backoff curto)
+   *      para absorver falhas transitórias de storage do D1.
+   *   3. Se uma query específica ainda falhar depois do retry, aquele
+   *      painel devolve valor vazio/zerado e o resto do dashboard
+   *      continua renderizando — em vez de derrubar a tela inteira.
+   *   4. Um campo `partial: { <painel>: 'ok'|'error' }` sinaliza ao
+   *      front quais dados são confiáveis (opcional — front antigo
+   *      ignora esse campo e usa os defaults).
+   * ================================================================ */
+  const DASH_LABEL = 'terc-dashboard';
+  const empty = (o: any) => o || {};
+  const emptyArr = (a: any) => (Array.isArray(a) ? a : []);
 
-  const kpiRet = await c.env.DB.prepare(`
-    SELECT
-      COUNT(*) AS total,
-      COALESCE(SUM(qtd_boa),0) AS pecas_boas,
-      COALESCE(SUM(qtd_refugo),0) AS pecas_refugo,
-      COALESCE(SUM(qtd_conserto),0) AS pecas_conserto,
-      COALESCE(SUM(valor_pago),0) AS valor_pago
-    FROM terc_retornos
-    WHERE id_empresa=? AND dt_retorno BETWEEN ? AND ?`).bind(id_empresa, ini, fim).first<any>();
+  // Dispara TODAS em paralelo. Promise.allSettled NUNCA rejeita —
+  // sempre retorna array com status por promise, blindando o handler.
+  const [
+    rKpiRem, rKpiRet, rTopTerc, rPorServico, rPorSetor,
+    rProdDiaria, rAtrasadas, rEmProdAgora, rProxVenc, rValAPagar,
+  ] = await Promise.allSettled([
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(qtd_total),0) AS pecas_enviadas,
+        COALESCE(SUM(valor_total),0) AS valor_total,
+        SUM(CASE WHEN status IN ('AguardandoEnvio','Enviado','EmProducao','Parcial') THEN 1 ELSE 0 END) AS em_aberto,
+        SUM(CASE WHEN status IN ('Concluido','Retornado','Pago') THEN 1 ELSE 0 END) AS concluidas,
+        SUM(CASE WHEN status='Atrasado' THEN 1 ELSE 0 END) AS atrasadas,
+        SUM(CASE WHEN status='EmProducao' THEN 1 ELSE 0 END) AS em_producao,
+        SUM(CASE WHEN status_fin='PendentePagamento' THEN (valor_total - COALESCE(valor_pago,0)) ELSE 0 END) AS valor_a_pagar,
+        SUM(CASE WHEN status_fin='Pago' THEN COALESCE(valor_pago,0) ELSE 0 END) AS valor_pago_total
+      FROM terc_remessas
+      WHERE id_empresa=? AND dt_saida BETWEEN ? AND ?`).bind(id_empresa, ini, fim).first<any>(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/kpi-remessas` }),
 
-  const topTerc = (await c.env.DB.prepare(`
-    SELECT t.nome_terc, s.nome_setor,
-      COUNT(r.id_remessa) AS remessas,
-      COALESCE(SUM(r.qtd_total),0) AS pecas,
-      COALESCE(SUM(r.valor_total),0) AS valor
-    FROM terc_remessas r
-    JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
-    LEFT JOIN terc_setores s ON s.id_setor=t.id_setor AND s.id_empresa=t.id_empresa
-    WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
-    GROUP BY t.id_terc
-    ORDER BY pecas DESC
-    LIMIT 10`).bind(id_empresa, ini, fim).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(qtd_boa),0) AS pecas_boas,
+        COALESCE(SUM(qtd_refugo),0) AS pecas_refugo,
+        COALESCE(SUM(qtd_conserto),0) AS pecas_conserto,
+        COALESCE(SUM(valor_pago),0) AS valor_pago
+      FROM terc_retornos
+      WHERE id_empresa=? AND dt_retorno BETWEEN ? AND ?`).bind(id_empresa, ini, fim).first<any>(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/kpi-retornos` }),
 
-  const porServico = (await c.env.DB.prepare(`
-    SELECT sv.desc_servico,
-      COUNT(r.id_remessa) AS remessas,
-      COALESCE(SUM(r.qtd_total),0) AS pecas,
-      COALESCE(SUM(r.valor_total),0) AS valor
-    FROM terc_remessas r
-    LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
-    GROUP BY sv.id_servico
-    ORDER BY pecas DESC`).bind(id_empresa, ini, fim).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT t.nome_terc, s.nome_setor,
+        COUNT(r.id_remessa) AS remessas,
+        COALESCE(SUM(r.qtd_total),0) AS pecas,
+        COALESCE(SUM(r.valor_total),0) AS valor
+      FROM terc_remessas r
+      JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      LEFT JOIN terc_setores s ON s.id_setor=t.id_setor AND s.id_empresa=t.id_empresa
+      WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
+      GROUP BY t.id_terc
+      ORDER BY pecas DESC
+      LIMIT 10`).bind(id_empresa, ini, fim).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/top-terc` }),
 
-  // HOTFIX 0037: agregação por setor da remessa
-  const porSetor = (await c.env.DB.prepare(`
-    SELECT st.id_setor, st.nome_setor, st.cor,
-      COUNT(r.id_remessa) AS remessas,
-      COALESCE(SUM(r.qtd_total),0) AS pecas,
-      COALESCE(SUM(r.valor_total),0) AS valor
-    FROM terc_remessas r
-    LEFT JOIN terc_setores st ON st.id_setor=r.id_setor AND st.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
-    GROUP BY st.id_setor
-    ORDER BY COALESCE(st.ordem,9999), pecas DESC`).bind(id_empresa, ini, fim).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT sv.desc_servico,
+        COUNT(r.id_remessa) AS remessas,
+        COALESCE(SUM(r.qtd_total),0) AS pecas,
+        COALESCE(SUM(r.valor_total),0) AS valor
+      FROM terc_remessas r
+      LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
+      GROUP BY sv.id_servico
+      ORDER BY pecas DESC`).bind(id_empresa, ini, fim).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/por-servico` }),
 
-  const producaoDiaria = (await c.env.DB.prepare(`
-    SELECT date(rt.dt_retorno) AS dia,
-      COALESCE(SUM(rt.qtd_boa),0) AS boa,
-      COALESCE(SUM(rt.qtd_refugo),0) AS refugo,
-      COALESCE(SUM(rt.qtd_conserto),0) AS conserto
-    FROM terc_retornos rt
-    WHERE rt.id_empresa=? AND rt.dt_retorno BETWEEN ? AND ?
-    GROUP BY date(rt.dt_retorno)
-    ORDER BY dia`).bind(id_empresa, ini, fim).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT st.id_setor, st.nome_setor, st.cor,
+        COUNT(r.id_remessa) AS remessas,
+        COALESCE(SUM(r.qtd_total),0) AS pecas,
+        COALESCE(SUM(r.valor_total),0) AS valor
+      FROM terc_remessas r
+      LEFT JOIN terc_setores st ON st.id_setor=r.id_setor AND st.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.dt_saida BETWEEN ? AND ?
+      GROUP BY st.id_setor
+      ORDER BY COALESCE(st.ordem,9999), pecas DESC`).bind(id_empresa, ini, fim).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/por-setor` }),
 
-  const atrasadas = (await c.env.DB.prepare(`
-    SELECT r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.desc_ref, r.cor, r.qtd_total,
-      r.dt_saida, r.dt_previsao, r.status, r.valor_total,
-      t.nome_terc, t.id_terc, sv.desc_servico,
-      CAST(julianday('now') - julianday(r.dt_previsao) AS INTEGER) AS dias_atraso
-    FROM terc_remessas r
-    JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
-    LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.status='Atrasado'
-    ORDER BY dias_atraso DESC LIMIT 30`).bind(id_empresa).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT date(rt.dt_retorno) AS dia,
+        COALESCE(SUM(rt.qtd_boa),0) AS boa,
+        COALESCE(SUM(rt.qtd_refugo),0) AS refugo,
+        COALESCE(SUM(rt.qtd_conserto),0) AS conserto
+      FROM terc_retornos rt
+      WHERE rt.id_empresa=? AND rt.dt_retorno BETWEEN ? AND ?
+      GROUP BY date(rt.dt_retorno)
+      ORDER BY dia`).bind(id_empresa, ini, fim).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/prod-diaria` }),
 
-  // 🆕 Em produção agora (Enviado + EmProducao)
-  const emProducaoAgora = (await c.env.DB.prepare(`
-    SELECT r.id_remessa, r.num_controle, r.cod_ref, r.desc_ref, r.cor, r.qtd_total,
-      r.dt_saida, r.dt_envio, r.dt_previsao, r.status, r.valor_total,
-      t.nome_terc, t.id_terc, sv.desc_servico,
-      CAST(julianday(r.dt_previsao) - julianday('now') AS INTEGER) AS dias_para_vencer
-    FROM terc_remessas r
-    JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
-    LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.status IN ('Enviado','EmProducao')
-    ORDER BY r.dt_previsao ASC LIMIT 30`).bind(id_empresa).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.desc_ref, r.cor, r.qtd_total,
+        r.dt_saida, r.dt_previsao, r.status, r.valor_total,
+        t.nome_terc, t.id_terc, sv.desc_servico,
+        CAST(julianday('now') - julianday(r.dt_previsao) AS INTEGER) AS dias_atraso
+      FROM terc_remessas r
+      JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.status='Atrasado'
+      ORDER BY dias_atraso DESC LIMIT 30`).bind(id_empresa).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/atrasadas` }),
 
-  // 🆕 Próximos vencimentos (7 dias)
-  const proximosVencimentos = (await c.env.DB.prepare(`
-    SELECT r.id_remessa, r.num_controle, r.cod_ref, r.desc_ref, r.qtd_total,
-      r.dt_previsao, r.status, r.valor_total,
-      t.nome_terc, sv.desc_servico,
-      CAST(julianday(r.dt_previsao) - julianday('now') AS INTEGER) AS dias_para_vencer
-    FROM terc_remessas r
-    JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
-    LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.status IN ('AguardandoEnvio','Enviado','EmProducao','Parcial')
-      AND date(r.dt_previsao) BETWEEN date('now') AND date('now', '+7 days')
-    ORDER BY r.dt_previsao ASC LIMIT 20`).bind(id_empresa).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.cod_ref, r.desc_ref, r.cor, r.qtd_total,
+        r.dt_saida, r.dt_envio, r.dt_previsao, r.status, r.valor_total,
+        t.nome_terc, t.id_terc, sv.desc_servico,
+        CAST(julianday(r.dt_previsao) - julianday('now') AS INTEGER) AS dias_para_vencer
+      FROM terc_remessas r
+      JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.status IN ('Enviado','EmProducao')
+      ORDER BY r.dt_previsao ASC LIMIT 30`).bind(id_empresa).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/em-producao-agora` }),
 
-  // 🆕 Valores a pagar (status financeiro pendente)
-  const valoresAPagar = (await c.env.DB.prepare(`
-    SELECT r.id_remessa, r.num_controle, r.cod_ref, r.qtd_total,
-      r.dt_recebimento, r.valor_total, r.valor_pago, r.status_fin,
-      (r.valor_total - COALESCE(r.valor_pago,0)) AS valor_aberto,
-      t.nome_terc, t.id_terc
-    FROM terc_remessas r
-    JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
-    WHERE r.id_empresa=? AND r.status_fin='PendentePagamento'
-    ORDER BY r.dt_recebimento ASC, r.dt_saida ASC LIMIT 30`).bind(id_empresa).all()).results;
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.cod_ref, r.desc_ref, r.qtd_total,
+        r.dt_previsao, r.status, r.valor_total,
+        t.nome_terc, sv.desc_servico,
+        CAST(julianday(r.dt_previsao) - julianday('now') AS INTEGER) AS dias_para_vencer
+      FROM terc_remessas r
+      JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      LEFT JOIN terc_servicos sv ON sv.id_servico=r.id_servico AND sv.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.status IN ('AguardandoEnvio','Enviado','EmProducao','Parcial')
+        AND date(r.dt_previsao) BETWEEN date('now') AND date('now', '+7 days')
+      ORDER BY r.dt_previsao ASC LIMIT 20`).bind(id_empresa).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/prox-venc` }),
+
+    withD1Retry(() => c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.cod_ref, r.qtd_total,
+        r.dt_recebimento, r.valor_total, r.valor_pago, r.status_fin,
+        (r.valor_total - COALESCE(r.valor_pago,0)) AS valor_aberto,
+        t.nome_terc, t.id_terc
+      FROM terc_remessas r
+      JOIN terc_terceirizados t ON t.id_terc=r.id_terc AND t.id_empresa=r.id_empresa
+      WHERE r.id_empresa=? AND r.status_fin='PendentePagamento'
+      ORDER BY r.dt_recebimento ASC, r.dt_saida ASC LIMIT 30`).bind(id_empresa).all(),
+      { attempts: 3, baseDelayMs: 60, label: `${DASH_LABEL}/val-a-pagar` }),
+  ]);
+
+  // Extrai valor ou aplica fallback + log estruturado
+  const pick = <T>(res: PromiseSettledResult<any>, def: T, label: string): { value: T; ok: boolean } => {
+    if (res.status === 'fulfilled') return { value: res.value as T, ok: true };
+    console.error(`[${DASH_LABEL}/${label}] falhou após retry:`,
+      String((res as PromiseRejectedResult).reason?.message || (res as PromiseRejectedResult).reason).slice(0, 300));
+    return { value: def, ok: false };
+  };
+
+  const pKpiRem   = pick(rKpiRem,     {}, 'kpi-remessas');
+  const pKpiRet   = pick(rKpiRet,     {}, 'kpi-retornos');
+  const pTopTerc  = pick(rTopTerc,    { results: [] }, 'top-terc');
+  const pServico  = pick(rPorServico, { results: [] }, 'por-servico');
+  const pSetor    = pick(rPorSetor,   { results: [] }, 'por-setor');
+  const pProd     = pick(rProdDiaria, { results: [] }, 'prod-diaria');
+  const pAtrasada = pick(rAtrasadas,  { results: [] }, 'atrasadas');
+  const pEmProd   = pick(rEmProdAgora,{ results: [] }, 'em-producao-agora');
+  const pProxV    = pick(rProxVenc,   { results: [] }, 'prox-venc');
+  const pValPag   = pick(rValAPagar,  { results: [] }, 'val-a-pagar');
+
+  // Sinaliza quais painéis foram carregados (front pode exibir aviso).
+  const partial: Record<string, 'ok' | 'error'> = {
+    kpi_remessas:        pKpiRem.ok    ? 'ok' : 'error',
+    kpi_retornos:        pKpiRet.ok    ? 'ok' : 'error',
+    top_terceirizados:   pTopTerc.ok   ? 'ok' : 'error',
+    por_servico:         pServico.ok   ? 'ok' : 'error',
+    por_setor:           pSetor.ok     ? 'ok' : 'error',
+    producao_diaria:     pProd.ok      ? 'ok' : 'error',
+    atrasadas:           pAtrasada.ok  ? 'ok' : 'error',
+    em_producao_agora:   pEmProd.ok    ? 'ok' : 'error',
+    proximos_vencimentos:pProxV.ok     ? 'ok' : 'error',
+    valores_a_pagar:     pValPag.ok    ? 'ok' : 'error',
+  };
 
   return c.json(ok({
     // HOTFIX 0045: período agora carrega tipo + ciclo (quando aplicável)
@@ -4650,15 +4719,18 @@ app.get('/terc/dashboard', async (c) => {
       tipo: periodo, // 'ciclo' | 'mes' | '30d' | 'custom'
       ciclo: ciclo || null, // só preenchido quando tipo='ciclo'
     },
-    kpis: { remessas: kpiRem, retornos: kpiRet },
-    top_terceirizados: topTerc,
-    por_servico: porServico,
-    por_setor: porSetor, // HOTFIX 0037
-    producao_diaria: producaoDiaria,
-    atrasadas,
-    em_producao_agora: emProducaoAgora,
-    proximos_vencimentos: proximosVencimentos,
-    valores_a_pagar: valoresAPagar,
+    kpis: { remessas: empty(pKpiRem.value), retornos: empty(pKpiRet.value) },
+    top_terceirizados:    emptyArr((pTopTerc.value as any).results),
+    por_servico:          emptyArr((pServico.value as any).results),
+    por_setor:            emptyArr((pSetor.value as any).results), // HOTFIX 0037
+    producao_diaria:      emptyArr((pProd.value as any).results),
+    atrasadas:            emptyArr((pAtrasada.value as any).results),
+    em_producao_agora:    emptyArr((pEmProd.value as any).results),
+    proximos_vencimentos: emptyArr((pProxV.value as any).results),
+    valores_a_pagar:      emptyArr((pValPag.value as any).results),
+    // HOTFIX 0061 — telemetria opcional: front pode alertar "alguns painéis
+    // não carregaram; recarregue para tentar de novo".
+    partial,
   }));
 });
 

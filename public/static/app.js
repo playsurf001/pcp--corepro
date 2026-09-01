@@ -93,66 +93,150 @@ const AUTH = {
 // Expõe globalmente para módulos externos (relatorios_det.js, etc)
 window.AUTH = AUTH;
 
+/* ================================================================
+ * HOTFIX 0061 — api() resiliente com retry automático em transientes
+ *
+ * Antes: qualquer falha de rede/HTTP 5xx era propagada imediatamente;
+ *   erros 401 (AUTH_REQUIRED) ou falhas de /auth/me limpavam o token
+ *   e derrubavam a sessão do usuário mesmo com sessão válida no banco.
+ *
+ * Agora:
+ *   • Retry automático (até 3 tentativas com backoff 300→600→1200ms)
+ *     para erros TRANSITÓRIOS: 502, 503, 504, timeout, rede caída,
+ *     e códigos backend AUTH_TEMPORARILY_UNAVAILABLE / DB_TRANSIENT.
+ *   • NUNCA limpa o token em 500/502/503/504 — a sessão permanece
+ *     válida no D1; apenas essa request individual falhou.
+ *   • 401 AUTH_REQUIRED continua limpando o token (sessão realmente
+ *     inválida no banco — expirou ou foi revogada).
+ *   • Diferencia mensagens amigáveis por status:
+ *       401 → "Sessão expirada, faça login" (só se veio AUTH_REQUIRED)
+ *       402 → modal de cobrança (PLAN_LIMIT / TENANT_SUSPENDED)
+ *       403 → "Sem permissão" ou senha obrigatória
+ *       500 → "Erro no servidor, tente novamente"
+ *       502/503/504 → "Serviço temporariamente indisponível"
+ *       0/ERR_NETWORK → "Sem conexão com a internet"
+ *   • opts.silent continua funcionando (não mostra toast automático).
+ *   • opts.noRetry=true desliga o retry para chamadas que não devem
+ *     ser refeitas (ex.: POST/DELETE com efeitos colaterais).
+ * ================================================================ */
+
+// Códigos backend que indicam falha transitória de infra
+const _TRANSIENT_CODES = new Set([
+  'AUTH_TEMPORARILY_UNAVAILABLE',
+  'DB_TRANSIENT',
+  'DB_BUSY',
+]);
+// Status HTTP que devem entrar em retry automático
+const _TRANSIENT_STATUS = new Set([0, 502, 503, 504]);
+// Métodos idempotentes — seguros para retry automático mesmo sem opt.retry
+const _IDEMPOTENT_METHODS = new Set(['get', 'head', 'options']);
+
+function _isTransientErr(e) {
+  const status = e?.response?.status;
+  const code = e?.response?.data?.code;
+  if (_TRANSIENT_STATUS.has(status)) return true;
+  if (code && _TRANSIENT_CODES.has(code)) return true;
+  // Erro de rede sem response (offline, DNS, CORS, etc.)
+  if (!e?.response && (e?.code === 'ERR_NETWORK' || e?.message === 'Network Error' || e?.code === 'ECONNABORTED')) return true;
+  return false;
+}
+
 async function api(method, path, body, opts = {}) {
-  try {
-    const headers = {};
-    const token = AUTH.getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    // 🆕 Suporte a AbortController: passe opts.signal para cancelar requests
-    const cfg = { method, url: API + path, data: body, headers };
-    if (opts.signal) cfg.signal = opts.signal;
-    // HOTFIX 0057 — Suporte a timeout customizado (ms) para operações longas
-    // (ex.: pagamento em lote com centenas/milhares de retornos).
-    if (typeof opts.timeout === 'number' && opts.timeout > 0) cfg.timeout = opts.timeout;
-    const r = await axios(cfg);
-    return r.data;
-  } catch (e) {
-    // Request cancelado pelo cliente (AbortController) — silenciar
-    if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || axios.isCancel?.(e)) {
-      const err = new Error('canceled');
-      err.canceled = true;
-      throw err;
-    }
-    const status = e.response?.status;
-    const code = e.response?.data?.code;
-    let msg = e.response?.data?.error || e.message || 'Erro';
-    const detail = e.response?.data?.detail;
-    // Log estruturado p/ debug
-    console.error('[api]', method?.toUpperCase(), path, 'status=' + status, 'code=' + code, '→', msg, detail ? `\n  detail: ${detail}` : '');
-    // 🛡️ FALLBACK: se o backend devolveu 500 sem body JSON (text/plain "Internal Server Error"),
-    // damos uma mensagem amigável em vez do "Request failed with status code 500" cru do axios.
-    if (status >= 500 && (msg === 'Request failed with status code 500' || /Request failed with status code/i.test(msg))) {
-      msg = 'Erro interno do servidor. Tente novamente ou contate o suporte.';
-    }
-    if (status === 0 || e.code === 'ERR_NETWORK') {
-      msg = 'Falha de conexão. Verifique sua internet.';
-    }
-    // Token expirado ou inválido
-    if (status === 401 && code === 'AUTH_REQUIRED' && !opts.silent) {
-      AUTH.clearToken(); AUTH.clearUser();
-      renderLogin('Sessão expirada. Faça login novamente.');
-      throw e;
-    }
-    if (status === 403 && code === 'PASSWORD_CHANGE_REQUIRED' && !opts.silent) {
-      renderTrocarSenhaObrigatoria();
-      throw e;
-    }
-    // 🆕 SPRINT 5 — Interceptor de cobrança/limites SaaS
-    // 402 Payment Required: tenant suspenso por inadimplência OU limite de plano excedido
-    if (status === 402 && !opts.silent) {
-      const data = e.response?.data || {};
-      if (code === 'PLAN_LIMIT_EXCEEDED') {
-        showPlanLimitModal(data);
-        throw e;
+  const methodLower = String(method || 'get').toLowerCase();
+  // Retry só para métodos idempotentes por padrão. Chamadas explícitas
+  // podem passar opts.retry=true para forçar (ex.: /auth/me).
+  const canAutoRetry = opts.retry === true
+    || (opts.retry !== false && _IDEMPOTENT_METHODS.has(methodLower));
+  const maxAttempts = opts.noRetry ? 1 : (canAutoRetry ? 3 : 1);
+  const baseDelay = 300; // 300→600→1200ms
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const headers = {};
+      const token = AUTH.getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      // 🆕 Suporte a AbortController: passe opts.signal para cancelar requests
+      const cfg = { method, url: API + path, data: body, headers };
+      if (opts.signal) cfg.signal = opts.signal;
+      // HOTFIX 0057 — Suporte a timeout customizado (ms) para operações longas
+      // (ex.: pagamento em lote com centenas/milhares de retornos).
+      if (typeof opts.timeout === 'number' && opts.timeout > 0) cfg.timeout = opts.timeout;
+      const r = await axios(cfg);
+      return r.data;
+    } catch (e) {
+      // Request cancelado pelo cliente (AbortController) — silenciar SEM retry
+      if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || axios.isCancel?.(e)) {
+        const err = new Error('canceled');
+        err.canceled = true;
+        throw err;
       }
-      if (code === 'TENANT_SUSPENDED' || code === 'TENANT_BLOCKED' || code === 'TENANT_CANCELED') {
-        showTenantBlockedModal(data, code);
-        throw e;
+      lastErr = e;
+      // Retry só em transientes E se ainda restam tentativas
+      if (attempt < maxAttempts && _isTransientErr(e)) {
+        const delay = baseDelay * Math.pow(2, attempt - 1); // 300, 600, 1200ms
+        const status = e.response?.status;
+        console.warn(`[api] ${methodLower.toUpperCase()} ${path} tentativa ${attempt}/${maxAttempts} falhou (status=${status}) — retry em ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
       }
+      break; // esgotou retries ou erro determinístico → cai no handler abaixo
     }
-    if (!opts.silent) toast(msg, 'error');
+  }
+
+  // ─── Tratamento do último erro ────────────────────────────────────────
+  const e = lastErr;
+  const status = e?.response?.status;
+  const code = e?.response?.data?.code;
+  const hint = e?.response?.data?.hint;
+  let msg = e?.response?.data?.error || e?.message || 'Erro';
+  const detail = e?.response?.data?.detail;
+
+  // Log estruturado p/ debug
+  console.error('[api]', methodLower.toUpperCase(), path,
+    'status=' + status,
+    'code=' + code,
+    'attempts=' + maxAttempts,
+    '→', msg,
+    hint ? `\n  hint: ${hint}` : '',
+    detail ? `\n  detail: ${detail}` : '');
+
+  // 🛡️ FALLBACK: 500 sem body JSON
+  if (status >= 500 && (msg === 'Request failed with status code 500' || /Request failed with status code/i.test(msg))) {
+    msg = 'Erro interno do servidor. Tente novamente ou contate o suporte.';
+  }
+  // Sem conexão
+  if (status === 0 || e?.code === 'ERR_NETWORK' || e?.message === 'Network Error') {
+    msg = 'Falha de conexão. Verifique sua internet e tente novamente.';
+  }
+  // 502/503/504 → serviço temporariamente indisponível
+  if (status === 502 || status === 503 || status === 504) {
+    msg = msg || 'Serviço temporariamente indisponível. Tente novamente em alguns segundos.';
+  }
+
+  // ─── Token expirado ou inválido — ÚNICO caso que limpa a sessão ─────
+  // Só derruba a sessão se o backend explicitamente disse AUTH_REQUIRED
+  // (sessão não existe no D1 ou expirou). Erros 500/503/504 NÃO limpam
+  // o token — a sessão continua válida no banco.
+  if (status === 401 && code === 'AUTH_REQUIRED' && !opts.silent) {
+    AUTH.clearToken(); AUTH.clearUser();
+    renderLogin('Sessão expirada. Faça login novamente.');
     throw e;
   }
+  if (status === 403 && code === 'PASSWORD_CHANGE_REQUIRED' && !opts.silent) {
+    renderTrocarSenhaObrigatoria();
+    throw e;
+  }
+  // 🆕 SPRINT 5 — Interceptor de cobrança/limites SaaS
+  if (status === 402 && !opts.silent) {
+    const data = e.response?.data || {};
+    if (code === 'PLAN_LIMIT_EXCEEDED') { showPlanLimitModal(data); throw e; }
+    if (code === 'TENANT_SUSPENDED' || code === 'TENANT_BLOCKED' || code === 'TENANT_CANCELED') {
+      showTenantBlockedModal(data, code); throw e;
+    }
+  }
+  if (!opts.silent) toast(msg, 'error');
+  throw e;
 }
 window.api = api;
 
@@ -1076,7 +1160,53 @@ async function render() {
       setTimeout(() => navigate(rotaInicial()), 600);
       return;
     }
-    main.innerHTML = `<div class="card p-6"><div class="text-red-600 font-semibold mb-2"><i class="fas fa-exclamation-triangle mr-2"></i>Erro ao carregar tela</div><div class="text-sm text-slate-500">${e.message || e}</div><button class="btn btn-secondary mt-4" onclick="render()"><i class="fas fa-redo mr-1"></i>Tentar novamente</button></div>`;
+
+    /* HOTFIX 0061 — mensagem clara por tipo de erro (sem derrubar sessão) */
+    const status = e?.response?.status;
+    const hint = e?.response?.data?.hint;
+    const backendMsg = e?.response?.data?.error;
+    let titulo, mensagem, icone;
+    if (status === 401 && code === 'AUTH_REQUIRED') {
+      // Já foi tratado dentro de api() — a sessão será limpa. Aqui só evita layout quebrado.
+      return;
+    } else if (status === 402) {
+      // Já tratado por api() (modal SaaS). Nada aqui.
+      return;
+    } else if (status === 403) {
+      titulo = 'Sem permissão';
+      mensagem = backendMsg || 'Você não tem permissão para acessar esta tela.';
+      icone = 'fa-lock';
+    } else if (status === 503 || status === 502 || status === 504) {
+      titulo = 'Serviço temporariamente indisponível';
+      mensagem = backendMsg || 'O servidor está sobrecarregado ou reiniciando. Aguarde alguns segundos e tente novamente. Sua sessão está preservada.';
+      icone = 'fa-cloud-arrow-down';
+    } else if (status === 500) {
+      titulo = 'Erro no servidor';
+      mensagem = backendMsg || 'Ocorreu um erro ao carregar esta tela. Tente novamente ou contate o suporte se persistir.';
+      icone = 'fa-triangle-exclamation';
+    } else if (!status || e?.code === 'ERR_NETWORK') {
+      titulo = 'Sem conexão';
+      mensagem = 'Não foi possível se comunicar com o servidor. Verifique sua internet e tente novamente. Sua sessão está preservada.';
+      icone = 'fa-wifi';
+    } else {
+      titulo = 'Erro ao carregar tela';
+      mensagem = backendMsg || e.message || String(e);
+      icone = 'fa-triangle-exclamation';
+    }
+    const hintHtml = hint ? `<div class="text-xs text-slate-400 mt-2"><i class="fas fa-info-circle mr-1"></i>${hint}</div>` : '';
+    const statusHtml = status ? `<div class="text-xs text-slate-400 mt-1">HTTP ${status}${code ? ' · ' + code : ''}</div>` : '';
+    main.innerHTML = `
+      <div class="card p-6 text-center" style="max-width:560px;margin:40px auto">
+        <div class="text-red-500 mb-3" style="font-size:2.5rem"><i class="fas ${icone}"></i></div>
+        <div class="text-lg font-semibold text-slate-800 mb-2">${titulo}</div>
+        <div class="text-sm text-slate-500" style="line-height:1.55">${mensagem}</div>
+        ${hintHtml}
+        ${statusHtml}
+        <div class="mt-4 flex gap-2 justify-center">
+          <button class="btn btn-primary" onclick="render()"><i class="fas fa-rotate-right mr-1"></i>Tentar novamente</button>
+          <button class="btn btn-secondary" onclick="navigate('dashboard')"><i class="fas fa-home mr-1"></i>Voltar ao Dashboard</button>
+        </div>
+      </div>`;
   }
 }
 window.render = render;
@@ -14364,17 +14494,101 @@ ROUTES.suporte = async (main) => {
   });
 
   // Tem token? Valida com /auth/me
+  //
+  // HOTFIX 0061 — Antes: qualquer falha em /auth/me limpava o token e
+  //   derrubava a sessão do usuário. Agora:
+  //     • Retry automático com backoff (300 → 600 → 1200ms) via api().
+  //     • 401 AUTH_REQUIRED / resposta null → sessão realmente inválida,
+  //       aí sim limpa e volta para login.
+  //     • 500/502/503/504/timeout / falha de rede → mostra tela de
+  //       "Reconectando" com botão Tentar novamente. O TOKEN É
+  //       PRESERVADO. F5 continua funcionando quando o backend voltar.
+  //     • Se havia um user cacheado em localStorage e é uma falha de
+  //       infra, usa o cache para bootar a UI (o próximo request faz
+  //       nova validação — se falhar de novo, apenas mostra toast).
   const token = AUTH.getToken();
   if (!token) { renderLogin(logoutMsg || undefined); return; }
+
+  const cachedUser = AUTH.getUser();
+
   try {
-    const r = await axios.get(API + '/auth/me', { headers: { Authorization: 'Bearer ' + token } });
-    const u = r.data?.data;
-    if (!u) { AUTH.clearToken(); AUTH.clearUser(); renderLogin(); return; }
+    // opts.retry=true força retry automático em erros transitórios;
+    // opts.silent=true evita toast automático (tratamos aqui).
+    const r = await api('get', '/auth/me', null, { retry: true, silent: true });
+    const u = r?.data;
+    if (!u) {
+      // Sessão realmente inválida (backend respondeu ok=true, data=null).
+      AUTH.clearToken(); AUTH.clearUser();
+      renderLogin();
+      return;
+    }
     state.user = u; AUTH.setUser(u);
     if (u.trocar_senha) { renderTrocarSenhaObrigatoria(); return; }
     bootApp();
-  } catch {
-    AUTH.clearToken(); AUTH.clearUser();
-    renderLogin('Não foi possível validar a sessão. Faça login.');
+  } catch (e) {
+    const status = e?.response?.status;
+    const code = e?.response?.data?.code;
+
+    // 401 AUTH_REQUIRED: sessão realmente inválida → limpa e volta ao login
+    if (status === 401 && code === 'AUTH_REQUIRED') {
+      AUTH.clearToken(); AUTH.clearUser();
+      renderLogin('Sessão expirada. Faça login novamente.');
+      return;
+    }
+
+    // Qualquer outro erro (5xx, timeout, rede) = falha TRANSITÓRIA.
+    // NÃO limpar o token. Mostrar tela de reconexão com botão manual.
+    console.warn('[init] /auth/me falhou após retries; preservando token para nova tentativa.', {
+      status, code, msg: e?.message,
+    });
+
+    // Se já temos user cacheado, tenta bootar com ele (soft-online).
+    // A UI já vai funcionar; as próximas requests renovam os dados.
+    if (cachedUser && !status) {
+      // Só usa cache quando não temos response (rede caída total).
+      console.info('[init] usando user cacheado (modo offline suave)');
+      state.user = cachedUser;
+      if (cachedUser.trocar_senha) { renderTrocarSenhaObrigatoria(); return; }
+      bootApp();
+      toast('Você parece estar offline. Reconectando...', 'warning');
+      return;
+    }
+
+    // Tela intermediária: NÃO é a tela de login. Preserva token.
+    const appEl = document.getElementById('app');
+    if (appEl) {
+      appEl.innerHTML = `
+        <div class="login-screen" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px">
+          <div class="text-center" style="max-width:420px">
+            <img src="/static/logo-icon.png" alt="CorePro" style="width:80px;height:80px;filter:drop-shadow(0 4px 20px rgba(37,99,235,.5));opacity:.85" />
+            <h2 style="margin-top:20px;color:var(--text-1,#f1f5f9);font-size:1.25rem;font-weight:600">Reconectando ao CorePro</h2>
+            <p style="margin-top:12px;color:var(--text-2,#9CA3AF);font-size:.9rem;line-height:1.55">
+              O servidor está temporariamente indisponível.<br>
+              Sua sessão foi <b>preservada</b> — nenhum trabalho será perdido.
+            </p>
+            <div style="margin-top:24px;display:flex;gap:10px;justify-content:center">
+              <button id="__retry-me" class="btn btn-primary" style="padding:10px 24px;border-radius:10px;background:#2563EB;color:#fff;border:none;font-weight:600;cursor:pointer">
+                <i class="fas fa-rotate-right mr-1"></i> Tentar novamente
+              </button>
+              <button id="__force-login" style="padding:10px 24px;border-radius:10px;background:transparent;color:#94a3b8;border:1px solid rgba(148,163,184,.3);font-weight:500;cursor:pointer">
+                Fazer login
+              </button>
+            </div>
+            ${status ? `<div style="margin-top:20px;font-size:.75rem;color:#64748b">HTTP ${status}${code ? ' · ' + code : ''}</div>` : ''}
+          </div>
+        </div>`;
+      document.getElementById('__retry-me')?.addEventListener('click', () => location.reload());
+      document.getElementById('__force-login')?.addEventListener('click', () => {
+        AUTH.clearToken(); AUTH.clearUser();
+        location.reload();
+      });
+      // Retry automático em 5 segundos (tentativa silenciosa em background)
+      setTimeout(() => {
+        // Testa rapidamente se o backend voltou
+        api('get', '/auth/me', null, { retry: false, silent: true })
+          .then(r => { if (r?.data) location.reload(); })
+          .catch(() => { /* silencia — usuário aciona manual */ });
+      }, 5000);
+    }
   }
 })();
