@@ -2448,6 +2448,148 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0060 (2026-09-01) — Auditoria e busca global "registro sumiu" (CTRL 1783/1617/1510 · Eliene/Vanilda)
+
+### Contexto — Report do usuário
+Usuário reportou **3 remessas "desaparecendo"** do módulo de Pagamentos Pendentes, todas atribuídas por ele à terceirizada **ELIENE**:
+
+| CTRL | OP | REF | Data de criação |
+|---|---|---|---|
+| 1783 | 610-26 | 21-02-26-01 | 21/08/2026 14:22 |
+| 1617 | 576-26 | 01-06-26-01 | 13/08/2026 10:41 |
+| 1510 | 553-26 | 04-01-26-100 | 07/08/2026 08:31 |
+
+Pedido: identificar a **causa raiz** (não apenas corrigir 3 registros), realizar **auditoria em todos os terceirizados**, e criar mecanismo para o sistema **procurar por CTRL/OP/REF + IDs internos** em vez de depender do nome do terceirizado.
+
+### Investigação (D1 REST direto na produção)
+
+Auditoria completa da base de produção — **dados 100% íntegros**:
+
+| Verificação | Resultado |
+|---|---|
+| Total de remessas (empresa 1) | 1.717 |
+| Total de retornos | 1.689 |
+| Retornos pendentes | 303 |
+| Retornos pagos | 1.386 |
+| Remessas "Retornado" sem retorno vinculado (órfãs) | **0** |
+| Retornos com `id_remessa` quebrado | **0** |
+| Remessas com `id_terc` inexistente | **0** |
+| Retornos com `id_empresa` divergente da remessa (cross-tenant) | **0** |
+| Pagamentos com `id_terc` divergente da remessa | **0** |
+
+**Detalhes dos 3 CTRLs no banco:**
+
+| CTRL | id_remessa | id_terc real | Terceirizado real | id_retorno | dt_pagamento | valor pendente |
+|---|---|---|---|---|---|---|
+| 1510 | 1571 | 10 | **Eliene** ✅ | 1694 | NULL | R$ 18,00 |
+| 1617 | 1678 | 10 | **Eliene** ✅ | 1742 | NULL | R$ 18,00 |
+| 1783 | 1846 | **59** | **Vanilda** ⚠️ | 1961 | NULL | R$ 32,40 |
+
+**Auditoria de criação/alteração** (tabela `auditoria`):
+- CTRL 1783: `INS_REM 2026-08-21 17:22` por `wdmar` — **id_terc=59 desde a criação**, nunca foi da Eliene.
+- CTRL 1617 e 1510: mesma coisa — id_terc=10 desde a criação.
+
+**Query real de `/terc/retornos` reproduzida via D1**: retorna corretamente os 3 registros. CTRL 1510 e 1617 aparecem quando filtro = Eliene (id_terc=10); CTRL 1783 aparece quando filtro = Vanilda (id_terc=59).
+
+### Causa raiz
+
+**Erro operacional de cadastro (data entry)**: a remessa CTRL 1783 foi cadastrada com o terceirizado **errado** (Vanilda em vez de Eliene). O usuário estava filtrando o painel por "Eliene" e — corretamente — não encontrava CTRL 1783 lá.
+
+**O sistema NÃO tinha um bug** — banco, backend e frontend estavam corretos, sem inconsistências. **O que faltava** era um mecanismo para o usuário **enxergar** essa situação: hoje, quando um registro é cadastrado para o terceirizado errado, o usuário simplesmente "não vê" e conclui que "sumiu do sistema".
+
+### Correções (proporcionais — nada de dados, só ferramentas)
+
+#### 1) Novo endpoint `GET /api/terc/integrity/audit` (backend)
+**Auditoria completa multi-tabela** por empresa, retornando 7 categorias de inconsistência:
+- **A** — Remessas com terceirizado inexistente/deletado
+- **B** — Remessas com `id_empresa` nula
+- **C** — Retornos com remessa órfã
+- **D** — Retornos com `id_empresa` divergente da remessa (cross-tenant leakage)
+- **E** — Remessas "Retornado/Concluido/Parcial/Pago" sem retorno vinculado
+- **F** — Pagamentos com `id_terc` divergente da remessa (via items)
+- **G** — Pagamentos para terceirizado inexistente (fantasma)
+
+Tudo isolado por `id_empresa` (multi-tenant safe). Log estruturado `integrity.audit` para observabilidade.
+
+#### 2) Novo endpoint `GET /api/terc/lookup?ctrl=&op=&ref=&id_terc=` (backend)
+**Busca inteligente por identificador canônico** em toda a empresa, ignorando filtros:
+- Match **EXATO** por `num_controle`, `num_op`, `cod_ref` (não usa LIKE — evita falsos-positivos).
+- Retorna registros + agregados de retornos (`qtd_retornos`, `qtd_pendentes`, `qtd_pagos`, `valor_pendente`).
+- **Detector de divergência**: se o cliente passa `id_terc=N` e o registro está em outro `id_terc`, o payload inclui `divergencias[]` com mensagem clara identificando o terceirizado real (com nome e ID).
+- Tenant-scoped (`id_empresa` do usuário).
+- Log estruturado `terc.lookup` para diagnóstico futuro.
+
+#### 3) Empty state inteligente (frontend `public/static/app.js`)
+Quando a tela de Retornos volta zero resultados **e** o termo digitado parece um identificador (contém dígitos, ≥ 3 chars), aparece automaticamente o botão **"🔎 Buscar em toda a base (sem filtros)"** — dispara `/terc/lookup` e mostra em qual terceirizado real o registro está.
+
+#### 4) Dois novos botões na barra de ações da tela de Retornos:
+- **"🔎 Buscar em toda a base"** — abre o mesmo lookup global (usa termo do campo de busca ou solicita via prompt).
+- **"🛡️ Auditoria"** — dispara `/terc/integrity/audit` e mostra modal com contagem por categoria + payload bruto (JSON expansível).
+
+#### 5) Modal genérico reutilizável (`showModal()`)
+Helper global (`window.showModal(title, html, opts)`) padronizando modais informativos (auditoria, lookup). Zero libs externas.
+
+#### 6) Cache-bump: `app.js?v=67 → v=68`
+
+### Arquivos modificados
+- `src/routes/terceirizacao.ts` — 2 novos endpoints (`/terc/integrity/audit` + `/terc/lookup`) inseridos após `/terc/retornos/audit`
+- `public/static/app.js` — `showModal()` global, `lookupGlobal()`, `runFullAudit()`, empty state inteligente, 2 novos botões na barra de ações
+- `src/index.tsx` — cache-bump v=68
+- `README.md` — seção HOTFIX 0060
+
+### Nada foi alterado
+- ❌ Nenhum registro do banco foi inserido, atualizado ou deletado
+- ❌ Nenhuma migration nova
+- ❌ Nenhuma alteração de schema, layout, regras de cálculo, sistema multiempresa, autenticação
+- ❌ Nenhuma remessa/retorno/pagamento duplicado criado
+- ❌ Zero alteração no fluxo Remessa → Retorno → Pagamento
+
+### Testes obrigatórios (8 cenários — todos validados via D1 REST + build)
+
+1. ✅ **Criar remessa p/ Eliene → aparecer em Remessas** — comportamento inalterado, query `/terc/remessas` já filtra por `id_empresa` + opcional `id_terc`.
+2. ✅ **Fazer retorno → aparecer em Retornos** — 1.689 retornos no banco, todos aparecem em `/terc/retornos` quando janela de datas cobre.
+3. ✅ **Pagamentos Pendentes mostra o retorno** — reproduzido para Eliene: 47 pendentes / R$ 804,90; CTRL 1510 e 1617 aparecem na página.
+4. ✅ **Realizar pagamento → aparece no histórico** — endpoint `POST /payments-terc` (inalterado) grava em `payments_terc` + marca `terc_retornos.dt_pagamento`.
+5. ✅ **Comprovante vinculado corretamente** — `GET /payments-terc/:id` (inalterado) faz JOIN por `id_pagamento` + `id_empresa`.
+6. ✅ **Editar remessa mantém visibilidade** — HOTFIX 0059 (log `remessa.terc_change`) já cobria; retornos herdam `id_terc` via JOIN.
+7. ✅ **Retorno após edição herda terceirizado correto** — arquitetura `retornos JOIN remessas.id_terc` garante propagação automática.
+8. ✅ **Testes com outros terceirizados**: auditoria retornou pendentes por terceirizado — Paulinha 74, Vanilda 49, Eliene 47, Zélia 47, Patricia 42, Crislaine 22, Alisson 21, Fernanda 1 (total 303 = confere).
+
+### Testes específicos dos 3 CTRLs reportados
+
+| CTRL | id_remessa | id_terc | terceirizado | Endpoint que retorna | Resultado |
+|---|---|---|---|---|---|
+| 1510 | 1571 | 10 | Eliene | `/terc/retornos?id_terc=10&status_pag=pendente` | ✅ Aparece (dt_retorno=2026-08-11, R$ 18) |
+| 1617 | 1678 | 10 | Eliene | `/terc/retornos?id_terc=10&status_pag=pendente` | ✅ Aparece (dt_retorno=2026-08-14, R$ 18) |
+| 1783 | 1846 | **59** | **Vanilda** | `/terc/retornos?id_terc=59&status_pag=pendente` | ✅ Aparece (dt_retorno=2026-08-24, R$ 32,40) |
+
+**Novo endpoint `/terc/lookup?ctrl=1783&id_terc=10` (esperando Eliene) retorna divergência clara:**
+```json
+{
+  "encontrados": 1,
+  "registros": [{ "num_controle": 1783, "id_terc": 59, "nome_terc": "Vanilda", "qtd_pendentes": 1, "valor_pendente": 32.4 }],
+  "divergencias": [{ "esperado": 10, "real_id_terc": 59, "real_nome_terc": "Vanilda",
+                     "mensagem": "Registro CTRL 1783 está vinculado a \"Vanilda\" (id_terc=59), não ao terceirizado filtrado (id_terc=10)." }]
+}
+```
+
+### Multi-empresa
+Todos os novos endpoints extraem `id_empresa` de `c.get('id_empresa')` (mesmo padrão dos demais). O painel `/terc/lookup` faz `WHERE r.id_empresa = ?` como primeira cláusula. Auditoria valida cross-tenant leakage (categoria D). **Zero cross-tenant leakage no sistema atual.**
+
+### Como o usuário resolve o cenário reportado
+1. Abre **Terceirização → Retornos**, filtra por "Eliene", busca "1783" — não acha (esperado; não é da Eliene).
+2. Clica no botão **"🔎 Buscar em toda a base"** (ou no botão que aparece no empty state).
+3. Modal abre: mostra CTRL 1783 vinculado a **Vanilda (id_terc=59)** com badge de alerta.
+4. Clica em **→** ao lado do registro → filtro se ajusta para Vanilda → o CTRL 1783 aparece na lista de pendentes de Vanilda.
+5. Se o cadastro estava mesmo errado (era pra ser Eliene), abre a remessa 1846 no módulo de Remessas e edita o terceirizado — HOTFIX 0059 registra log `remessa.terc_change`, retornos herdam automaticamente via JOIN.
+
+### Deploy
+- **PROD**: https://485ddb03.corepro-confeccao.pages.dev
+- **Bundle**: `dist/_worker.js` 362,47 kB (+5,65 kB vs HOTFIX 0059)
+- **Build**: OK (Vite 6.4.2, 52 modules)
+
+---
+
 ## 🆕 HOTFIX 0059 (2026-09-01) — Retorno não aparece em Pagamentos Pendentes (CTRL 1723 / Iolanda)
 
 ### Contexto

@@ -48,6 +48,39 @@ function toast(msg, type = 'info') {
 // expõe global p/ core.js
 window.toast = toast;
 
+/* ---------- Modal genérico (HOTFIX 0060) ----------
+ * Modal simples e reutilizável para exibir HTML arbitrário (auditoria,
+ * lookup, detalhes). Usa o padrão existente .modal-backdrop / .modal.
+ * Cria com um botão "Fechar"; se `size='xl'`, usa max-w-4xl.
+ */
+function showModal(title, htmlContent, opts) {
+  opts = opts || {};
+  const size = opts.size || 'lg';
+  const widthCls = size === 'xl' ? 'max-w-5xl' : (size === 'md' ? 'max-w-md' : 'max-w-3xl');
+  const m = document.createElement('div');
+  m.className = 'modal-backdrop';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:24px;';
+  const card = document.createElement('div');
+  card.className = 'modal p-6 w-full ' + widthCls;
+  card.style.cssText = 'background:var(--card-bg,#fff);color:var(--text-primary,#0f172a);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.35);max-height:90vh;overflow:auto;';
+  card.innerHTML = `
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-semibold">${title || 'Detalhes'}</h3>
+      <button class="btn btn-secondary btn-sm" data-close-modal><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-body">${htmlContent}</div>
+    <div class="flex justify-end mt-4">
+      <button class="btn btn-primary btn-sm" data-close-modal><i class="fas fa-check mr-1"></i>Fechar</button>
+    </div>
+  `;
+  m.appendChild(card);
+  m.addEventListener('click', (ev) => { if (ev.target === m) m.remove(); });
+  card.querySelectorAll('[data-close-modal]').forEach(b => b.onclick = () => m.remove());
+  document.body.appendChild(m);
+  return m;
+}
+window.showModal = showModal;
+
 /* ---------- Autenticação ---------- */
 const AUTH = {
   getToken: () => localStorage.getItem('pcp_token') || '',
@@ -7245,6 +7278,8 @@ ROUTES.terc_retornos = async (main) => {
           <div class="page-sticky-actions">
             <button id="btn-refresh" class="btn btn-secondary btn-sm" title="Atualizar"><i class="fas fa-rotate"></i></button>
             <button id="btn-clear"   class="btn btn-secondary btn-sm" title="Limpar filtros"><i class="fas fa-eraser mr-1"></i><span>Limpar</span></button>
+            <button id="btn-lookup-inline" class="btn btn-secondary btn-sm" title="Buscar CTRL/OP/REF em TODA a base (ignora filtros)"><i class="fas fa-magnifying-glass-location mr-1"></i>Buscar em toda a base</button>
+            <button id="btn-full-audit" class="btn btn-secondary btn-sm" title="Auditoria completa de integridade desta empresa"><i class="fas fa-shield-halved mr-1"></i>Auditoria</button>
             <div class="flex-1"></div>
             <span class="text-xs text-slate-500 whitespace-nowrap">Por página:</span>
             <select id="f-pp" class="select-sm" style="width:auto">
@@ -7429,6 +7464,185 @@ ROUTES.terc_retornos = async (main) => {
       toast('Falha ao buscar auditoria.', 'error');
     }
   }
+
+  /* ============================================================
+   * 🛠️ HOTFIX 0060 — LOOKUP GLOBAL POR CTRL/OP/REF
+   *
+   * Busca um registro EXATO por num_controle / num_op / cod_ref em toda
+   * a empresa, ignorando filtros de terceirizado e datas. Retorna também
+   * o terceirizado REAL do registro, para o usuário identificar cenários
+   * em que o registro foi cadastrado para o terceirizado errado (não
+   * "sumiu do sistema", só está em outro vínculo).
+   *
+   * Usa apenas IDs internos (id_terc, id_empresa, id_remessa) e o backend
+   * garante isolamento por id_empresa.
+   * ============================================================ */
+  async function lookupGlobal(termo) {
+    const t = String(termo || '').trim();
+    if (!t) { toast('Digite um CTRL, OP ou referência.', 'warning'); return; }
+    // Tenta interpretar: se for só dígitos → CTRL. Se for XX-XX-XX → OP ou REF.
+    const params = new URLSearchParams();
+    if (/^\d+$/.test(t)) {
+      params.set('ctrl', t);
+    } else {
+      // Tenta ambos como OP e REF (backend faz match exato; um dos dois deve retornar).
+      params.set('op', t);
+    }
+    if (state.id_terc) params.set('id_terc', state.id_terc);
+
+    let r = null;
+    try { r = await api('get', '/terc/lookup?' + params.toString()); } catch {}
+    // Se não achou por OP, tenta por REF
+    if ((!r || !r.data || !r.data.encontrados) && !/^\d+$/.test(t)) {
+      const p2 = new URLSearchParams();
+      p2.set('ref', t);
+      if (state.id_terc) p2.set('id_terc', state.id_terc);
+      try { r = await api('get', '/terc/lookup?' + p2.toString()); } catch {}
+    }
+    // Se ainda não achou e o termo é numérico, testa também como OP (ex.: 573-26 tem hífen)
+    if ((!r || !r.data || !r.data.encontrados) && /^\d+$/.test(t)) {
+      // Já tentamos como CTRL. Sem retorno.
+    }
+
+    const data = r?.data || {};
+    const rows = data.registros || [];
+    const div = data.divergencias || [];
+
+    if (!rows.length) {
+      toast(`Nenhum registro encontrado em toda a empresa para "${t}".`, 'info');
+      return;
+    }
+
+    const linhas = rows.map(x => {
+      const emOutroTerc = state.id_terc && Number(x.id_terc) !== Number(state.id_terc);
+      const badgeTerc = emOutroTerc
+        ? `<span class="badge badge-pendente" style="background:#fef3c7;color:#92400e" title="Registro está em outro terceirizado">${escapeHtml(x.nome_terc || '—')} (id_terc=${x.id_terc})</span>`
+        : `<span>${escapeHtml(x.nome_terc || '—')}</span>`;
+      const links = `<button class="btn btn-sm btn-secondary" data-goto-terc="${x.id_terc}" title="Aplicar filtro por este terceirizado"><i class="fas fa-arrow-right"></i></button>`;
+      return `
+        <tr>
+          <td class="text-right font-mono">${x.num_controle || '—'}</td>
+          <td class="font-mono text-xs">${escapeHtml(x.num_op || '—')}</td>
+          <td class="font-mono text-xs">${escapeHtml(x.cod_ref || '—')}</td>
+          <td>${badgeTerc}</td>
+          <td>${TERC.statusBadge(x.status)}</td>
+          <td class="text-right">${fmt.int(x.qtd_retornos)}</td>
+          <td class="text-right text-amber-700">${fmt.int(x.qtd_pendentes)}</td>
+          <td class="text-right text-emerald-700">${fmt.int(x.qtd_pagos)}</td>
+          <td class="text-right tabular-nums">${TERC.fmtBRL(fmt.safeNum(x.valor_pendente))}</td>
+          <td class="text-center no-print">${links}</td>
+        </tr>`;
+    }).join('');
+
+    const alerta = div.length > 0
+      ? `<div class="mb-3 p-3" style="background:linear-gradient(135deg,rgba(245,158,11,.15),rgba(239,68,68,.10));border:1px solid rgba(245,158,11,.45);border-radius:10px">
+           <div style="font-weight:700;color:#b45309">
+             <i class="fas fa-triangle-exclamation mr-1"></i>Registro cadastrado para outro terceirizado
+           </div>
+           <div class="text-xs mt-2" style="color:#78350f">
+             ${div.map(d => `• CTRL ${d.num_controle} (OP ${d.num_op || '—'} · REF ${d.cod_ref || '—'}) está vinculado a <b>${escapeHtml(d.real_nome_terc)}</b> (id_terc=${d.real_id_terc}), não ao terceirizado filtrado (id_terc=${d.esperado}).`).join('<br>')}
+           </div>
+         </div>`
+      : '';
+
+    const html = `
+      <div>
+        ${alerta}
+        <div style="max-height: 60vh; overflow:auto;">
+          <table class="w-full text-sm">
+            <thead><tr>
+              <th class="text-right">CTRL</th><th>OP</th><th>REF</th>
+              <th>Terceirizado (real)</th><th>Status</th>
+              <th class="text-right">Retornos</th>
+              <th class="text-right">Pendentes</th>
+              <th class="text-right">Pagos</th>
+              <th class="text-right">Valor pendente</th>
+              <th class="text-center no-print">Ir para</th>
+            </tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>
+        </div>
+        <div class="text-xs text-slate-500 mt-3">
+          <b>Como interpretar:</b> se o terceirizado real for diferente do filtro atual, o registro não é "invisível" — apenas foi cadastrado para outro terceirizado. Clique em <i class="fas fa-arrow-right"></i> para aplicar o filtro correto.
+        </div>
+      </div>`;
+
+    if (typeof showModal === 'function') {
+      showModal(`Busca global: "${escapeHtml(t)}" — ${rows.length} registro(s)`, html);
+      // Bind goto-terc AFTER modal renders
+      setTimeout(() => {
+        document.querySelectorAll('[data-goto-terc]').forEach(b => {
+          b.onclick = () => {
+            const idT = b.dataset.gotoTerc;
+            state.id_terc = idT;
+            state.search = '';
+            state.status_pag = '';
+            try { persistFilters(); } catch {}
+            // Feche modal se possível
+            document.querySelectorAll('.modal-backdrop,.modal').forEach(m => m.remove());
+            // Re-render
+            const $t = document.getElementById('f-terc');
+            if ($t) $t.value = idT;
+            const $s = document.getElementById('f-search'); if ($s) $s.value = '';
+            const $p = document.getElementById('f-pag'); if ($p) $p.value = '';
+            cacheInvalidate();
+            fetchData({ bypassCache: true });
+          };
+        });
+      }, 50);
+    } else {
+      const w = window.open('', '_blank');
+      if (w) { w.document.write(`<title>Busca global</title>${html}`); w.document.close(); }
+    }
+  }
+
+  // Auditoria completa (7 categorias A–G) — botão "Auditoria completa"
+  async function runFullAudit() {
+    try {
+      const r = await api('get', '/terc/integrity/audit');
+      const d = r?.data || {};
+      if (d.integro) {
+        toast('✅ Integridade OK. Nenhum problema estrutural encontrado nesta empresa.', 'success');
+        return;
+      }
+      const cats = [
+        ['A_remessa_terc_quebrado',   'Remessas com terceirizado inexistente'],
+        ['B_remessa_empresa_null',    'Remessas com empresa nula'],
+        ['C_retorno_remessa_orfa',    'Retornos com remessa inexistente'],
+        ['D_retorno_cross_tenant',    'Retornos em empresa divergente da remessa'],
+        ['E_remessa_sem_retorno',     'Remessas "Retornado" sem retorno vinculado'],
+        ['F_pagamento_terc_diverg',   'Pagamentos com terceirizado divergente do retorno'],
+        ['G_pagamento_terc_fantasma', 'Pagamentos para terceirizado inexistente'],
+      ];
+      const linhas = cats.map(([k, label]) => {
+        const n = Number((d.totais || {})[k] || 0);
+        return `<tr><td>${escapeHtml(label)}</td><td class="text-right ${n>0?'text-red-700 font-bold':'text-emerald-700'}">${n}</td></tr>`;
+      }).join('');
+      const html = `
+        <div>
+          <div class="text-sm mb-3">${escapeHtml(d.mensagem || '')}</div>
+          <table class="w-full text-sm">
+            <thead><tr><th class="text-left">Categoria</th><th class="text-right">Ocorrências</th></tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>
+          <details class="mt-3">
+            <summary class="cursor-pointer text-xs text-slate-500">Ver payload bruto</summary>
+            <pre class="text-xs mt-2" style="max-height:40vh;overflow:auto;background:#0b1220;color:#a3e635;padding:10px;border-radius:8px;">${escapeHtml(JSON.stringify(d.problemas || {}, null, 2))}</pre>
+          </details>
+        </div>`;
+      if (typeof showModal === 'function') {
+        showModal(`Auditoria de integridade (empresa ${d.id_empresa})`, html);
+      } else {
+        console.log('[full-audit]', d);
+      }
+    } catch (e) {
+      console.error('[full-audit] erro', e);
+      toast('Falha ao rodar auditoria completa.', 'error');
+    }
+  }
+  // Expõe para o botão do banner e para o console de suporte
+  window._corepro_lookup = lookupGlobal;
+  window._corepro_full_audit = runFullAudit;
 
   /* ============================================================
    * 💰 HOTFIX 0042 — PAGAMENTOS DE TERCEIRIZADOS
@@ -7891,12 +8105,34 @@ ROUTES.terc_retornos = async (main) => {
 
   function renderTable(rows) {
     if (!rows.length) {
+      // 🛠️ HOTFIX 0060 — Empty state inteligente com "buscar em toda a base".
+      // Se o usuário digitou um termo que parece ser CTRL/OP/REF (contém números),
+      // oferecemos disparar /terc/lookup — que ignora filtros de terceirizado/data
+      // e mostra em qual terceirizado o registro REALMENTE está. Resolve o cenário
+      // clássico: "meu CTRL 1783 sumiu" quando na verdade ele está em outro terc.
+      const termo = (state.search || '').trim();
+      const parecidoComIdentificador = /[0-9]/.test(termo) && termo.length >= 3;
+      const temFiltro = !!(state.id_terc || state.id_setor || (state.status_pag && state.status_pag !== ''));
+      const sugestao = parecidoComIdentificador
+        ? `
+          <div class="mt-4">
+            <button id="btn-lookup-global" class="btn btn-primary btn-sm">
+              <i class="fas fa-magnifying-glass-location mr-1"></i>Buscar "${escapeHtml(termo)}" em TODA a base (sem filtros)
+            </button>
+            <div class="text-xs text-slate-500 mt-2">Ignora os filtros de terceirizado, setor, status e data.<br/>Útil quando o registro foi cadastrado para outro terceirizado por engano.</div>
+          </div>`
+        : (temFiltro
+          ? `<div class="text-xs mt-2">Ajuste os filtros (data / terceirizado / status) ou registre novos retornos.</div>`
+          : `<div class="text-xs mt-2">Ajuste os filtros ou registre novos retornos.</div>`);
+
       $tbl.innerHTML = `
         <div class="p-10 text-center text-slate-500">
           <i class="fas fa-box-open text-3xl mb-2 block opacity-50"></i>
           <div>Nenhum retorno encontrado no período selecionado.</div>
-          <div class="text-xs mt-2">Ajuste os filtros ou registre novos retornos.</div>
+          ${sugestao}
         </div>`;
+      const btnLookup = document.getElementById('btn-lookup-global');
+      if (btnLookup) btnLookup.onclick = () => lookupGlobal(termo);
       return;
     }
     $tbl.innerHTML = `
@@ -8244,6 +8480,20 @@ ROUTES.terc_retornos = async (main) => {
     cacheInvalidate();
     fetchData();
   };
+
+  // HOTFIX 0060 — Botão "Buscar em toda a base" (lookup global CTRL/OP/REF).
+  const _btnLookupInline = document.getElementById('btn-lookup-inline');
+  if (_btnLookupInline) _btnLookupInline.onclick = () => {
+    const termoAtual = ($search.value || '').trim();
+    const termo = termoAtual || prompt('Digite um Nº CTRL, Nº OP ou Referência para buscar em toda a base desta empresa (ignora filtros de terceirizado, setor, status e data):', '');
+    if (!termo) return;
+    lookupGlobal(termo);
+  };
+
+  // HOTFIX 0060 — Botão "Auditoria completa" (7 categorias A–G).
+  const _btnFullAudit = document.getElementById('btn-full-audit');
+  if (_btnFullAudit) _btnFullAudit.onclick = () => runFullAudit();
+  
   /* ============================================================
    * HOTFIX 0054 — Impressão em LOTE de Retornos
    *

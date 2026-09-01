@@ -3477,6 +3477,236 @@ app.get('/terc/retornos/audit', async (c) => {
 });
 
 /* =================================================================
+ * HOTFIX 0060 — GET /terc/integrity/audit
+ *
+ * Auditoria de integridade GLOBAL do módulo de terceirização.
+ *
+ * Verifica automaticamente todas as inconsistências que poderiam
+ * fazer uma remessa/retorno "sumir" da interface:
+ *
+ *   A) Remessas com id_terc quebrado (terceirizado não existe/inativo)
+ *   B) Remessas com id_empresa NULL/divergente
+ *   C) Retornos com id_remessa órfão (remessa foi apagada)
+ *   D) Retornos com id_empresa <> remessa.id_empresa (cross-tenant leak)
+ *   E) Retornos "Retornado" órfãos (mesma verificação de /terc/retornos/audit)
+ *   F) Pagamentos com id_terc <> remessa.id_terc (via items)
+ *   G) Pagamentos órfãos (payments_terc.id_terc não existe)
+ *
+ * TENANT-SCOPED — só analisa registros da empresa do usuário.
+ *
+ * Motivação: quando um usuário reporta "meu retorno não aparece",
+ * essa rota permite ao admin verificar em segundos se existe algum
+ * problema estrutural na base ANTES de investigar bug de aplicação.
+ *
+ * Todas as verificações usam IDs internos (FK), NUNCA nome textual.
+ * ================================================================= */
+app.get('/terc/integrity/audit', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+
+  const [
+    remTercQuebrado,
+    remEmpresaNull,
+    retRemQuebrado,
+    retCrossTenant,
+    remOrfas,
+    payTercDiverg,
+    payTercFantasma,
+  ] = await Promise.all([
+    // A) Remessas cujo id_terc não existe na mesma empresa
+    c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.id_terc, r.status
+        FROM terc_remessas r
+        LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc AND t.id_empresa = r.id_empresa
+       WHERE r.id_empresa = ? AND t.id_terc IS NULL
+       LIMIT 100
+    `).bind(id_empresa).all(),
+
+    // B) Remessas com id_empresa NULL/0
+    c.env.DB.prepare(`
+      SELECT id_remessa, num_controle, num_op, cod_ref, id_terc, id_empresa
+        FROM terc_remessas
+       WHERE (id_empresa IS NULL OR id_empresa = 0)
+       LIMIT 100
+    `).all(),
+
+    // C) Retornos com id_remessa órfão (remessa não existe)
+    c.env.DB.prepare(`
+      SELECT rt.id_retorno, rt.id_remessa, rt.id_empresa, rt.dt_retorno, rt.valor_pago
+        FROM terc_retornos rt
+        LEFT JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
+       WHERE rt.id_empresa = ? AND r.id_remessa IS NULL
+       LIMIT 100
+    `).bind(id_empresa).all(),
+
+    // D) Retornos com id_empresa divergente da remessa (cross-tenant)
+    c.env.DB.prepare(`
+      SELECT rt.id_retorno, rt.id_remessa, rt.id_empresa AS ret_emp, r.id_empresa AS rem_emp
+        FROM terc_retornos rt
+        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
+       WHERE (rt.id_empresa = ? OR r.id_empresa = ?)
+         AND rt.id_empresa <> r.id_empresa
+       LIMIT 100
+    `).bind(id_empresa, id_empresa).all(),
+
+    // E) Remessas com status "Retornado/Concluido/Parcial/Pago" mas sem retorno
+    c.env.DB.prepare(`
+      SELECT r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.status, r.id_terc
+        FROM terc_remessas r
+       WHERE r.id_empresa = ?
+         AND r.status IN ('Retornado','Concluido','Parcial','Pago')
+         AND NOT EXISTS (
+           SELECT 1 FROM terc_retornos rt
+            WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa
+         )
+       LIMIT 100
+    `).bind(id_empresa).all(),
+
+    // F) Payments com id_terc <> remessa.id_terc (via items) → possível bug de vínculo
+    c.env.DB.prepare(`
+      SELECT DISTINCT p.id_pagamento, p.id_terc AS pay_terc, r.id_terc AS rem_terc,
+             r.num_controle, rt.id_retorno
+        FROM payment_terc_items pi
+        JOIN payments_terc p ON p.id_pagamento = pi.id_pagamento
+        JOIN terc_retornos rt ON rt.id_retorno = pi.id_retorno
+        JOIN terc_remessas r ON r.id_remessa = rt.id_remessa
+       WHERE p.id_empresa = ?
+         AND p.status = 'Confirmado'
+         AND (p.id_terc <> r.id_terc
+              OR p.id_empresa <> r.id_empresa
+              OR p.id_empresa <> rt.id_empresa)
+       LIMIT 100
+    `).bind(id_empresa).all(),
+
+    // G) payments_terc.id_terc não existe (fantasma)
+    c.env.DB.prepare(`
+      SELECT p.id_pagamento, p.id_terc, p.dt_pagamento, p.valor_total
+        FROM payments_terc p
+        LEFT JOIN terc_terceirizados t ON t.id_terc = p.id_terc AND t.id_empresa = p.id_empresa
+       WHERE p.id_empresa = ? AND t.id_terc IS NULL
+       LIMIT 100
+    `).bind(id_empresa).all(),
+  ]);
+
+  const problemas = {
+    A_remessa_terc_quebrado:  (remTercQuebrado.results || []) as any[],
+    B_remessa_empresa_null:   (remEmpresaNull.results || []) as any[],
+    C_retorno_remessa_orfa:   (retRemQuebrado.results || []) as any[],
+    D_retorno_cross_tenant:   (retCrossTenant.results || []) as any[],
+    E_remessa_sem_retorno:    (remOrfas.results || []) as any[],
+    F_pagamento_terc_diverg:  (payTercDiverg.results || []) as any[],
+    G_pagamento_terc_fantasma:(payTercFantasma.results || []) as any[],
+  };
+
+  const totais = Object.fromEntries(
+    Object.entries(problemas).map(([k, v]) => [k, (v as any[]).length])
+  );
+  const total_problemas = Object.values(totais).reduce((a: number, b: any) => a + Number(b), 0);
+
+  logTenant(c, 'integrity.audit', { totais, total_problemas });
+
+  return c.json(ok({
+    id_empresa,
+    total_problemas,
+    totais,
+    problemas,
+    integro: total_problemas === 0,
+    mensagem: total_problemas === 0
+      ? '✅ Integridade OK. Nenhum registro órfão ou com vínculo quebrado nesta empresa.'
+      : `⚠️ ${total_problemas} inconsistência(s) detectada(s). Veja as categorias A–G no payload.`,
+  }));
+});
+
+/* =================================================================
+ * HOTFIX 0060 — GET /terc/lookup?ctrl=&op=&ref=&id_terc=
+ *
+ * Busca INTELIGENTE por CTRL / OP / REF em TODA a base da empresa,
+ * IGNORANDO filtros de terceirizado.
+ *
+ * Motivação: quando o usuário afirma "meu retorno da Eliene sumiu",
+ * mas na verdade o registro foi criado com terceirizado errado
+ * (ex.: id_terc=59 Vanilda em vez de id_terc=10 Eliene), o filtro
+ * por terceirizado esconde o registro. Essa rota faz a busca sem
+ * o filtro e retorna o terceirizado REAL do registro — com os IDs
+ * internos — para o usuário saber exatamente onde procurar.
+ *
+ * Também retorna se o registro tem retorno, se está pendente, e
+ * o link direto para a tela de retornos correta.
+ *
+ * TENANT-SCOPED: só varre registros da empresa do usuário.
+ * ================================================================= */
+app.get('/terc/lookup', async (c) => {
+  const id_empresa = (c.get('id_empresa') as number) || 1;
+  const q = c.req.query();
+
+  const ctrl = toInt(q.ctrl || 0);
+  const op   = (q.op   || '').trim();
+  const ref  = (q.ref  || '').trim();
+  const idTercEsperado = toInt(q.id_terc || 0); // opcional: para detectar "achado em outro terc"
+
+  if (!ctrl && !op && !ref) {
+    return c.json(fail('Informe ao menos um filtro: ctrl, op ou ref.', 400));
+  }
+
+  const where: string[] = ['r.id_empresa = ?'];
+  const binds: any[] = [id_empresa];
+  if (ctrl) { where.push('r.num_controle = ?'); binds.push(ctrl); }
+  if (op)   { where.push('r.num_op = ?');       binds.push(op); }
+  if (ref)  { where.push('r.cod_ref = ?');      binds.push(ref); }
+
+  // Busca por match EXATO nos campos-chave (CTRL/OP/REF).
+  // Como esses campos são identificadores canônicos, LIKE aqui é armadilha
+  // (traz falsos-positivos). Match exato garante que o resultado é o registro real.
+  const rows = (await c.env.DB.prepare(`
+    SELECT
+      r.id_remessa, r.num_controle, r.num_op, r.cod_ref, r.desc_ref, r.cor,
+      r.qtd_total, r.valor_total, r.status, r.dt_saida, r.dt_criacao,
+      r.id_terc, r.id_empresa,
+      t.nome_terc, t.ativo AS terc_ativo,
+      (SELECT COUNT(*) FROM terc_retornos rt WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa) AS qtd_retornos,
+      (SELECT COUNT(*) FROM terc_retornos rt WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa AND rt.dt_pagamento IS NULL) AS qtd_pendentes,
+      (SELECT COUNT(*) FROM terc_retornos rt WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa AND rt.dt_pagamento IS NOT NULL) AS qtd_pagos,
+      (SELECT COALESCE(SUM(rt.valor_pago),0) FROM terc_retornos rt WHERE rt.id_remessa = r.id_remessa AND rt.id_empresa = r.id_empresa AND rt.dt_pagamento IS NULL) AS valor_pendente
+    FROM terc_remessas r
+    LEFT JOIN terc_terceirizados t ON t.id_terc = r.id_terc AND t.id_empresa = r.id_empresa
+    WHERE ${where.join(' AND ')}
+    ORDER BY r.id_remessa DESC
+    LIMIT 50
+  `).bind(...binds).all()).results as any[];
+
+  // Detecta divergência: usuário esperava terc X mas o registro está em terc Y
+  const divergencias = idTercEsperado
+    ? rows.filter(r => Number(r.id_terc) !== idTercEsperado)
+        .map(r => ({
+          num_controle: r.num_controle,
+          num_op: r.num_op,
+          cod_ref: r.cod_ref,
+          esperado: idTercEsperado,
+          real_id_terc: r.id_terc,
+          real_nome_terc: r.nome_terc,
+          mensagem: `Registro CTRL ${r.num_controle} está vinculado a "${r.nome_terc}" (id_terc=${r.id_terc}), não ao terceirizado filtrado (id_terc=${idTercEsperado}).`,
+        }))
+    : [];
+
+  logTenant(c, 'terc.lookup', {
+    filtro: { ctrl: ctrl || null, op: op || null, ref: ref || null, id_terc_esperado: idTercEsperado || null },
+    encontrados: rows.length,
+    divergencias: divergencias.length,
+  });
+
+  return c.json(ok({
+    filtro: { ctrl, op, ref, id_terc_esperado: idTercEsperado },
+    encontrados: rows.length,
+    registros: rows,
+    divergencias,
+    mensagem: rows.length === 0
+      ? 'Nenhum registro encontrado com esses filtros exatos em toda a empresa.'
+      : (divergencias.length > 0
+          ? `⚠️ ${divergencias.length} registro(s) vinculado(s) a terceirizado DIFERENTE do filtrado. Confira os IDs abaixo.`
+          : `${rows.length} registro(s) encontrado(s).`),
+  }));
+});
+
+/* =================================================================
  * POST /terc/retornos/repair
  * Reparação on-demand — recria registros faltantes em terc_retornos
  * para todas as remessas Retornadas órfãs desta empresa.
