@@ -13310,7 +13310,9 @@ function renderLogin(msg) {
       login: $('#login-login').value.trim(),
       senha: $('#login-senha').value,
     };
-    const MAX_TRIES = 3;
+    // HOTFIX 0063 — pós-upgrade Cloudflare: enquanto o accounting propaga,
+    // aumentamos as tentativas do login para cobrir picos de rate-limit.
+    const MAX_TRIES = 5;
     let lastErr = null;
 
     for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
@@ -13355,12 +13357,14 @@ function renderLogin(msg) {
           || code === 'DB_BUSY'
           || code === 'DB_QUOTA_EXCEEDED';
 
-        // HOTFIX 0062 — cota diária esgotada: retry não vai ajudar dentro do dia.
-        // Mostra mensagem específica e para de tentar.
-        if (code === 'DB_QUOTA_EXCEEDED') {
-          $msg.innerHTML = `<span class="text-amber-500">⚠ ${r.data?.error || 'Cota diária do banco atingida. O serviço volta automaticamente à meia-noite (UTC).'}</span>`;
-          setBtn('Entrar', false);
-          return;
+        // HOTFIX 0063 — pós-upgrade Cloudflare: DB_QUOTA_EXCEEDED voltou a ser
+        // transitório (accounting/rate-limit da Cloudflare propagando). Tratamos
+        // como transient com retry automático e mensagem neutra.
+        if (code === 'DB_QUOTA_EXCEEDED' && attempt < MAX_TRIES) {
+          $msg.innerHTML = `<span class="text-amber-500">Banco sobrecarregado, tentando novamente (${attempt + 1}/${MAX_TRIES})...</span>`;
+          setBtn(`Aguardando (${attempt}/${MAX_TRIES})...`);
+          await new Promise(res => setTimeout(res, 2000 * attempt));
+          continue;
         }
 
         if (isTransient && attempt < MAX_TRIES) {

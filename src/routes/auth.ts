@@ -52,21 +52,22 @@ function serviceUnavailable(reason: string, ref?: string) {
 }
 
 /**
- * HOTFIX 0062 — resposta específica quando a cota diária do D1 free tier
- * foi esgotada. Diferente de um transitório curto: aqui o retry NÃO vai
- * resolver dentro do mesmo dia. Retornamos 503 (mesma classe de "não
- * derruba sessão") mas com Retry-After longo (900s = 15min) e mensagem
- * clara — o frontend mostra o aviso sem forçar re-login.
+ * HOTFIX 0062 / 0063 — resposta específica quando a Cloudflare devolve
+ * limite temporário de leitura/escrita no D1. Após o upgrade para o
+ * plano pago (HOTFIX 0063), esse cenário passa a ser transitório
+ * (accounting/rate-limit propagando), então usamos Retry-After curto
+ * (60s) e mensagem neutra que instrui a tentar novamente em instantes.
+ * Ainda mantemos 503 para não derrubar sessão.
  */
 function quotaExceeded(reason: string) {
   return new Response(
     JSON.stringify({
       ok: false,
-      error: 'Cota diária do banco de dados atingida. O serviço será restabelecido automaticamente à meia-noite (UTC). Sua sessão será preservada.',
+      error: 'O banco de dados está momentaneamente sobrecarregado. Aguarde alguns instantes e tente novamente. Sua sessão será preservada.',
       code: 'DB_QUOTA_EXCEEDED',
       hint: reason,
     }),
-    { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '900' } }
+    { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '60' } }
   );
 }
 
@@ -152,10 +153,18 @@ app.post('/auth/login', async (c) => {
   try {
     u = await withD1Retry(
       () => c.env.DB
-        .prepare(`SELECT * FROM usuarios WHERE login=? AND ativo=1`)
+        // HOTFIX 0063 — pós-upgrade Cloudflare: reduz reads no login
+        // Antes: SELECT * (todas colunas, incluindo email/perfil/telefone/foto/etc.)
+        // Agora: apenas 3 colunas necessárias para autenticar.
+        // NÃO altera regra de negócio nem contrato — só reduz payload por request.
+        .prepare(`SELECT id_usuario, senha_hash, senha_salt FROM usuarios WHERE login=? AND ativo=1`)
         .bind(login)
         .first<any>(),
-      { attempts: 3, baseDelayMs: 60, label: 'auth-login/select-user' }
+      // HOTFIX 0063 — pós-upgrade Cloudflare: durante a propagação do plano
+      // pago (accounting), o rate-limit do D1 pode retornar quota exceeded em
+      // uma request e liberar na próxima. Aumentamos retries e backoff aqui
+      // (path crítico) para maximizar chance de login sem intervenção do usuário.
+      { attempts: 6, baseDelayMs: 120, label: 'auth-login/select-user' }
     );
   } catch (e: any) {
     logAuthError('select-user', e, { login, ip });
@@ -217,7 +226,9 @@ app.post('/auth/login', async (c) => {
   try {
     token = await withD1Retry(
       () => criarSessao(c.env.DB, u.id_usuario, ip, ua),
-      { attempts: 3, baseDelayMs: 60, label: 'auth-login/criar-sessao' }
+      // HOTFIX 0063 — mesmo motivo do select-user: paciência maior para o
+      // INSERT em sessoes (path crítico do login).
+      { attempts: 6, baseDelayMs: 120, label: 'auth-login/criar-sessao' }
     );
   } catch (e: any) {
     logAuthError('criar-sessao', e, { login, id_usuario: u.id_usuario });
