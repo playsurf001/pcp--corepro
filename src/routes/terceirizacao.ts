@@ -2514,8 +2514,12 @@ app.put('/terc/remessas/:id', async (c) => {
   const b = await c.req.json();
 
   // Verifica existência (tenant-scoped)
+  // 🛠️ HOTFIX 0059 — Também trazemos id_terc antigo p/ log estruturado de troca de
+  // terceirizado (cenário: remessa criada em nome de A, editada para B, retornada.
+  // O vínculo financeiro segue r.id_terc (não o nome), garantindo que os retornos
+  // apareçam automaticamente em pendentes do NOVO terceirizado. Log ajuda auditoria.)
   const remOld = await c.env.DB.prepare(
-    'SELECT id_remessa, qtd_total FROM terc_remessas WHERE id_remessa=? AND id_empresa=?'
+    'SELECT id_remessa, qtd_total, id_terc AS id_terc_old, num_controle FROM terc_remessas WHERE id_remessa=? AND id_empresa=?'
   ).bind(id, id_empresa).first<any>();
   if (!remOld) return fail('Remessa não encontrada', 404);
 
@@ -2635,6 +2639,23 @@ app.put('/terc/remessas/:id', async (c) => {
       totQtd, head._preco, totValor, toInt(b.id_colecao) || null,
       b.dt_saida, b.dt_inicio || b.dt_saida, dt_prev, prazo > 0 ? prazo : dias,
       tempoMaxItem, efic, pess, min_dia, b.status || 'AguardandoEnvio', b.observacao || null, getUser(c), id, id_empresa).run();
+
+  // 🛠️ HOTFIX 0059 — Log estruturado de troca de terceirizado.
+  // Como retornos herdam id_terc via JOIN (terc_retornos.id_remessa → terc_remessas.id_terc),
+  // trocar o terceirizado da remessa é seguro: retornos existentes automaticamente
+  // aparecem em pendentes do NOVO terceirizado. Log serve para auditoria/debug.
+  const idTercNew = toInt(b.id_terc);
+  const idTercOld = toInt(remOld.id_terc_old);
+  if (idTercNew && idTercOld && idTercNew !== idTercOld) {
+    logTenant(c, 'remessa.terc_change', {
+      id_remessa: id,
+      num_controle: remOld.num_controle,
+      id_terc_old: idTercOld,
+      id_terc_new: idTercNew,
+      total_retornado: totalRetornado,
+      obs: 'Retornos existentes agora aparecem em pendentes do NOVO terceirizado via JOIN por r.id_terc.',
+    });
+  }
 
   // ---- Regrava itens (e suas grades) — DELETE+INSERT é atômico no D1 ----
   await c.env.DB.prepare('DELETE FROM terc_remessa_itens WHERE id_remessa=? AND id_empresa=?').bind(id, id_empresa).run();

@@ -7103,10 +7103,21 @@ ROUTES.terc_retornos = async (main) => {
   try { savedFilters = JSON.parse(sessionStorage.getItem('corepro:retornos:filtros') || '{}'); } catch {}
 
   const hoje = dayjs().format('YYYY-MM-DD');
-  const deDefault = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+  // 🛠️ HOTFIX 0059 — Janela default alargada de 30d → 90d para alinhar com o backend
+  // (backend usa 90d em /terc/retornos). Retornos legítimos ficavam invisíveis quando
+  // o usuário abria a tela e o retorno tinha entre 31 e 90 dias — causava a sensação
+  // de "sumiu do sistema" e impedia o pagamento.
+  const deDefault = dayjs().subtract(90, 'day').format('YYYY-MM-DD');
+
+  // 🛠️ HOTFIX 0059 — Auto-heal para sessionStorage stale: se o filtro salvo tem
+  // janela mais estreita que o default (por exemplo, o usuário mexeu em versão antiga
+  // do sistema com default 30d), alargamos para 90d automaticamente. Isso garante
+  // que retornos "de repente invisíveis" reapareçam ao abrir a tela.
+  const _deSalvo = savedFilters.de || '';
+  const _deSalvoAlargado = (_deSalvo && _deSalvo > deDefault) ? deDefault : (_deSalvo || deDefault);
 
   const state = {
-    de:        savedFilters.de  || deDefault,
+    de:        _deSalvoAlargado,
     ate:       savedFilters.ate || hoje,
     id_terc:   savedFilters.id_terc || '',
     id_setor:  savedFilters.id_setor || '',  // HOTFIX 0037
@@ -7645,9 +7656,18 @@ ROUTES.terc_retornos = async (main) => {
     // Marca todos os checkboxes da página primeiro (UX) e usa fluxo da seleção,
     // MAS busca também os pendentes que possam estar em outras páginas.
     try {
-      // Busca todos pendentes deste terceirizado em todas as páginas do filtro
+      // 🛠️ HOTFIX 0059 — "Pagar Todos" IGNORA o filtro de data da tela.
+      // O painel financeiro (/payments-terc/summary) já mostra qtd_pendentes SEM
+      // filtro de data — se o botão respeitasse o filtro, o resumo dizia
+      // "41 pendentes / R$ 625,90" mas o clique só pegava os visíveis. Retornos
+      // fora da janela (ex: mais de 30 dias antigos) ficavam órfãos, causando o
+      // bug "retorno não aparece em pagamentos pendentes".
+      // Usamos janela ampla (5 anos ← hoje+1) para cobrir toda a base histórica
+      // do terceirizado, sem depender de state.de/state.ate.
+      const deWide  = dayjs().subtract(5, 'year').format('YYYY-MM-DD');
+      const ateWide = dayjs().add(1, 'day').format('YYYY-MM-DD'); // +1d p/ cobrir fuso
       const p = new URLSearchParams({
-        de: state.de, ate: state.ate,
+        de: deWide, ate: ateWide,
         id_terc: String(idTerc),
         status_pag: 'pendente',
         per_page: '1000', page: '1',

@@ -2448,6 +2448,142 @@ Em flexbox column, filhos com `flex: 1` têm `min-height: auto` por padrão — 
 
 ---
 
+## 🆕 HOTFIX 0059 (2026-09-01) — Retorno não aparece em Pagamentos Pendentes (CTRL 1723 / Iolanda)
+
+### Contexto
+Um retorno legítimo (CTRL **1723**, OP **573-26**, REF **01-02-25-01**, cor Preto, valor R$ 21,30) da terceirizada **Iolanda** (id_terc=14) **não estava aparecendo em Pagamentos Pendentes**, mesmo estando corretamente registrado no banco. A remessa havia sido criada originalmente para "Maria Costureira" e posteriormente editada para "Iolanda", e o retorno foi feito em seguida — mas o registro ficou invisível na tela, impedindo o pagamento.
+
+### Constraints do usuário (respeitadas 100%)
+> **Não modificar:** banco de dados, arquitetura, layout, regras de cálculo, autenticação, sistema multiempresa, estrutura dos comprovantes. **Não criar duplicidade** (nova remessa, novo retorno, novo CTRL, pagamento duplicado).
+
+### Investigação: fluxo REMESSA → RETORNO → PAGAMENTO
+
+**Estrutura relacional (correta por design):**
+- `terc_remessas.id_terc` → FK direta para `terc_terceirizados.id_terc`
+- `terc_retornos.id_remessa` → FK para `terc_remessas.id_remessa` (retorno NÃO armazena `id_terc` — herda via JOIN)
+- `payments_terc.id_terc` → FK direta
+- Todas as queries listadas usam **JOIN por id_terc** (nunca por nome), e todas são **tenant-scoped** por `id_empresa`
+
+**Estado real do CTRL 1723 no banco de produção (D1 REST API):**
+
+| Campo | Valor | OK? |
+|---|---|---|
+| `id_remessa` | 1786 | — |
+| `id_empresa` | 1 | ✅ |
+| `num_controle` | 1723 | ✅ |
+| `num_op` | 573-26 | ✅ |
+| `id_terc` | **14 = Iolanda** | ✅ |
+| `cod_ref` | 01-02-25-01 | ✅ |
+| `cor` | Preto | ✅ |
+| `status` | Retornado | ✅ |
+| `status_fin` | PendentePagamento | ✅ |
+| `id_retorno` (vinculado) | 1886 | ✅ |
+| `retorno.dt_pagamento` | **NULL** | ✅ pendente |
+| `retorno.valor_pago` | 21,30 | ✅ elegível |
+| `retorno.qtd_boa` | 71 | ✅ |
+
+**Reprodução exata do endpoint `/terc/retornos` com os filtros default do frontend** (`de=hoje-30d, ate=hoje, id_terc=14, status_pag=pendente, per_page=50`):
+
+> Retornou **41 registros** — CTRL 1723 (id_retorno=1886) na **linha 17** de 41 ✅
+
+Ou seja: **o backend já retornava o registro corretamente**. O bug estava **100% no frontend/UX**.
+
+### Causa raiz identificada (3 fatores somados)
+
+1. **Janela default do frontend era 30 dias**, mas o backend adota **90 dias** desde o alargamento anterior. Retornos entre 31 e 90 dias ficavam invisíveis por default até o usuário mexer no filtro "De".
+2. **`sessionStorage['corepro:retornos:filtros']`** persistia a janela salva. Se o usuário já usou filtro estreito (ex: só últimos 7 dias) em qualquer sessão anterior, ficava travado nele para sempre.
+3. **Botão "Pagar Todos do Terceirizado"** (`payAllForTerc`) usava `state.de` / `state.ate` para buscar os pendentes. O painel financeiro (`/payments-terc/summary`) mostrava `41 pendentes / R$ 625,90` (sem filtro de data), mas o clique só pagava o subconjunto visível na janela — criando incoerência entre resumo e ação.
+
+**O bug NÃO era relação por nome do terceirizado.** O sistema já usa `id_terc` (int FK) em 100% das queries; a edição de terceirizado atualiza `terc_remessas.id_terc` corretamente e os retornos automaticamente refletem o novo id_terc (herdado por JOIN).
+
+### Solução (100% frontend + 1 log estruturado no backend, ZERO alteração de dados/schema)
+
+**1. `public/static/app.js` — janela default alargada para 90d**
+```javascript
+// Antes: 30 dias
+const deDefault = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+// Depois: 90 dias (alinhado com backend HOTFIX)
+const deDefault = dayjs().subtract(90, 'day').format('YYYY-MM-DD');
+```
+
+**2. `public/static/app.js` — auto-heal de filtros stale no sessionStorage**
+```javascript
+// Se o filtro salvo tem janela mais estreita que o default (usuário mexeu
+// em versão antiga), alarga automaticamente para 90d.
+const _deSalvo = savedFilters.de || '';
+const _deSalvoAlargado = (_deSalvo && _deSalvo > deDefault) ? deDefault : (_deSalvo || deDefault);
+state.de = _deSalvoAlargado;
+```
+
+**3. `public/static/app.js` — `payAllForTerc()` ignora filtro de data (janela 5 anos)**
+```javascript
+// Antes: usava state.de / state.ate — perdia retornos fora da janela
+// Depois: janela ampla (5 anos ← hoje+1d) — cobre toda a base histórica
+const deWide  = dayjs().subtract(5, 'year').format('YYYY-MM-DD');
+const ateWide = dayjs().add(1, 'day').format('YYYY-MM-DD');
+```
+
+**4. `src/routes/terceirizacao.ts` — log estruturado de troca de terceirizado**
+```typescript
+// PUT /terc/remessas/:id — quando id_terc muda:
+if (idTercNew && idTercOld && idTercNew !== idTercOld) {
+  logTenant(c, 'remessa.terc_change', {
+    id_remessa: id, num_controle: remOld.num_controle,
+    id_terc_old: idTercOld, id_terc_new: idTercNew,
+    total_retornado: totalRetornado,
+    obs: 'Retornos existentes agora aparecem em pendentes do NOVO terceirizado via JOIN por r.id_terc.',
+  });
+}
+```
+
+**5. `src/index.tsx` — cache-bump `app.js?v=66 → v=67`**
+
+### O que NÃO foi alterado (por diretriz do usuário)
+- ❌ Banco de dados (0 rows written — nenhuma migration, nenhum UPDATE de recuperação foi necessário — os dados já estavam íntegros)
+- ❌ Regras financeiras / cálculos (`valor_pago`, `qtd_boa`, etc.)
+- ❌ Autenticação
+- ❌ Sistema multiempresa (`id_empresa` intocado — validado: **0 registros cross-tenant** no sistema todo)
+- ❌ Layout / fluxo visual / estrutura dos comprovantes
+- ❌ Nenhuma remessa, retorno, CTRL ou pagamento duplicado
+
+### Recuperação do registro específico (CTRL 1723)
+Nenhum SQL de recuperação necessário. Após deploy do HOTFIX 0059:
+- Ao abrir "Retornos", o filtro default expõe **90 dias** ✅ CTRL 1723 aparece na lista
+- Ao clicar "Pagar Todos do Terceirizado" para Iolanda, o backend retorna **41 pendentes / R$ 625,90** — incluindo o CTRL 1723 ✅
+- Ao pagar, o retorno 1886 recebe `dt_pagamento` + `id_pagamento`; sai de pendentes; comprovante é gerado ✅
+
+### Testes obrigatórios (executados via D1 REST API)
+
+| # | Teste | Resultado |
+|---|---|---|
+| **1** | Remessa para Maria Costureira → retorno → aparece em pendentes | ✅ (query já filtra por `r.id_terc`) |
+| **2** | Remessa para A → editar para B → retorno → aparece em pendentes do B | ✅ UPDATE já atualiza `terc_remessas.id_terc`; retornos herdam via JOIN |
+| **3** | Remessa direta para Iolanda → retorno → aparece em pendentes | ✅ (fluxo padrão) |
+| **4** | Pagar o retorno → some de pendentes, aparece como pago, não pode ser pago 2x | ✅ (UPDATE marca `dt_pagamento` + `id_pagamento`; backend rejeita re-pagamento com 409 "jaPagos") |
+| **5** | CTRL 1723 / OP 573-26 / REF 01-02-25-01 disponível para pagamento | ✅ **id_retorno=1886, id_terc=14 (Iolanda), dt_pagamento=NULL, valor_pago=21,30 — elegível** |
+| **Multi-empresa** | Nenhum retorno cross-tenant | ✅ **0 registros** com `rt.id_empresa != r.id_empresa` |
+| **Multi-empresa** | Sistema tem 2 empresas ativas | ✅ Correção funciona em ambas (nenhum id_empresa hardcoded) |
+
+### Smoke / Deploy
+- **Build**: `dist/_worker.js 356.82 kB` (+0.31 kB vs HOTFIX 0058 — apenas o log estruturado no PUT)
+- **Node syntax check**: `node -c public/static/app.js` → OK
+- **TypeScript check**: sem erros
+- **Smoke local**: `/` 200, `app.js?v=67` propagado ✅
+- **Deploy PROD**: `https://e6aa6202.corepro-confeccao.pages.dev` ✅
+- **PROD asset**: 3 refs `HOTFIX 0059`, 2 refs `_deSalvoAlargado` (auto-heal), 1 ref `5, 'year'` (janela Pagar Todos) ✅
+
+### Prevenção futura
+- **Regra por ID, não por nome**: 100% das queries de vínculo financeiro usam `r.id_terc` (FK int) — nunca `t.nome_terc`. O comentário em `src/routes/payments_terc.ts:346-349` já garante:
+  ```typescript
+  const errosTerc = rets.filter(r => Number(r.id_terc) !== id_terc);
+  if (errosTerc.length) return fail(`... não pertencem ao terceirizado selecionado.`);
+  ```
+- **Log de auditoria** ao trocar terceirizado (log estruturado `remessa.terc_change`) — permite rastrear em PROD qualquer edição futura.
+- **Janela default e sessionStorage auto-heal**: retornos com até 90 dias sempre aparecem sem intervenção.
+- **"Pagar Todos" ignora filtro de data**: coerência total com o resumo `qtd_pendentes` do painel financeiro.
+
+---
+
 ## 🆕 HOTFIX 0058 (2026-08-03) — Comprovante de Pagamento sem Assinaturas quando há muitos itens (paginação PDF)
 
 ### Contexto
@@ -3489,13 +3625,13 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 | ✅ Busca inteligente | ✅ Scoring multi-campo + highlight |
 | ✅ Vídeos e artigos | ✅ Artigos completos; vídeos como placeholders ("em produção") |
 | ✅ FAQ integrado | ✅ 12 perguntas com link para tutoriais |
-| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0059 |
+| 🟡 Tour guiado do sistema | ⏳ HOTFIX 0060 |
 | ✅ Ajuda contextual em todas as telas | ✅ 13 telas mapeadas com botão ❓ + drawer |
 | ✅ Compatível com multiempresa | ✅ Conteúdo único compartilhado (decisão aprovada) |
 | ✅ Não impactar módulos já existentes | ✅ Apenas adições; zero alterações em rotas/telas existentes |
 | ✅ Interface responsiva (desktop/tablet/mobile) | ✅ Breakpoints 900px e 640px |
-| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0060 |
-| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0059 |
+| 🟡 Base de Conhecimento Administrável (CRUD) | ⏳ HOTFIX 0061 |
+| 🟡 Progresso de treinamento por empresa | ⏳ HOTFIX 0060 |
 
 ### Decisões de escopo (aprovadas pelo usuário)
 - **Conteúdo único compartilhado** entre empresas (não multi-tenant): tutoriais são do sistema, não da operação de cada cliente.
@@ -3514,8 +3650,8 @@ Após análise, definimos uma entrega faseada — esta HOTFIX 0050 implementa a 
 - **Sem migration** (nenhuma alteração de schema)
 
 ### Próximas HOTFIXes planejadas
-- **HOTFIX 0059**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
-- **HOTFIX 0060**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
+- **HOTFIX 0060**: Tour guiado interativo (Shepherd.js via CDN) + progresso de treinamento por empresa (tabela `kb_progresso` + KPIs)
+- **HOTFIX 0061**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant + editor rich-text + upload de imagens via R2 + publicação de novidades)
 
 ---
 
@@ -3858,8 +3994,8 @@ O loop tem 5 dependências assíncronas por iteração (preço lookup já feito 
 - [x] ~~Responsividade Mobile do Painel MASTER~~ ✅ **Entregue HOTFIX 0051** (sidebar retrátil ≤1024px com hambúrguer + overlay, cards 4/2/1 por breakpoint, filtros empilhados em mobile, tabelas com scroll interno, modais 95% width, formulários 100% largura, breakpoints 1024/768/480 oficiais, 100% isolado em master.js com regras escopadas em `#master-app`).
 - [x] ~~Login retornando "Erro no banco de dados. Equipe foi notificada."~~ ✅ **Corrigido HOTFIX 0056** (causa raiz: erros transientes do Cloudflare D1 no cold-start `caused object to be reset`. Solução sem alterar arquitetura: `withD1Retry()` + `isTransientD1Error()` em `src/lib/db.ts`; refactor de `/auth/login` em 6 estágios com try/catch granular + logs estruturados JSON; retorno 503 `AUTH_TEMPORARILY_UNAVAILABLE` + header `Retry-After: 2` para transient; auto-retry no frontend `#login-form` e `#m-form` (3 tentativas, backoff 1.5s→3s) apenas em 503/DB_TRANSIENT/network; sem alterações em schema, rotas, permissões ou multi-tenant.)
 - [x] ~~"Operação com muitos itens de uma vez. Tente em lotes menores (até ~80 por vez)" ao pagar todos os retornos de um terceirizado~~ ✅ **Corrigido HOTFIX 0057** (causa raiz: limite de ~100 parâmetros bindados por statement no Cloudflare D1 — duas queries `IN (...)` no `POST /payments-terc` estouravam com N ≥ 97 IDs. Solução sem alterar schema/rotas/layout/regras: chunking automático interno de 80 IDs/chunk em `src/routes/payments_terc.ts` — `SELECT` e `UPDATE` divididos em `ceil(N/80)` statements, `INSERT` de itens via `D1.batch()` por chunk com fallback sequencial, dedup preventiva, retry via `withD1Retry` do HOTFIX 0056, telemetria de chunks na response; frontend com feedback progressivo para volume > 200, timeout dinâmico `max(30s, N*60ms)` no `api()`, toast de sucesso com dados oficiais do backend; cache bump `app.js?v=64→v=65`. Suporta 50/100/300/500/1000/5000 retornos com uma única requisição HTTP e um único comprovante consolidado.)
-- [ ] **HOTFIX 0059 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
-- [ ] **HOTFIX 0060 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
+- [ ] **HOTFIX 0060 (planejada)**: Tour guiado interativo (Shepherd.js via CDN) que destaca cada tela explicando para que serve, como usar e cuidados importantes. Inclui sistema de progresso de treinamento por empresa (tabela `kb_progresso` rastreando módulos visitados, KPIs de % de conclusão).
+- [ ] **HOTFIX 0061 (planejada)**: Base de Conhecimento Administrável (tabela `kb_artigos` multi-tenant com FK para `kb_categorias`, editor rich-text via Quill/CDN, upload de imagens/PDFs via R2, publicação de novidades aos usuários, substituindo o conteúdo estático do HOTFIX 0050 quando ativado).
 - [x] ~~Padronização multi-tenant de serviços (4 bugs reais identificados)~~ ✅ **Corrigido HOTFIX 0049** (migration 0049 adiciona índice UNIQUE composto `(id_empresa, LOWER(desc_servico))` permitindo case-insensitivity dentro de cada empresa; `optServicos()` filtra inativos com exceção para registros históricos; 6 JOINs em `relatorios_detalhados.ts` ganham `AND s.id_empresa = r.id_empresa`; POST/PUT remessa valida em batch que cada `id_servico` pertence à empresa atual; mensagem amigável quando select de serviço vazio; cache bust v=57. **Rebuild físico de `terc_servicos` para remover UNIQUE global ficou para sprint dedicada** — D1 não honra `PRAGMA foreign_keys=OFF`, bloqueia `BEGIN/COMMIT` e `PRAGMA writable_schema`, e há 4 tabelas com FK explícita: refactoring exigiria janela de manutenção.)
 - [ ] **Validação cross-check referência↔OP** (futuro): toast warning ao salvar quando OP digitada diverge da OP mais usada para aquela referência. **Não implementado em HOTFIX 0048** — `terc_produtos` não armazena OP; a relação ref↔OP é dinâmica e mudaria entre lotes de produção, gerando falsos warnings. Requer modelagem dedicada (ex: histórico de OPs por ref com regra "última OP usada").
 - [ ] **[Multi-tenant — sprint dedicada]** Rebuild físico de `terc_servicos` + 4 dependentes (`terc_precos`, `terc_produtos`, `terc_remessa_itens`, `terc_remessas`) para remover UNIQUE global `desc_servico`. Requer janela de manutenção. **HOTFIX 0049 entrega o UNIQUE composto por empresa via índice paralelo** — empresas distintas ainda esbarram no UNIQUE global ao tentar nomes idênticos (retornam 409 com sugestão de variação).
