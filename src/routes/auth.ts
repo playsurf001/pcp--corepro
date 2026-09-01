@@ -1,7 +1,7 @@
 // Rotas de autenticação
 import { Hono } from 'hono';
 import type { Bindings } from '../lib/db';
-import { ok, fail, audit, toInt, withD1Retry, isTransientD1Error } from '../lib/db';
+import { ok, fail, audit, toInt, withD1Retry, isTransientD1Error, isQuotaExceededError } from '../lib/db';
 import {
   hashSenha,
   randomHex,
@@ -48,6 +48,25 @@ function serviceUnavailable(reason: string, ref?: string) {
       ref: ref || undefined,
     }),
     { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } }
+  );
+}
+
+/**
+ * HOTFIX 0062 — resposta específica quando a cota diária do D1 free tier
+ * foi esgotada. Diferente de um transitório curto: aqui o retry NÃO vai
+ * resolver dentro do mesmo dia. Retornamos 503 (mesma classe de "não
+ * derruba sessão") mas com Retry-After longo (900s = 15min) e mensagem
+ * clara — o frontend mostra o aviso sem forçar re-login.
+ */
+function quotaExceeded(reason: string) {
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: 'Cota diária do banco de dados atingida. O serviço será restabelecido automaticamente à meia-noite (UTC). Sua sessão será preservada.',
+      code: 'DB_QUOTA_EXCEEDED',
+      hint: reason,
+    }),
+    { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '900' } }
   );
 }
 
@@ -140,6 +159,10 @@ app.post('/auth/login', async (c) => {
     );
   } catch (e: any) {
     logAuthError('select-user', e, { login, ip });
+    // HOTFIX 0062 — cota diária esgotada: 503 explícito com Retry-After longo
+    if (isQuotaExceededError(e)) {
+      return quotaExceeded('quota-exceeded-select-user');
+    }
     if (isTransientD1Error(e)) {
       return serviceUnavailable('storage-transient-select-user');
     }
@@ -198,6 +221,10 @@ app.post('/auth/login', async (c) => {
     );
   } catch (e: any) {
     logAuthError('criar-sessao', e, { login, id_usuario: u.id_usuario });
+    // HOTFIX 0062 — cota diária esgotada: 503 explícito
+    if (isQuotaExceededError(e)) {
+      return quotaExceeded('quota-exceeded-criar-sessao');
+    }
     if (isTransientD1Error(e)) {
       return serviceUnavailable('storage-transient-criar-sessao');
     }

@@ -186,9 +186,94 @@ export function isTransientD1Error(err: any): boolean {
     msg.includes('starting up d1 db storage') ||
     msg.includes('network connection lost') ||
     msg.includes('storage caused object') ||
-    (msg.includes('internal error') && msg.includes('d1'))
+    (msg.includes('internal error') && msg.includes('d1')) ||
+    // HOTFIX 0062 — cota diária do D1 free tier esgotada.
+    // Não é "transitória" no sentido técnico (retry não resolve dentro do dia),
+    // mas do ponto de vista do USUÁRIO é uma falha temporária de infra —
+    // não deve derrubar sessão, não deve mostrar 500 assustador, e
+    // reseta automaticamente à meia-noite UTC.
+    isQuotaExceededError(err)
   );
 }
+
+/**
+ * HOTFIX 0062 — detecta especificamente o erro de cota diária do D1 free tier.
+ * Mensagem observada em prod:
+ *   "D1_ERROR: Your account has exceeded D1's free tier daily row read limit.
+ *    Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue."
+ * Retorna true também para "read limit" e "write limit" para robustez.
+ */
+export function isQuotaExceededError(err: any): boolean {
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('exceeded d1') ||
+    msg.includes('free tier daily') ||
+    msg.includes('daily row read limit') ||
+    msg.includes('daily row write limit') ||
+    (msg.includes('quota') && msg.includes('exceeded')) ||
+    (msg.includes('rate limit') && msg.includes('d1'))
+  );
+}
+
+/* ================================================================
+ * HOTFIX 0062 — CACHE IN-MEMORY POR ISOLATE
+ *
+ * Cloudflare Workers mantém memória viva ENTRE requests no mesmo
+ * isolate (~30-60 min típico). Podemos cachear resultados de queries
+ * hot para reduzir DRASTICAMENTE o número de reads no D1.
+ *
+ * Alvos principais (executados em CADA request autenticada):
+ *   1. validarSessao — 1 SELECT com JOIN, ~7 reads/request
+ *   2. tenantStatusGuard — 1 SELECT em companies, ~1 read/request
+ *
+ * Com cache de 60s (sessão) e 5min (empresa), a mesma pessoa navegando
+ * o dashboard passa de ~10 reads/request → ~1 read/minuto.
+ *
+ * Cada isolate tem seu próprio cache — não há coerência global, mas
+ * TTL curto de sessão garante que logout/troca-de-senha reflita
+ * rapidamente. Emergência: /api/health/cache-flush limpa tudo.
+ * ================================================================ */
+
+type CacheEntry<T> = { value: T; expiresAt: number };
+
+/** Cache genérico com TTL em ms. Isolate-scoped (não sobrevive a cold-start). */
+export class TTLCache<K, V> {
+  private map = new Map<K, CacheEntry<V>>();
+  private hits = 0;
+  private misses = 0;
+  constructor(private maxSize = 2000) {}
+  get(key: K): V | undefined {
+    const e = this.map.get(key);
+    if (!e) { this.misses++; return undefined; }
+    if (e.expiresAt < Date.now()) {
+      this.map.delete(key);
+      this.misses++;
+      return undefined;
+    }
+    this.hits++;
+    return e.value;
+  }
+  set(key: K, value: V, ttlMs: number) {
+    // LRU-ish: se atingir maxSize, remove o mais antigo (primeira chave inserida)
+    if (this.map.size >= this.maxSize) {
+      const first = this.map.keys().next().value;
+      if (first !== undefined) this.map.delete(first);
+    }
+    this.map.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+  delete(key: K) { this.map.delete(key); }
+  clear() { this.map.clear(); this.hits = 0; this.misses = 0; }
+  stats() {
+    return { size: this.map.size, hits: this.hits, misses: this.misses };
+  }
+}
+
+/** Cache de sessões válidas: token → user row. TTL curto (60s). */
+export const sessionCache = new TTLCache<string, any>(2000);
+
+/** Cache de empresas ativas: id_empresa → row. TTL longo (5min). */
+export const empresaCache = new TTLCache<number, any>(500);
 
 /**
  * Executa uma operação D1 com retry automático em erros transitórios.

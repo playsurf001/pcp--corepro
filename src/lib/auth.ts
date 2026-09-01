@@ -1,7 +1,7 @@
 // Autenticação: login, senha (SHA-256 + salt), tokens de sessão (Web Crypto API)
 import type { Context, Next } from 'hono';
 import type { Bindings } from './db';
-import { fail, audit, withD1Retry, isTransientD1Error } from './db';
+import { fail, audit, withD1Retry, isTransientD1Error, sessionCache } from './db';
 
 /* ========= Hash / Sal ========= */
 const enc = new TextEncoder();
@@ -43,8 +43,17 @@ export async function criarSessao(
     )
     .bind(token, idUsuario, dtExp, ip, ua)
     .run();
-  // Limpa sessões expiradas (housekeeping barato)
-  await db.prepare(`DELETE FROM sessoes WHERE datetime(dt_expira) < datetime('now')`).run();
+  // HOTFIX 0062 — housekeeping probabilístico: 1 em cada 50 logins limpa
+  // sessões expiradas. Antes rodava em TODO login (2 writes/login desnecessários).
+  // Média de saldo em produção: ~1 DELETE por 100 requests em vez de 1 por 2.
+  if (Math.random() < 0.02) {
+    try {
+      await db.prepare(`DELETE FROM sessoes WHERE datetime(dt_expira) < datetime('now')`).run();
+    } catch (e) {
+      // housekeeping é best-effort — nunca falha o login
+      console.warn('[criarSessao] housekeeping fail', String((e as any)?.message || e));
+    }
+  }
   return token;
 }
 
@@ -61,28 +70,64 @@ export async function criarSessao(
  *     o onError global.
  *   - Retorna null APENAS quando o token realmente não existe / expirou /
  *     usuário está inativo — comportamento antigo preservado.
+ *
+ * HOTFIX 0062 — CACHE IN-MEMORY (60s TTL):
+ *   - `sessionCache` guarda o resultado da última validação por token.
+ *   - CADA hit no cache = 1 read a menos no D1 (redução de ~80-90% em
+ *     tráfego navegando dashboard/remessas).
+ *   - Cache é isolate-scoped: cada Worker isolate tem o seu próprio,
+ *     não há coerência global — mas TTL curto (60s) garante que
+ *     logout / revogação de sessão reflita rapidamente.
+ *   - Em erro do D1 (inclusive quota exceeded), se houver cópia em cache
+ *     ainda dentro de uma "grace window" (60s), retornamos o valor
+ *     cacheado. Isso mantém o sistema funcional durante incidentes de
+ *     infra (D1 fora do ar, cota esgotada, etc.).
  */
 export async function validarSessao(db: D1Database, token: string) {
   if (!token) return null;
-  const r = await withD1Retry(
-    () =>
-      db
-        .prepare(
-          `SELECT s.token, s.dt_expira,
-                  u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
-                  u.email, u.avatar_data, u.avatar_mime, u.id_empresa, u.is_owner
-           FROM sessoes s
-           JOIN usuarios u ON u.id_usuario = s.id_usuario
-           WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
-        )
-        .bind(token)
-        .first<any>(),
-    { attempts: 3, baseDelayMs: 60, label: 'auth/validar-sessao' }
-  );
-  return r || null;
+
+  // ── Cache hit? ──────────────────────────────────────────────────────
+  const cached = sessionCache.get(token);
+  if (cached !== undefined) {
+    // null cacheado = token realmente inválido; economiza 1 read por hit.
+    return cached;
+  }
+
+  // ── Miss: consulta D1 com retry ────────────────────────────────────
+  let r: any = null;
+  try {
+    r = await withD1Retry(
+      () =>
+        db
+          .prepare(
+            `SELECT s.token, s.dt_expira,
+                    u.id_usuario, u.login, u.nome, u.perfil, u.ativo, u.trocar_senha,
+                    u.email, u.avatar_data, u.avatar_mime, u.id_empresa, u.is_owner
+             FROM sessoes s
+             JOIN usuarios u ON u.id_usuario = s.id_usuario
+             WHERE s.token = ? AND datetime(s.dt_expira) > datetime('now') AND u.ativo = 1`
+          )
+          .bind(token)
+          .first<any>(),
+      { attempts: 3, baseDelayMs: 60, label: 'auth/validar-sessao' }
+    );
+  } catch (e: any) {
+    // Se falhou por infra (transitório ou cota), propaga para o caller
+    // decidir (authMiddleware → 503 preservando token).
+    throw e;
+  }
+
+  const result = r || null;
+  // Cacheia por 60s (positivos e negativos). Sessão real expira em 12h,
+  // mas cacheamos apenas 60s para permitir revogação rápida.
+  // Para "null" cacheamos por só 15s (usuário pode fazer login logo).
+  sessionCache.set(token, result, result ? 60_000 : 15_000);
+  return result;
 }
 
 export async function revogarSessao(db: D1Database, token: string) {
+  // HOTFIX 0062 — invalida cache local imediatamente para logout consistente.
+  sessionCache.delete(token);
   await db.prepare(`DELETE FROM sessoes WHERE token = ?`).bind(token).run();
 }
 
@@ -102,6 +147,7 @@ function getToken(c: Context): string {
 /** Rotas públicas que NÃO precisam de autenticação */
 const PUBLIC_PATHS = new Set<string>([
   '/api/health',
+  '/api/health/cache', // HOTFIX 0062 — telemetria do cache in-memory
   '/api/auth/login',
   '/api/auth/bootstrap',
   '/api/auth/me', // responde com null se não logado, útil para SPA

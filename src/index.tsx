@@ -171,6 +171,19 @@ app.get('/api/health', (c) =>
   })
 );
 
+// HOTFIX 0062 — telemetria do cache in-memory (público, útil para debug)
+// Mostra o hit-rate do cache de sessões e empresas para monitorar quanto
+// estamos economizando de reads no D1.
+app.get('/api/health/cache', async (c) => {
+  const { sessionCache, empresaCache } = await import('./lib/db');
+  return c.json({
+    ok: true,
+    sessions: sessionCache.stats(),
+    empresas: empresaCache.stats(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // ÁREA MASTER (Super Admin) — isolada do auth comum
 // Registrar ANTES do authMiddleware geral para não conflitar.
@@ -296,7 +309,7 @@ function renderSPA(): string {
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="/static/core.js?v=4"></script>
   <script src="/static/support_content.js?v=58"></script>
-  <script src="/static/app.js?v=69"></script>
+  <script src="/static/app.js?v=70"></script>
   <script src="/static/relatorios_det.js?v=6"></script>
 </body>
 </html>`;

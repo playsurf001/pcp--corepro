@@ -3,7 +3,7 @@
 // Endpoints protegidos: /api/master/*
 import type { Context, Next } from 'hono';
 import type { Bindings } from './db';
-import { fail, withD1Retry, isTransientD1Error } from './db';
+import { fail, withD1Retry, isTransientD1Error, empresaCache } from './db';
 import { hashSenha, randomHex } from './auth';
 
 /* ========= Sessões Master ========= */
@@ -149,26 +149,34 @@ export function tenantStatusGuard() {
     //     suspenso do que quebrar TODAS as requests de tenants válidos por
     //     uma falha momentânea de storage. O onError global mantém o
     //     comportamento correto para erros determinísticos.
-    let empresa: any = null;
-    try {
-      empresa = await withD1Retry(
-        () =>
-          c.env.DB.prepare(
-            `SELECT status, bloqueada_em, motivo_bloqueio FROM companies WHERE id_empresa = ?`
-          ).bind(id_empresa).first<any>(),
-        { attempts: 3, baseDelayMs: 60, label: 'tenant-status-guard' }
-      );
-    } catch (e: any) {
-      const transient = isTransientD1Error(e);
-      console.error('[tenantStatusGuard]', JSON.stringify({
-        path, id_empresa, transient, error: String(e?.message || e).slice(0, 300),
-      }));
-      if (transient) {
-        // Fail-open em falhas transitórias: sessão preservada, próxima request tentará de novo.
-        return next();
+    //
+    // HOTFIX 0062 — Cache in-memory de 5min. Status de empresa muda muito
+    // pouco (bloqueio manual admin, mudança de plano). Cache reduz reads
+    // do D1 em ~99% durante uso normal.
+    let empresa: any = empresaCache.get(id_empresa);
+    if (empresa === undefined) {
+      try {
+        empresa = await withD1Retry(
+          () =>
+            c.env.DB.prepare(
+              `SELECT status, bloqueada_em, motivo_bloqueio FROM companies WHERE id_empresa = ?`
+            ).bind(id_empresa).first<any>(),
+          { attempts: 3, baseDelayMs: 60, label: 'tenant-status-guard' }
+        );
+        // Cacheia por 5min (positivos e negativos)
+        empresaCache.set(id_empresa, empresa || null, 5 * 60_000);
+      } catch (e: any) {
+        const transient = isTransientD1Error(e);
+        console.error('[tenantStatusGuard]', JSON.stringify({
+          path, id_empresa, transient, error: String(e?.message || e).slice(0, 300),
+        }));
+        if (transient) {
+          // Fail-open em falhas transitórias: sessão preservada, próxima request tentará de novo.
+          return next();
+        }
+        // Erro determinístico → propaga
+        throw e;
       }
-      // Erro determinístico → propaga
-      throw e;
     }
 
     if (!empresa) {

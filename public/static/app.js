@@ -125,6 +125,7 @@ const _TRANSIENT_CODES = new Set([
   'AUTH_TEMPORARILY_UNAVAILABLE',
   'DB_TRANSIENT',
   'DB_BUSY',
+  'DB_QUOTA_EXCEEDED', // HOTFIX 0062 — cota diária D1; sessão preservada
 ]);
 // Status HTTP que devem entrar em retry automático
 const _TRANSIENT_STATUS = new Set([0, 502, 503, 504]);
@@ -13346,12 +13347,21 @@ function renderLogin(msg) {
           return;
         }
 
-        // Erros transitórios (503 / DB_TRANSIENT / AUTH_TEMPORARILY_UNAVAILABLE)
+        // Erros transitórios (503 / DB_TRANSIENT / AUTH_TEMPORARILY_UNAVAILABLE / DB_QUOTA_EXCEEDED)
         const code = r.data?.code || '';
         const isTransient = r.status === 503
           || code === 'DB_TRANSIENT'
           || code === 'AUTH_TEMPORARILY_UNAVAILABLE'
-          || code === 'DB_BUSY';
+          || code === 'DB_BUSY'
+          || code === 'DB_QUOTA_EXCEEDED';
+
+        // HOTFIX 0062 — cota diária esgotada: retry não vai ajudar dentro do dia.
+        // Mostra mensagem específica e para de tentar.
+        if (code === 'DB_QUOTA_EXCEEDED') {
+          $msg.innerHTML = `<span class="text-amber-500">⚠ ${r.data?.error || 'Cota diária do banco atingida. O serviço volta automaticamente à meia-noite (UTC).'}</span>`;
+          setBtn('Entrar', false);
+          return;
+        }
 
         if (isTransient && attempt < MAX_TRIES) {
           $msg.innerHTML = `<span class="text-amber-500">Serviço iniciando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
