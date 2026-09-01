@@ -160,11 +160,11 @@ app.post('/auth/login', async (c) => {
         .prepare(`SELECT id_usuario, senha_hash, senha_salt FROM usuarios WHERE login=? AND ativo=1`)
         .bind(login)
         .first<any>(),
-      // HOTFIX 0063 — pós-upgrade Cloudflare: durante a propagação do plano
-      // pago (accounting), o rate-limit do D1 pode retornar quota exceeded em
-      // uma request e liberar na próxima. Aumentamos retries e backoff aqui
-      // (path crítico) para maximizar chance de login sem intervenção do usuário.
-      { attempts: 6, baseDelayMs: 120, label: 'auth-login/select-user' }
+      // HOTFIX 0065 — pós-upgrade Cloudflare: retry mínimo controlado.
+      // 2 tentativas apenas (não 6 como antes — amplificava a fila do D1).
+      // Uma falha real de sobrecarga deve emergir para o cliente decidir,
+      // não ser mascarada por 6 retries que sobrecarregam ainda mais o banco.
+      { attempts: 2, baseDelayMs: 200, label: 'auth-login/select-user' }
     );
   } catch (e: any) {
     logAuthError('select-user', e, { login, ip });
@@ -226,9 +226,9 @@ app.post('/auth/login', async (c) => {
   try {
     token = await withD1Retry(
       () => criarSessao(c.env.DB, u.id_usuario, ip, ua),
-      // HOTFIX 0063 — mesmo motivo do select-user: paciência maior para o
-      // INSERT em sessoes (path crítico do login).
-      { attempts: 6, baseDelayMs: 120, label: 'auth-login/criar-sessao' }
+      // HOTFIX 0065 — retry mínimo controlado (era 6, agora 2).
+      // Evita amplificar carga sobre o D1 quando ele já está sob pressão.
+      { attempts: 2, baseDelayMs: 200, label: 'auth-login/criar-sessao' }
     );
   } catch (e: any) {
     logAuthError('criar-sessao', e, { login, id_usuario: u.id_usuario });

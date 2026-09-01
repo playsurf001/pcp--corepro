@@ -1346,18 +1346,31 @@ const TERC = {
   setores: [], servicos: [], colecoes: [], terceirizados: [], produtos: [], cores: [],
   async load(force = false) {
     if (!force && this.terceirizados.length) return;
-    const [rs1, rs2, rs3, rs4, rs5, rs6] = await Promise.all([
+    // HOTFIX 0065 — CONTROLE DE CONCORRÊNCIA
+    // Antes: 6 requests em paralelo (Promise.all com 6 endpoints) — batia
+    // no D1 simultaneamente, saturando a fila em cold-start / picos de carga.
+    // Agora: 3 grupos de até 2 requests em série, cada grupo aguarda o
+    // anterior. Total de tempo aumenta marginalmente (~50-100ms), mas
+    // a carga instantânea no D1 cai pela metade e o comportamento é estável.
+    // NÃO removemos nenhuma chamada nem alteramos o resultado final.
+    const [rs1, rs2] = await Promise.all([
       api('get', '/terc/setores'),
       api('get', '/terc/servicos'),
-      api('get', '/terc/colecoes'),
-      api('get', '/terc/terceirizados'),
-      api('get', '/terc/produtos', null, { silent: true }).catch(() => ({ data: [] })),
-      api('get', '/terc/cores', null, { silent: true }).catch(() => ({ data: [] })),
     ]);
     this.setores = rs1.data || [];
     this.servicos = rs2.data || [];
+
+    const [rs3, rs4] = await Promise.all([
+      api('get', '/terc/colecoes'),
+      api('get', '/terc/terceirizados'),
+    ]);
     this.colecoes = rs3.data || [];
     this.terceirizados = rs4.data || [];
+
+    const [rs5, rs6] = await Promise.all([
+      api('get', '/terc/produtos', null, { silent: true }).catch(() => ({ data: [] })),
+      api('get', '/terc/cores', null, { silent: true }).catch(() => ({ data: [] })),
+    ]);
     this.produtos = rs5.data || [];
     this.cores = rs6.data || [];
   },
@@ -13302,17 +13315,16 @@ function renderLogin(msg) {
     };
     setBtn('Entrando...');
 
-    // HOTFIX 0056 — Auto-retry no frontend para erros TRANSITÓRIOS do D1
-    // O backend já faz até 3 tentativas internamente; aqui adicionamos mais
-    // 2 tentativas no client (2s de espera cada) para cobrir cold-start
-    // extremo do worker+D1. Não faz retry em 401 (credenciais erradas).
+    // HOTFIX 0065 — CADA CLIQUE = 1 tentativa + no máximo 1 retry controlado.
+    // Antes: MAX_TRIES=5 amplificava a carga sobre o D1 (até 5 chamadas por clique).
+    // Agora: 1 tentativa principal + 1 retry ÚNICO apenas para 503 transiente.
+    // Se falhar, o usuário vê o erro e decide clicar em "Entrar" de novo.
+    // Isso RESPEITA a regra "NÃO usar retry como solução" e reduz a fila do D1.
     const payload = {
       login: $('#login-login').value.trim(),
       senha: $('#login-senha').value,
     };
-    // HOTFIX 0063 — pós-upgrade Cloudflare: enquanto o accounting propaga,
-    // aumentamos as tentativas do login para cobrir picos de rate-limit.
-    const MAX_TRIES = 5;
+    const MAX_TRIES = 2; // 1 tentativa + 1 retry único
     let lastErr = null;
 
     for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
@@ -13323,15 +13335,14 @@ function renderLogin(msg) {
         });
 
         if (r.status >= 200 && r.status < 300 && r.data?.data?.token) {
-          // ✅ Sucesso
+          // ✅ Sucesso — o backend já retorna todos os dados necessários
+          // do usuário no payload do login. NÃO chamamos /auth/me aqui
+          // (era chamada duplicada — o backend acabou de INSERIR a sessão
+          // e /auth/me faria SELECT dela novamente, dobrando o custo do login).
+          // Se precisar de campos adicionais (empresa, avatar), o bootApp()
+          // → renderLayout() já os buscará via cache/rotas subsequentes.
           AUTH.setToken(r.data.data.token);
-          let usuario = r.data.data.usuario;
-          try {
-            const me = await axios.get(API + '/auth/me', {
-              headers: { Authorization: 'Bearer ' + r.data.data.token }
-            });
-            if (me.data?.data) usuario = { ...usuario, ...me.data.data };
-          } catch {}
+          const usuario = r.data.data.usuario;
           AUTH.setUser(usuario);
           state.user = usuario;
           if (state.user.trocar_senha) {
@@ -13350,6 +13361,7 @@ function renderLogin(msg) {
         }
 
         // Erros transitórios (503 / DB_TRANSIENT / AUTH_TEMPORARILY_UNAVAILABLE / DB_QUOTA_EXCEEDED)
+        // HOTFIX 0065 — apenas UMA retry silenciosa, sem contador visível ao usuário.
         const code = r.data?.code || '';
         const isTransient = r.status === 503
           || code === 'DB_TRANSIENT'
@@ -13357,41 +13369,31 @@ function renderLogin(msg) {
           || code === 'DB_BUSY'
           || code === 'DB_QUOTA_EXCEEDED';
 
-        // HOTFIX 0063 — pós-upgrade Cloudflare: DB_QUOTA_EXCEEDED voltou a ser
-        // transitório (accounting/rate-limit da Cloudflare propagando). Tratamos
-        // como transient com retry automático e mensagem neutra.
-        if (code === 'DB_QUOTA_EXCEEDED' && attempt < MAX_TRIES) {
-          $msg.innerHTML = `<span class="text-amber-500">Banco sobrecarregado, tentando novamente (${attempt + 1}/${MAX_TRIES})...</span>`;
-          setBtn(`Aguardando (${attempt}/${MAX_TRIES})...`);
-          await new Promise(res => setTimeout(res, 2000 * attempt));
-          continue;
-        }
-
         if (isTransient && attempt < MAX_TRIES) {
-          $msg.innerHTML = `<span class="text-amber-500">Serviço iniciando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
-          setBtn(`Aguardando (${attempt}/${MAX_TRIES})...`);
-          // Backoff: 1.5s → 3s
-          await new Promise(res => setTimeout(res, 1500 * attempt));
+          // Backoff único de 1.5s, mensagem discreta sem contador de tentativas
+          $msg.innerHTML = `<span class="text-amber-500">Aguardando resposta do servidor...</span>`;
+          setBtn('Aguardando...');
+          await new Promise(res => setTimeout(res, 1500));
           continue;
         }
 
-        // Esgotou tentativas ou erro inesperado
+        // Esgotou tentativa OU erro inesperado — mostra mensagem clara e para
         lastErr = r.data?.error || `HTTP ${r.status}`;
         break;
       } catch (netErr) {
-        // Erro de rede — tenta de novo se ainda tem tentativas
+        // Erro de rede — tenta UMA vez a mais e para
         lastErr = netErr?.message || 'Erro de conexão';
         if (attempt < MAX_TRIES) {
-          $msg.innerHTML = `<span class="text-amber-500">Reconectando... tentativa ${attempt + 1}/${MAX_TRIES}</span>`;
-          setBtn(`Reconectando (${attempt}/${MAX_TRIES})...`);
-          await new Promise(res => setTimeout(res, 1500 * attempt));
+          $msg.innerHTML = `<span class="text-amber-500">Aguardando conexão...</span>`;
+          setBtn('Aguardando...');
+          await new Promise(res => setTimeout(res, 1500));
           continue;
         }
         break;
       }
     }
 
-    // Todas as tentativas falharam
+    // Falhou — usuário decide se clica em "Entrar" novamente
     $msg.textContent = lastErr || 'Não foi possível fazer login. Tente novamente em alguns segundos.';
     setBtn('Entrar', false);
   };
