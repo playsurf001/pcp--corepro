@@ -2116,7 +2116,79 @@ async function lookupPrecoHier(
 app.post('/terc/remessas', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
-  logTenant(c, 'remessa.create.start', { id_terc: b?.id_terc, itens: Array.isArray(b?.itens) ? b.itens.length : 0 });
+
+  // ============================================================
+  // HOTFIX 0066 — IDEMPOTÊNCIA CONTRA DUPLO POST
+  //
+  // O cliente envia um UUID único por clique via header 'Idempotency-Key'
+  // (ou no body como b.idempotency_key). Se a MESMA chave chegar novamente
+  // (duplo clique, retry, F5, reenvio pelo axios/browser), retornamos a
+  // resposta da primeira execução em vez de criar remessa duplicada.
+  //
+  // Escopo: (id_empresa, idempotency_key) — multi-tenant safe.
+  // Coluna: terc_remessas.idempotency_key (migration 0051).
+  // Índice: ux_remessas_idem UNIQUE parcial (WHERE key IS NOT NULL).
+  //
+  // Backward compatible: clientes antigos sem header continuam funcionando
+  // (mas sem proteção — o frontend deste hotfix sempre envia).
+  // ============================================================
+  const idempKey: string | null = (() => {
+    const h = c.req.header('idempotency-key') || c.req.header('Idempotency-Key');
+    if (h && typeof h === 'string' && h.trim()) return h.trim().slice(0, 100);
+    if (b?.idempotency_key && typeof b.idempotency_key === 'string' && b.idempotency_key.trim()) {
+      return b.idempotency_key.trim().slice(0, 100);
+    }
+    return null;
+  })();
+
+  if (idempKey) {
+    // Já processamos essa chave? Devolve o resultado existente.
+    // JOIN com terc_terceirizados só para consistência com o payload de resposta original.
+    const existing = await c.env.DB.prepare(
+      `SELECT id_remessa, num_controle, qtd_total, valor_total, preco_unit, tempo_peca,
+              dt_previsao, prazo_dias, status, lote_remessa_id
+       FROM terc_remessas
+       WHERE id_empresa=? AND idempotency_key=?
+       ORDER BY id_remessa ASC
+       LIMIT 500`
+    ).bind(id_empresa, idempKey).all<any>();
+
+    if (existing.results && existing.results.length > 0) {
+      const rows = existing.results;
+      const first = rows[0];
+      const ctrls = rows.map((r: any) => r.num_controle);
+      const lote = first.lote_remessa_id || null;
+      const totQtd = rows.reduce((a: number, r: any) => a + (Number(r.qtd_total) || 0), 0);
+      const totValor = rows.reduce((a: number, r: any) => a + (Number(r.valor_total) || 0), 0);
+
+      logTenant(c, 'remessa.create.idempotent-hit', {
+        idempKey, id_empresa, ctrls_count: ctrls.length,
+      });
+
+      return c.json(ok({
+        id: first.id_remessa,
+        num_controle: first.num_controle,
+        dt_previsao: first.dt_previsao,
+        prazo_dias: first.prazo_dias,
+        qtd_total: totQtd,
+        valor_total: totValor,
+        preco_unit: first.preco_unit,
+        tempo_peca: first.tempo_peca,
+        status: first.status,
+        itens_count: rows.length,
+        auto: { itens_processados: rows.length, idempotent: true },
+        lote_remessa_id: lote,
+        num_controles: ctrls,
+        idempotent: true, // flag para o frontend saber que foi hit de cache
+      }));
+    }
+  }
+
+  logTenant(c, 'remessa.create.start', {
+    id_terc: b?.id_terc,
+    itens: Array.isArray(b?.itens) ? b.itens.length : 0,
+    idempKey: idempKey ? idempKey.slice(0, 12) + '...' : null,
+  });
   if (!b.id_terc) return fail('Terceirizado é obrigatório');
 
   // SPRINT 2 — Limite de remessas/mês do plano
@@ -2264,20 +2336,48 @@ app.post('/terc/remessas', async (c) => {
     }
 
     const headIdCor = await resolveColorId(c.env.DB, head.cor, id_empresa);
-    const r = await c.env.DB.prepare(`
-      INSERT INTO terc_remessas
-        (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
-         qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
-         prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
-         status, status_fin, modo, observacao, criado_por, id_empresa, lote_remessa_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(num_controle, resolvedNumOp, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
-        head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
-        qtd_total, head._preco, valor_total, toInt(b.id_colecao) || null,
-        dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
-        diasFinal, tempo_max, efic, pess, min_dia,
-        status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa,
-        lote_remessa_id).run();
+    // HOTFIX 0066 — inclui idempotency_key para bloquear duplo POST via índice UNIQUE parcial.
+    // A checagem já foi feita antes (retorno cacheado se hit). Aqui é o INSERT real que grava
+    // a chave. Se dois POSTs entrarem em CORRIDA entre o SELECT e o INSERT, o índice UNIQUE
+    // parcial bloqueia o segundo — capturamos o erro e devolvemos a linha da 1ª execução.
+    let r: any;
+    try {
+      r = await c.env.DB.prepare(`
+        INSERT INTO terc_remessas
+          (num_controle, num_op, id_terc, id_setor, cod_ref, desc_ref, id_servico, cor, id_cor, grade,
+           qtd_total, preco_unit, valor_total, id_colecao, dt_saida, dt_envio, dt_inicio, dt_previsao,
+           prazo_dias, tempo_peca, efic_pct, qtd_pessoas, min_trab_dia,
+           status, status_fin, modo, observacao, criado_por, id_empresa, lote_remessa_id, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(num_controle, resolvedNumOp, toInt(b.id_terc), toInt(b.id_setor) || t.id_setor || null,
+          head.cod_ref || '', head._desc, head._idServ, head.cor || null, headIdCor, toInt(head.grade_num, 1),
+          qtd_total, head._preco, valor_total, toInt(b.id_colecao) || null,
+          dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
+          diasFinal, tempo_max, efic, pess, min_dia,
+          status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa,
+          lote_remessa_id, idempKey).run();
+    } catch (e: any) {
+      // Race: outra request com a mesma idempKey já inseriu. Buscamos e devolvemos.
+      const msg = String(e?.message || e).toLowerCase();
+      if (idempKey && (msg.includes('unique') || msg.includes('constraint'))) {
+        const found: any = await c.env.DB.prepare(
+          `SELECT id_remessa, num_controle, dt_previsao, prazo_dias
+           FROM terc_remessas
+           WHERE id_empresa=? AND idempotency_key=?
+           ORDER BY id_remessa ASC LIMIT 1`
+        ).bind(id_empresa, idempKey).first();
+        if (found) {
+          logTenant(c, 'remessa.create.race-detected', { idempKey: idempKey.slice(0, 12) + '...' });
+          return {
+            id_remessa: found.id_remessa as number,
+            num_controle: found.num_controle as number,
+            dt_previsao: found.dt_previsao as string,
+            prazo_dias: found.prazo_dias as number,
+          };
+        }
+      }
+      throw e; // erro diferente: propaga
+    }
     return { id_remessa: r.meta.last_row_id as number, num_controle, dt_previsao: dt_prev, prazo_dias: diasFinal };
   }
 

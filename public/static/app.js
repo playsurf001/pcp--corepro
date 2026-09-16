@@ -157,6 +157,12 @@ async function api(method, path, body, opts = {}) {
       const headers = {};
       const token = AUTH.getToken();
       if (token) headers['Authorization'] = 'Bearer ' + token;
+      // HOTFIX 0066 — Suporte a headers customizados (Idempotency-Key, etc.)
+      if (opts.headers && typeof opts.headers === 'object') {
+        for (const k of Object.keys(opts.headers)) {
+          if (opts.headers[k] != null) headers[k] = String(opts.headers[k]);
+        }
+      }
       // 🆕 Suporte a AbortController: passe opts.signal para cancelar requests
       const cfg = { method, url: API + path, data: body, headers };
       if (opts.signal) cfg.signal = opts.signal;
@@ -6041,7 +6047,40 @@ async function TERC_openRemModal(id, onSave) {
   });
 
   // ---- SALVAR (1 requisição em lote) ----
+  // HOTFIX 0066 — Proteção contra duplo clique / duplo POST:
+  // 1) Flag _isSaving bloqueia reentrada mesmo se o botão não estiver disabled.
+  // 2) UUID único é gerado na PRIMEIRA entrada e reutilizado se o usuário
+  //    conseguir clicar antes do disable (proteção defense-in-depth).
+  // 3) Header 'Idempotency-Key' informa o backend para deduplicar.
+  let _isSaving = false;
+  let _idempKey = null;
   $('#m-save').onclick = async () => {
+    // Guard: já está processando uma submissão? Ignore o clique.
+    if (_isSaving) {
+      console.warn('[remessa/save] clique ignorado — submissão em andamento');
+      return;
+    }
+    _isSaving = true;
+    // Gera UUID único por submissão. Se algum retry acontecer, é o MESMO UUID.
+    // crypto.randomUUID() está disponível em todos os browsers modernos + Workers.
+    _idempKey = (crypto.randomUUID && crypto.randomUUID()) ||
+                (Date.now() + '-' + Math.random().toString(36).slice(2));
+
+    // Estado visual "processando" no botão
+    const _saveBtn = $('#m-save');
+    const _prevHTML = _saveBtn?.innerHTML;
+    const _releaseBtn = () => {
+      _isSaving = false;
+      if (_saveBtn) {
+        _saveBtn.disabled = false;
+        if (_prevHTML) _saveBtn.innerHTML = _prevHTML;
+      }
+    };
+    if (_saveBtn) {
+      _saveBtn.disabled = true;
+      _saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Salvando...';
+    }
+
     _clearAllInvalid();
     const errs = [];
 
@@ -6169,10 +6208,12 @@ async function TERC_openRemModal(id, onSave) {
     if (errs.length > 0) {
       toast(`Corrija os campos destacados (${errs.length} erro(s)).`, 'error');
       _scrollToFirstError();
+      _releaseBtn(); // HOTFIX 0066 — libera botão em erro de validação
       return;
     }
     if (itensBody.length === 0) {
       toast('Adicione pelo menos 1 produto com grade preenchida', 'warning');
+      _releaseBtn(); // HOTFIX 0066 — libera botão
       return;
     }
 
@@ -6190,22 +6231,37 @@ async function TERC_openRemModal(id, onSave) {
       status: $('#m-status')?.value || 'AguardandoEnvio',
       observacao: $('#m-obs')?.value?.trim() || '',
       itens: itensBody,
+      // HOTFIX 0066 — idempotência: mesmo UUID no body e header (defense-in-depth)
+      idempotency_key: _idempKey,
     };
 
+    // HOTFIX 0066 — headers customizados incluindo Idempotency-Key.
+    // NOTA: opts.noRetry=true garante que o wrapper api() NÃO refaz este POST
+    // automaticamente. Mesmo que refizesse, o backend deduplicariam via UUID.
+    const _reqOpts = {
+      noRetry: true,
+      headers: { 'Idempotency-Key': _idempKey },
+    };
+
+    let _success = false;
     try {
       if (edit) {
-        await api('put', '/terc/remessas/' + id, body);
+        await api('put', '/terc/remessas/' + id, body, _reqOpts);
         toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
       } else {
         // 🆕 HOTFIX 0047: backend pode retornar { num_controles: [...], lote_remessa_id }
         // quando múltiplos itens — cada item vira 1 CTRL independente.
-        const resp = await api('post', '/terc/remessas', body);
+        // HOTFIX 0066: passa Idempotency-Key para evitar duplo POST.
+        const resp = await api('post', '/terc/remessas', body, _reqOpts);
         const data = resp?.data || {};
         const ctrls = Array.isArray(data.num_controles) ? data.num_controles : null;
         const lote = data.lote_remessa_id || null;
+        const idempotent = data.idempotent === true;
 
-        if (ctrls && ctrls.length > 1 && lote) {
-          // Múltiplos CTRLs gerados — mostra a lista para o usuário
+        if (idempotent) {
+          // Resposta veio do cache de idempotência — foi um retry / duplo POST.
+          toast('Remessa já criada anteriormente (duplicação evitada).', 'info');
+        } else if (ctrls && ctrls.length > 1 && lote) {
           const ctrlsStr = ctrls.length <= 5
             ? ctrls.join(', ')
             : `${ctrls.slice(0, 3).join(', ')}…${ctrls[ctrls.length - 1]}`;
@@ -6214,13 +6270,22 @@ async function TERC_openRemModal(id, onSave) {
             'success'
           );
         } else {
-          // Comportamento clássico (1 item = 1 CTRL)
           toast(`Remessa salva — ${itensBody.length} item(ns)`, 'success');
         }
       }
+      _success = true;
       m.remove();
       if (onSave) onSave();
-    } catch {}
+    } catch (e) {
+      // Erro real (validação, 4xx/5xx) — o wrapper api() já mostrou toast.
+      console.error('[remessa/save] falha', e);
+    } finally {
+      // HOTFIX 0066 — SEMPRE libera o botão. Se sucesso, o modal já foi
+      // removido; senão, o botão volta ao normal para nova tentativa.
+      if (!_success) _releaseBtn();
+      // Reset da chave para a próxima submissão (nova UUID no próximo clique).
+      _idempKey = null;
+    }
   };
 }
 
