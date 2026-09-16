@@ -7032,7 +7032,31 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
   recalc();
 
   card.querySelector('#m-cancel').onclick = () => m.remove();
+  // HOTFIX 0067 — Proteção contra duplo clique / duplo POST em Retornos
+  let _retIsSaving = false;
+  let _retIdempKey = null;
   card.querySelector('#m-save').onclick = async () => {
+    if (_retIsSaving) {
+      console.warn('[retorno/save] clique ignorado — submissão em andamento');
+      return;
+    }
+    _retIsSaving = true;
+    _retIdempKey = (crypto.randomUUID && crypto.randomUUID()) ||
+                   (Date.now() + '-' + Math.random().toString(36).slice(2));
+    const _saveBtnRet = card.querySelector('#m-save');
+    const _prevHTMLRet = _saveBtnRet?.innerHTML;
+    const _releaseBtnRet = () => {
+      _retIsSaving = false;
+      if (_saveBtnRet) {
+        _saveBtnRet.disabled = false;
+        if (_prevHTMLRet) _saveBtnRet.innerHTML = _prevHTMLRet;
+      }
+    };
+    if (_saveBtnRet) {
+      _saveBtnRet.disabled = true;
+      _saveBtnRet.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Salvando...';
+    }
+
     // Monta payload por item segundo a regra B:
     //  - qtd_boa = total_enviado − (refugo + conserto)
     //  - Grade retornada (soma) = qtd_boa, distribuída removendo primeiro do MENOR tamanho.
@@ -7079,9 +7103,10 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       });
     });
 
-    if (blocked) return;
+    if (blocked) { _releaseBtnRet(); return; }
     if (itensPayload.length === 0) {
       toast('Informe ao menos 1 item com quantidade retornada > 0', 'error');
+      _releaseBtnRet();
       return;
     }
 
@@ -7095,19 +7120,38 @@ async function TERC_openRetModal(idRemessa, onSave, idRetornoEdit) {
       valor_pago: valorPagoTotal,
       observacao: card.querySelector('#m-obs').value.trim(),
       itens: itensPayload,
+      // HOTFIX 0067 — idempotência
+      idempotency_key: _retIdempKey,
+    };
+    // HOTFIX 0067 — POST não faz retry automático + header Idempotency-Key
+    const _retReqOpts = {
+      noRetry: true,
+      headers: { 'Idempotency-Key': _retIdempKey },
     };
 
+    let _retSuccess = false;
     try {
       if (editing) {
-        await api('put', '/terc/retornos/' + idRetornoEdit, body);
+        await api('put', '/terc/retornos/' + idRetornoEdit, body, _retReqOpts);
         toast('Retorno atualizado com sucesso', 'success');
       } else {
-        await api('post', '/terc/retornos', body);
-        toast('Retorno registrado', 'success');
+        const resp = await api('post', '/terc/retornos', body, _retReqOpts);
+        const idempotent = resp?.data?.idempotent === true;
+        if (idempotent) {
+          toast('Retorno já registrado anteriormente (duplicação evitada).', 'info');
+        } else {
+          toast('Retorno registrado', 'success');
+        }
       }
+      _retSuccess = true;
       m.remove();
       if (onSave) onSave();
-    } catch {}
+    } catch (e) {
+      console.error('[retorno/save] falha', e);
+    } finally {
+      if (!_retSuccess) _releaseBtnRet();
+      _retIdempKey = null;
+    }
   };
 }
 
@@ -8191,14 +8235,26 @@ ROUTES.terc_retornos = async (main) => {
     document.body.appendChild(m);
     card.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
 
+    // HOTFIX 0067 — proteção reforçada contra duplo clique / duplo POST em pagamento.
+    // Este é o handler MAIS CRÍTICO (a auditoria detectou R$ 59,40 de pagamento em
+    // dobro no histórico do banco). Aplica: guard _isPaying + UUID + noRetry.
+    let _isPaying = false;
+    let _payIdempKey = null;
     document.getElementById('pm-confirm').onclick = async () => {
+      if (_isPaying) {
+        console.warn('[payment] clique ignorado — pagamento em andamento');
+        return;
+      }
+      _isPaying = true;
+      _payIdempKey = (crypto.randomUUID && crypto.randomUUID()) ||
+                     (Date.now() + '-' + Math.random().toString(36).slice(2));
+
       const dt = (document.getElementById('pm-dt')   ).value || hoje;
       const forma = (document.getElementById('pm-forma')).value;
       const obs = (document.getElementById('pm-obs')  ).value || '';
       const btn = document.getElementById('pm-confirm');
       const qtd = cfg.id_retornos.length;
       // HOTFIX 0057 — Feedback progressivo para pagamentos grandes.
-      // O backend faz chunking automático (80 por lote), invisível ao usuário.
       const isLarge = qtd > 200;
       btn.disabled = true;
       btn.innerHTML = isLarge
@@ -8208,7 +8264,6 @@ ROUTES.terc_retornos = async (main) => {
       card.querySelectorAll('[data-close]').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
       try {
         // HOTFIX 0057 — timeout estendido para pagamentos com muitos retornos
-        // (backend processa em chunks de 80; cada chunk ~200-400ms no D1).
         const timeoutMs = Math.max(30000, qtd * 60); // mínimo 30s, +60ms por retorno
         const r = await api('post', '/payments-terc', {
           id_terc: cfg.id_terc,
@@ -8216,14 +8271,24 @@ ROUTES.terc_retornos = async (main) => {
           dt_pagamento: dt,
           forma_pagamento: forma,
           observacao: obs,
-        }, { timeout: timeoutMs });
+          // HOTFIX 0067 — idempotência no body (defense-in-depth com o header)
+          idempotency_key: _payIdempKey,
+        }, {
+          timeout: timeoutMs,
+          // HOTFIX 0067 — POST não pode ser retentado automaticamente + header
+          noRetry: true,
+          headers: { 'Idempotency-Key': _payIdempKey },
+        });
         const idPag = Number(r?.data?.id_pagamento || 0);
         const qtdOk = Number(r?.data?.qtd_retornos || qtd);
         const valOk = Number(r?.data?.valor_total  || cfg.valor_total);
+        const wasIdempotent = r?.data?.idempotent === true;
         m.remove();
         toast(
-          `Pagamento registrado! ${fmt.int(qtdOk)} retorno(s) · ${TERC.fmtBRL(valOk)}`,
-          'success'
+          wasIdempotent
+            ? `Pagamento já registrado anteriormente (duplicação evitada) — ${fmt.int(qtdOk)} retorno(s) · ${TERC.fmtBRL(valOk)}`
+            : `Pagamento registrado! ${fmt.int(qtdOk)} retorno(s) · ${TERC.fmtBRL(valOk)}`,
+          wasIdempotent ? 'info' : 'success'
         );
         // Refresh lista + painel (invalidando cache para pegar dados frescos)
         cacheInvalidate();
@@ -8238,6 +8303,9 @@ ROUTES.terc_retornos = async (main) => {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-check mr-1"></i>Confirmar Pagamento';
         card.querySelectorAll('[data-close]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
+        // Libera o guard SÓ em erro — se sucesso, o modal foi removido
+        _isPaying = false;
+        _payIdempKey = null;
       }
     };
   }

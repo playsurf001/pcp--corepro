@@ -284,6 +284,65 @@ app.post('/payments-terc', async (c) => {
   const ip = getClientIP(c);
 
   const body = await c.req.json<any>().catch(() => ({}));
+
+  // ============================================================
+  // HOTFIX 0067 — IDEMPOTÊNCIA CONTRA DUPLO POST DE PAGAMENTO
+  //
+  // Este é o endpoint MAIS CRÍTICO: um duplo POST aqui gera pagamento
+  // em dobro. Já temos o índice UNIQUE ux_payment_terc_items_retorno
+  // que impede o mesmo id_retorno ser pago 2×, mas SEM idempotency_key
+  // um duplo POST via corrida pode:
+  //   1º POST: cria payments_terc id=X + items + marca retornos como pagos
+  //   2º POST: encontra retornos "não pagos" (por ainda estar em corrida)
+  //            e tenta inserir — o ux impediria itens, mas o cabeçalho
+  //            payments_terc já teria sido criado sem itens = "pagamento fantasma"
+  //
+  // Com idempotency_key, o 2º POST recebe HIT do cache e devolve o
+  // resultado da 1ª execução.
+  //
+  // Migration 0052 criou payments_terc.idempotency_key + UNIQUE parcial.
+  // ============================================================
+  const idempKey: string | null = (() => {
+    const h = c.req.header('idempotency-key') || c.req.header('Idempotency-Key');
+    if (h && typeof h === 'string' && h.trim()) return h.trim().slice(0, 100);
+    if (body?.idempotency_key && typeof body.idempotency_key === 'string' && body.idempotency_key.trim()) {
+      return String(body.idempotency_key).trim().slice(0, 100);
+    }
+    return null;
+  })();
+
+  if (idempKey) {
+    const existing = await c.env.DB.prepare(
+      `SELECT id_pagamento, id_terc, dt_pagamento, valor_total, qtd_retornos,
+              qtd_pecas_boas, forma_pagamento, status
+       FROM payments_terc
+       WHERE id_empresa=? AND idempotency_key=?
+       ORDER BY id_pagamento ASC LIMIT 1`
+    ).bind(id_empresa, idempKey).first<any>();
+    if (existing) {
+      // Busca nome do terceirizado para completar a resposta
+      const terc: any = await c.env.DB.prepare(
+        `SELECT nome_terc FROM terc_terceirizados WHERE id_terc=? AND id_empresa=?`
+      ).bind(existing.id_terc, id_empresa).first();
+      console.info(JSON.stringify({
+        scope: 'payments-terc', stage: 'idempotent-hit',
+        idempKey: idempKey.slice(0, 12) + '...', id_pagamento: existing.id_pagamento,
+        ts: new Date().toISOString(),
+      }));
+      return c.json(ok({
+        id_pagamento: existing.id_pagamento,
+        valor_total: existing.valor_total,
+        qtd_retornos: existing.qtd_retornos,
+        qtd_pecas_boas: existing.qtd_pecas_boas,
+        forma_pagamento: existing.forma_pagamento,
+        dt_pagamento: existing.dt_pagamento,
+        terceirizado: terc?.nome_terc || '',
+        status: existing.status,
+        idempotent: true,
+      }));
+    }
+  }
+
   const id_terc = toInt(body.id_terc);
   const id_retornos: number[] = Array.isArray(body.id_retornos)
     ? body.id_retornos.map((x: any) => toInt(x)).filter((x: number) => x > 0)
@@ -359,18 +418,47 @@ app.post('/payments-terc', async (c) => {
   const qtd_retornos   = rets.length;
 
   // ── 1) Insere cabeçalho do pagamento
-  const insP = await withD1Retry(
-    () => c.env.DB.prepare(`
-      INSERT INTO payments_terc (
+  // HOTFIX 0067 — grava idempotency_key + try/catch para corrida
+  let insP: any;
+  try {
+    insP = await withD1Retry(
+      () => c.env.DB.prepare(`
+        INSERT INTO payments_terc (
+          id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
+          forma_pagamento, observacao, status, usuario, ip_origem, idempotency_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Confirmado', ?, ?, ?)
+      `).bind(
         id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
-        forma_pagamento, observacao, status, usuario, ip_origem
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Confirmado', ?, ?)
-    `).bind(
-      id_empresa, id_terc, dt_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
-      forma_pagamento, observacao, login, ip
-    ).run(),
-    { attempts: 3, baseDelayMs: 60, label: 'payments-terc/insert-header' }
-  );
+        forma_pagamento, observacao, login, ip, idempKey
+      ).run(),
+      { attempts: 3, baseDelayMs: 60, label: 'payments-terc/insert-header' }
+    );
+  } catch (e: any) {
+    const msg = String(e?.message || e).toLowerCase();
+    if (idempKey && (msg.includes('unique') || msg.includes('constraint'))) {
+      // Corrida: outra request paralela já criou o pagamento com essa chave.
+      const found: any = await c.env.DB.prepare(
+        `SELECT id_pagamento, valor_total, qtd_retornos, qtd_pecas_boas,
+                forma_pagamento, dt_pagamento, status
+         FROM payments_terc
+         WHERE id_empresa=? AND idempotency_key=?
+         ORDER BY id_pagamento ASC LIMIT 1`
+      ).bind(id_empresa, idempKey).first();
+      if (found) {
+        console.info(JSON.stringify({
+          scope: 'payments-terc', stage: 'race-detected',
+          idempKey: idempKey.slice(0, 12) + '...', id_pagamento: (found as any).id_pagamento,
+          ts: new Date().toISOString(),
+        }));
+        return c.json(ok({
+          ...(found as any),
+          terceirizado: terc.nome_terc,
+          idempotent: true,
+        }));
+      }
+    }
+    throw e;
+  }
 
   const id_pagamento = Number(insP.meta?.last_row_id || 0);
   if (!id_pagamento) return c.json(fail('Falha ao registrar pagamento.', 500));

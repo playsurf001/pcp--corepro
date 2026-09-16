@@ -3916,6 +3916,50 @@ app.get('/terc/remessas/:id/retorno-context', async (c) => {
 app.post('/terc/retornos', async (c) => {
   const id_empresa = (c.get('id_empresa') as number) || 1;
   const b = await c.req.json();
+
+  // ============================================================
+  // HOTFIX 0067 — IDEMPOTÊNCIA CONTRA DUPLO POST DE RETORNO
+  //
+  // Mesmo padrão do HOTFIX 0066 em POST /terc/remessas.
+  // Chave escopo (id_empresa, idempotency_key) via migration 0052.
+  // ============================================================
+  const idempKey: string | null = (() => {
+    const h = c.req.header('idempotency-key') || c.req.header('Idempotency-Key');
+    if (h && typeof h === 'string' && h.trim()) return h.trim().slice(0, 100);
+    if (b?.idempotency_key && typeof b.idempotency_key === 'string' && b.idempotency_key.trim()) {
+      return b.idempotency_key.trim().slice(0, 100);
+    }
+    return null;
+  })();
+
+  if (idempKey) {
+    const existing = await c.env.DB.prepare(
+      `SELECT id_retorno, id_remessa, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
+              valor_pago, dt_retorno, dt_pagamento
+       FROM terc_retornos
+       WHERE id_empresa=? AND idempotency_key=?
+       ORDER BY id_retorno ASC LIMIT 1`
+    ).bind(id_empresa, idempKey).first<any>();
+    if (existing) {
+      logTenant(c, 'retorno.create.idempotent-hit', {
+        idempKey: idempKey.slice(0, 12) + '...', id_retorno: existing.id_retorno,
+      });
+      return c.json(ok({
+        id: existing.id_retorno,
+        id_retorno: existing.id_retorno,
+        id_remessa: existing.id_remessa,
+        qtd_total: existing.qtd_total,
+        qtd_boa: existing.qtd_boa,
+        qtd_refugo: existing.qtd_refugo,
+        qtd_conserto: existing.qtd_conserto,
+        valor_pago: existing.valor_pago,
+        dt_retorno: existing.dt_retorno,
+        dt_pagamento: existing.dt_pagamento,
+        idempotent: true,
+      }));
+    }
+  }
+
   if (!b.id_remessa || !b.dt_retorno) return fail('id_remessa e dt_retorno são obrigatórios');
   const idRem = toInt(b.id_remessa);
 
@@ -3998,12 +4042,45 @@ app.post('/terc/retornos', async (c) => {
     : itensValid.reduce((a, x) => a + x.valor, 0);
 
   // ---- INSERT cabeçalho ----
-  const r = await c.env.DB.prepare(`
-    INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
-                               valor_pago, dt_pagamento, observacao, criado_por, id_empresa)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(idRem, b.dt_retorno, totQtd, totBoa, totRef, totCon,
-      totValor, b.dt_pagamento || null, b.observacao || null, getUser(c), id_empresa).run();
+  // HOTFIX 0067 — grava idempotency_key + try/catch para corrida
+  let r: any;
+  try {
+    r = await c.env.DB.prepare(`
+      INSERT INTO terc_retornos (id_remessa, dt_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto,
+                                 valor_pago, dt_pagamento, observacao, criado_por, id_empresa, idempotency_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(idRem, b.dt_retorno, totQtd, totBoa, totRef, totCon,
+        totValor, b.dt_pagamento || null, b.observacao || null, getUser(c), id_empresa, idempKey).run();
+  } catch (e: any) {
+    const msg = String(e?.message || e).toLowerCase();
+    if (idempKey && (msg.includes('unique') || msg.includes('constraint'))) {
+      // Corrida: outra request paralela criou o retorno com a mesma chave.
+      const found: any = await c.env.DB.prepare(
+        `SELECT id_retorno, qtd_total, qtd_boa, qtd_refugo, qtd_conserto, valor_pago,
+                dt_retorno, dt_pagamento
+         FROM terc_retornos
+         WHERE id_empresa=? AND idempotency_key=?
+         ORDER BY id_retorno ASC LIMIT 1`
+      ).bind(id_empresa, idempKey).first();
+      if (found) {
+        logTenant(c, 'retorno.create.race-detected', { idempKey: idempKey.slice(0, 12) + '...' });
+        return c.json(ok({
+          id: found.id_retorno,
+          id_retorno: found.id_retorno,
+          id_remessa: idRem,
+          qtd_total: found.qtd_total,
+          qtd_boa: found.qtd_boa,
+          qtd_refugo: found.qtd_refugo,
+          qtd_conserto: found.qtd_conserto,
+          valor_pago: found.valor_pago,
+          dt_retorno: found.dt_retorno,
+          dt_pagamento: found.dt_pagamento,
+          idempotent: true,
+        }));
+      }
+    }
+    throw e;
+  }
   const idRet = r.meta.last_row_id as number;
 
   // ---- INSERT por item retornado + grade do item ----
