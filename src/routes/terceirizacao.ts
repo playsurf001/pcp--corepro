@@ -2143,15 +2143,39 @@ app.post('/terc/remessas', async (c) => {
 
   if (idempKey) {
     // Já processamos essa chave? Devolve o resultado existente.
-    // JOIN com terc_terceirizados só para consistência com o payload de resposta original.
+    //
+    // HOTFIX 0068 — CORREÇÃO DO FALSO POSITIVO "Registro duplicado nesta empresa".
+    //
+    // Bug encontrado no HOTFIX 0066: no caminho multi-CTRL (remessa com N itens),
+    // o helper persistirRemessaUnitaria era chamado N vezes com o MESMO idempKey.
+    // A 1ª iteração inseria em terc_remessas com sucesso; a 2ª iteração violava
+    // o UNIQUE `ux_remessas_idem(id_empresa, idempotency_key)`, o catch buscava
+    // a remessa da 1ª iteração e retornava o mesmo id_remessa. Depois, o INSERT
+    // em terc_remessa_grade(id_remessa, tamanho) do 2º item colidia com o mesmo
+    // par (id_remessa, tamanho) já gravado no 1º item, disparando UNIQUE
+    // constraint failed em terc_remessa_grade e o handler global mostrava
+    // "Registro duplicado nesta empresa." — bloqueando remessas legítimas.
+    //
+    // Solução mínima:
+    //   • No caminho 1 item: grava idempotency_key = idempKey (inalterado).
+    //   • No caminho multi-item: grava idempotency_key = `${idempKey}#${i}`
+    //     para cada CTRL do lote — chaves distintas, sem colidir no UNIQUE.
+    //   • O SELECT preventivo (aqui) usa LIKE `${idempKey}%` para casar tanto
+    //     a chave sem sufixo (1 item) quanto todas as chaves derivadas do lote.
+    //
+    // Preserva a proteção contra duplo POST: se o cliente reenviar o MESMO UUID,
+    // o SELECT casa todas as remessas já criadas e devolve resposta idempotente.
+    // Não altera dados existentes. Não muda regra de negócio.
     const existing = await c.env.DB.prepare(
       `SELECT id_remessa, num_controle, qtd_total, valor_total, preco_unit, tempo_peca,
               dt_previsao, prazo_dias, status, lote_remessa_id
        FROM terc_remessas
-       WHERE id_empresa=? AND idempotency_key=?
+       WHERE id_empresa=?
+         AND idempotency_key IS NOT NULL
+         AND (idempotency_key = ? OR idempotency_key LIKE ?)
        ORDER BY id_remessa ASC
        LIMIT 500`
-    ).bind(id_empresa, idempKey).all<any>();
+    ).bind(id_empresa, idempKey, idempKey + '#%').all<any>();
 
     if (existing.results && existing.results.length > 0) {
       const rows = existing.results;
@@ -2301,8 +2325,17 @@ app.post('/terc/remessas', async (c) => {
     //    Garante que multi-CTRL NUNCA usa a OP do formulário global como fonte
     //    de verdade — cada remessa carrega a OP do seu próprio item.
     num_op_remessa?: string | null;
+    // HOTFIX 0068 — idempotency_key derivada opcional (só usada no caminho multi-CTRL).
+    // Quando ausente, o helper usa a idempKey global do endpoint (caminho 1 item).
+    // Quando presente, sobrescreve para permitir chaves distintas por CTRL no lote,
+    // evitando UNIQUE constraint failed em ux_remessas_idem.
+    idempotency_key_override?: string | null;
   }): Promise<{ id_remessa: number; num_controle: number; dt_previsao: string; prazo_dias: number }> {
     const { item: head, num_controle, lote_remessa_id, qtd_total, valor_total, tempo_max } = opts;
+    // HOTFIX 0068 — resolve qual idempotency_key vai para o INSERT
+    const idempKeyForInsert = (opts.idempotency_key_override !== undefined)
+      ? opts.idempotency_key_override
+      : idempKey;
 
     // 🛡️ HOTFIX 0048 — Resolver OP do header da remessa:
     //  1) Se chamador passou num_op_remessa explícito → usa
@@ -2355,19 +2388,19 @@ app.post('/terc/remessas', async (c) => {
           dt_saida, b.dt_envio || null, b.dt_inicio || null, dt_prev,
           diasFinal, tempo_max, efic, pess, min_dia,
           status_inicial, 'NaoFaturado', b.modo || 'basico', b.observacao || null, getUser(c), id_empresa,
-          lote_remessa_id, idempKey).run();
+          lote_remessa_id, idempKeyForInsert).run();
     } catch (e: any) {
       // Race: outra request com a mesma idempKey já inseriu. Buscamos e devolvemos.
       const msg = String(e?.message || e).toLowerCase();
-      if (idempKey && (msg.includes('unique') || msg.includes('constraint'))) {
+      if (idempKeyForInsert && (msg.includes('unique') || msg.includes('constraint'))) {
         const found: any = await c.env.DB.prepare(
           `SELECT id_remessa, num_controle, dt_previsao, prazo_dias
            FROM terc_remessas
            WHERE id_empresa=? AND idempotency_key=?
            ORDER BY id_remessa ASC LIMIT 1`
-        ).bind(id_empresa, idempKey).first();
+        ).bind(id_empresa, idempKeyForInsert).first();
         if (found) {
-          logTenant(c, 'remessa.create.race-detected', { idempKey: idempKey.slice(0, 12) + '...' });
+          logTenant(c, 'remessa.create.race-detected', { idempKey: String(idempKeyForInsert).slice(0, 20) + '...' });
           return {
             id_remessa: found.id_remessa as number,
             num_controle: found.num_controle as number,
@@ -2519,6 +2552,11 @@ app.post('/terc/remessas', async (c) => {
       num_op_remessa: (typeof it.num_op === 'string' && it.num_op.trim())
         ? it.num_op.trim()
         : (b.num_op && String(b.num_op).trim() ? String(b.num_op).trim() : null),
+      // HOTFIX 0068 — chave derivada única por CTRL do lote, evita UNIQUE violation
+      // em ux_remessas_idem quando o mesmo POST cria N remessas. O SELECT preventivo
+      // do endpoint reconhece essas chaves via LIKE `${idempKey}%` — reenvios do
+      // mesmo POST continuam devolvendo resposta idempotente com TODOS os CTRLs.
+      idempotency_key_override: idempKey ? `${idempKey}#${i}` : null,
     });
 
     await persistirItem(idR, it, 0);
